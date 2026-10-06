@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -83,7 +83,7 @@ describe("admin claim codes", () => {
     const first = await session(app);
     expect(first.user.isAdmin).toBe(false);
 
-    const { code } = app.host.adminClaimCode();
+    const { code } = app.host.adminClaimCode()!;
     const claimed = await claim(app, first.cookie, code);
     expect(claimed.statusCode).toBe(200);
     expect((claimed.json() as { isAdmin: boolean }).isAdmin).toBe(true);
@@ -92,17 +92,62 @@ describe("admin claim codes", () => {
     expect((await claim(app, second.cookie, code)).statusCode).toBe(403);
   });
 
-  it("are refused on a node without a host token, and forgotten by an Emergency Reset", async () => {
+  it("aren't minted on a node without a host token, and are forgotten by an Emergency Reset", async () => {
     const plain = await makeApp(undefined, { hostToken: undefined });
-    await session(plain); // the first session takes firstUser's grant
-    const other = await session(plain);
-    expect((await claim(plain, other.cookie, plain.host.adminClaimCode().code)).statusCode).toBe(403);
+    expect(plain.host.adminClaimCode()).toBeNull();
 
     const app = await makeApp({ killSwitch: { enabled: true } });
-    const { code } = app.host.adminClaimCode();
+    const { code } = app.host.adminClaimCode()!;
     expect((await app.host.emergencyReset()).complete).toBe(true);
     const after = await session(app);
     expect((await claim(app, after.cookie, code)).statusCode).toBe(403);
+  });
+});
+
+describe("admin claim codes and who presents them", () => {
+  it("can't make a banned person admin, and aren't spent trying", async () => {
+    const app = await makeApp();
+    const admin = await session(app);
+    await claim(app, admin.cookie, app.host.adminClaimCode()!.code);
+    const banned = await session(app);
+    await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${banned.user.id}`,
+      headers: { cookie: admin.cookie },
+      payload: { banned: true },
+    });
+
+    const { code } = app.host.adminClaimCode()!;
+    expect((await claim(app, banned.cookie, code)).statusCode).toBe(403);
+    const other = await session(app);
+    expect((await claim(app, other.cookie, code)).statusCode).toBe(200);
+  });
+
+  it("are spent by a browser that was already admin, so nobody else can use them", async () => {
+    const app = await makeApp();
+    const admin = await session(app);
+    await claim(app, admin.cookie, app.host.adminClaimCode()!.code);
+
+    const { code } = app.host.adminClaimCode()!;
+    expect((await claim(app, admin.cookie, code)).statusCode).toBe(200);
+    const other = await session(app);
+    expect((await claim(app, other.cookie, code)).statusCode).toBe(403);
+  });
+
+  it("can be revoked by the screen that showed them", async () => {
+    const app = await makeApp();
+    const { code } = app.host.adminClaimCode()!;
+    app.host.revokeAdminClaimCode(code);
+    const someone = await session(app);
+    expect((await claim(app, someone.cookie, code)).statusCode).toBe(403);
+  });
+
+  it("make a waiting person an approved admin", async () => {
+    const app = await makeApp({ access: { joinPolicy: "approval" } });
+    const waiting = await session(app);
+    expect(waiting.user.pending).toBe(true);
+    const claimed = await claim(app, waiting.cookie, app.host.adminClaimCode()!.code);
+    expect(claimed.json()).toMatchObject({ isAdmin: true, pending: false });
   });
 });
 
@@ -125,13 +170,32 @@ describe("LoamApp.host", () => {
       people: { total: 2, online: 0, pending: 0, admins: 0 },
       quarantined: 0,
       logLevel: "info",
+      resets: 0,
+      resetting: false,
     });
+  });
+
+  it("counts Emergency Resets and deletes the diagnostics files the screen wrote", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-host-api-test-"));
+    const app = await buildApp({ dataDir, logger: false, hostToken: HOST_TOKEN, maxNewIdentitiesPerWindow: 1_000_000 });
+    cleanups.push(async () => {
+      await app.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+    const report = join(dataDir, "loam-diagnostics-2026-10-06T09-00-00-000Z.txt");
+    writeFileSync(report, "LOAM diagnostics\n");
+    writeFileSync(join(dataDir, "keep-me.txt"), "not ours\n");
+
+    expect((await app.host.emergencyReset()).complete).toBe(true);
+    expect(app.host.status()).toMatchObject({ resets: 1, resetting: false });
+    expect(existsSync(report)).toBe(false);
+    expect(existsSync(join(dataDir, "keep-me.txt"))).toBe(true);
   });
 
   it("changes config exactly as the admin route does, refusals included", async () => {
     const app = await makeApp();
     const admin = await session(app);
-    await claim(app, admin.cookie, app.host.adminClaimCode().code);
+    await claim(app, admin.cookie, app.host.adminClaimCode()!.code);
 
     const renamed = app.host.updateConfig({ node: { name: "Library" } });
     expect(renamed.ok).toBe(true);
@@ -153,6 +217,21 @@ describe("LoamApp.host", () => {
       ok: false,
       error: "Invalid config update request",
     });
+
+    // The assistant may not take over a person's id, through either door.
+    const hijack = { llm: { ollama: { enabled: true, botId: admin.user.id } } };
+    const routeHijack = await app.server.inject({
+      method: "PATCH",
+      url: "/api/admin/config",
+      headers: { cookie: admin.cookie },
+      payload: hijack,
+    });
+    expect(routeHijack.statusCode).toBe(400);
+    expect(app.host.updateConfig(hijack)).toEqual({ ok: false, error: (routeHijack.json() as { error: string }).error });
+
+    // A link code can't be added by a save.
+    const linked = app.host.updateConfig({ sync: { peers: [{ url: "http://192.0.2.4:3000", linkCode: "abcdefghijklmnop" }] } });
+    expect(linked.ok && linked.value.sync.peers).toEqual([{ url: "http://192.0.2.4:3000" }]);
   });
 
   it("lists people and makes one an admin, approving them first if they were waiting", async () => {
@@ -168,6 +247,11 @@ describe("LoamApp.host", () => {
     const made = app.host.makeAdmin(waiting.user.id);
     expect(made).toMatchObject({ ok: true, value: { id: waiting.user.id, isAdmin: true, pending: false } });
     expect((await session(app, waiting.cookie)).user).toMatchObject({ isAdmin: true, pending: false });
+    // Saved, not just changed in memory.
+    expect(app.store.loadUsers().find((user) => user.id === waiting.user.id)).toMatchObject({
+      isAdmin: true,
+      pending: false,
+    });
 
     expect(app.host.makeAdmin("user.0000000000000000")).toEqual({ ok: false, error: "User does not exist" });
   });
@@ -175,7 +259,7 @@ describe("LoamApp.host", () => {
   it("refuses to make a banned person an admin", async () => {
     const app = await makeApp();
     const admin = await session(app);
-    await claim(app, admin.cookie, app.host.adminClaimCode().code);
+    await claim(app, admin.cookie, app.host.adminClaimCode()!.code);
     const banned = await session(app);
     const ban = await app.server.inject({
       method: "PATCH",

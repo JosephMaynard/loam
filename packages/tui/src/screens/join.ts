@@ -128,36 +128,72 @@ export function pickJoinAddress(view: View): void {
   });
 }
 
-/** Open LOAM in this computer's browser, already admin; offer a QR for a phone too. */
+/**
+ * Open LOAM in this computer's browser, already admin. A phone can be made admin instead, but only on a
+ * second, deliberate key: its QR is drawn on the same screen strangers scan to join, so it isn't shown
+ * unasked, it says what it does, and its code is retired as soon as the dialog closes.
+ */
 export async function openAsAdmin(view: View): Promise<void> {
   const { host, system } = view.options;
   const key = host.transportPublicKey();
   const fragment = (code: string) => `#${key ? `k=${key}&` : ""}a=${code}`;
-  const local = `${view.localUrl()}${fragment(host.adminClaimCode().code)}`;
+  const localCode = host.adminClaimCode();
+  if (!localCode) {
+    view.toast("This node can't hand out admin links (it was started without a host token).", "error");
+    return;
+  }
+  const local = `${view.localUrl()}${fragment(localCode.code)}`;
   const opened = await system.openUrl(local);
 
-  const phoneLink = `${view.joinUrl()}${fragment(host.adminClaimCode().code)}`;
-  const qr = qrBlock(phoneLink);
+  let phone: { code: string; link: string; qr: QrBlock | undefined } | undefined;
   view.open({
     kind: "panel",
     title: "Open as admin",
-    lines: (width, height) =>
-      withQrIfItFits(
+    get footer() {
+      return phone ? "Esc to close (the phone's code stops working)" : "p make a phone admin instead · Esc to close";
+    },
+    lines: (width, height) => {
+      const intro = opened
+        ? paragraph("LOAM is opening in your browser, signed in as admin. The link works once, for 10 minutes.", width, { fg: "green" })
+        : [
+            ...paragraph("Couldn't open a browser on this computer. Open this on this computer instead (it works once, for 10 minutes):", width, { fg: "yellow" }),
+            ...breakLink(local, width).map((piece) => text(piece, { fg: "cyan" })),
+          ];
+      if (!phone) {
+        return [...intro, [], ...paragraph("Or press p to show a QR code that makes a phone admin.", width, { dim: true })];
+      }
+      return withQrIfItFits(
         [
-          ...(opened
-            ? paragraph("LOAM is opening in your browser, signed in as admin.", width, { fg: "green" })
-            : [
-                ...paragraph("Couldn't open a browser on this computer. Open this on this computer instead:", width, { fg: "yellow" }),
-                ...breakLink(local, width).map((piece) => text(piece, { fg: "cyan" })),
-              ]),
+          ...intro,
           [],
-          ...paragraph("To make a phone admin instead, scan this with it. Each link works once, for 10 minutes.", width, { dim: true }),
+          ...paragraph(
+            "Anyone who scans this becomes an admin, and an admin can't be removed. It works once, and stops working when you close this.",
+            width,
+            { fg: "yellow", bold: true },
+          ),
         ],
-        qr,
-        phoneLink,
+        phone.qr,
+        phone.link,
         width,
         height,
-      ),
+      );
+    },
+    onKey(pressed) {
+      if (phone || !isChar(pressed, "p")) {
+        return false;
+      }
+      const code = host.adminClaimCode();
+      if (code) {
+        const link = `${view.joinUrl()}${fragment(code.code)}`;
+        phone = { code: code.code, link, qr: qrBlock(link) };
+      }
+      return true;
+    },
+    onClose() {
+      if (phone) {
+        host.revokeAdminClaimCode(phone.code);
+      }
+    },
   });
 }
 

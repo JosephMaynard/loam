@@ -23,19 +23,19 @@ From a phone or laptop on the same Wi-Fi or hotspot, scan the QR code (or open t
 
 In a terminal, `loam` takes over the window (like `top`; your scrollback comes back when it stops) and keeps the join QR on screen. Five screens are a number key away, and `?` lists every key:
 
-1. **Join**: the QR code and the addresses. `o` opens LOAM in your browser as the network's admin (or shows a QR that makes a phone admin), `a` picks which network address to advertise when the computer has more than one, `h` hides the QR.
+1. **Join**: the QR code and the addresses. `o` opens LOAM in your browser as the network's admin (and, if you then press `p`, shows a QR that makes a phone admin), `a` picks which network address to advertise when the computer has more than one, `h` hides the QR.
 2. **Activity**: requests and server messages as they happen. `e` shows only problems, space pauses.
 3. **People**: who has joined and who is online. `m` makes someone an admin.
 4. **Settings**: the network's name, security profile, who can join, encryption, how long messages last, and more, changed live. Also a link code for joining another LOAM network, Emergency Reset, and what to remember for next time (port, kiosk mode).
-5. **Debug**: versions, how the node is set up, recent problems, detailed logging, and a diagnostics file to attach to a bug report (it leaves out names, messages, keys and addresses).
+5. **Debug**: versions, how the node is set up, recent problems, detailed logging, and a diagnostics file to attach to a bug report (it holds no messages or names, and network addresses, hostnames, folder paths and ids are blanked out).
 
 Messages, approvals and moderation happen in the web app.
 
-**Becoming admin.** Nobody becomes admin by being first to open a new network. Press `o` on the Join screen: your browser opens LOAM already signed in as admin, using a link that works once, for 10 minutes. Or make anyone who has joined an admin from the People screen.
+**Becoming admin.** Nobody becomes admin by being first to open a new network. Press `o` on the Join screen: your browser opens LOAM already signed in as admin, using a link that works once, for 10 minutes. Or make anyone who has joined an admin from the People screen, which shows the end of each person's id and flags names that two people share.
 
-**Kiosk mode.** Press `k` (or start with `--kiosk`) and choose a password: the screen then shows only the join QR, the network's name and how many devices are connected, and every key but Enter (unlock) is ignored, `q` and Ctrl-C included. Settings can make it start locked every time. It locks this screen, not the computer: anyone at an unlocked keyboard can still close the window or open another terminal, so for a computer left alone, run `loam` under its own user account.
+**Kiosk mode.** Press `k` (or start with `--kiosk`) and choose a password: the screen then shows only the join QR, the network's name and how many devices are connected, and every key does nothing but offer the unlock prompt (`q` and Ctrl-C included). Settings can make it start locked every time. On a network that approves newcomers, the kiosk's QR lets people straight in, as the host phone's does. It locks this screen, not the computer: anyone at an unlocked keyboard can still close the window or open another terminal. For a computer left alone, run it as `exec loam --kiosk` (so closing it doesn't leave a shell behind) under its own user account.
 
-**Without a terminal** (a service, or output sent to a file), or with `--plain`, `loam` prints the addresses and the QR code instead, plus a one-time admin link while nobody is admin. Settings chosen on the terminal screen that apply at start-up (the port, the join address, kiosk mode) are kept in `cli.json` in the data folder; flags and environment variables win over them.
+**Without a terminal** (a service, or output sent to a file), or with `--plain`, `loam` prints the addresses and the QR code instead. While nobody is admin it keeps a one-time admin link on hand, renewed every 10 minutes: printed in a terminal, otherwise written to `admin-link.txt` in the data folder, readable only by you, and never to the log. Settings chosen on the terminal screen that apply at start-up (the port, the join address, kiosk mode) are kept in `cli.json` in the data folder; flags and environment variables win over them.
 
 ## Options
 

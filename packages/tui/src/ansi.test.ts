@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { clean, padEnd, plain, renderLine, textWidth, truncate } from "./ansi.js";
+import { clean, lineWidth, padEnd, plain, renderLine, text, textWidth, truncate } from "./ansi.js";
 
 describe("clean", () => {
   it("removes escape sequences, control characters and bidi overrides", () => {
     expect(clean("ada\x1b]0;pwned\x07lovelace")).toBe("ada]0;pwnedlovelace");
-    expect(clean("a\x1b[2Jb\u009bc‮d⁦e\x7f")).toBe("a[2Jbcde");
+    expect(clean("a\x1b[2Jb\u009bc\u202ed\u2066e\x7f")).toBe("a[2Jbcde");
     expect(clean("tab\there")).toBe("tab here");
+    expect(clean("a\u200eb\u200fc\u061cd")).toBe("abcd");
   });
 });
 
@@ -17,6 +18,9 @@ describe("widths", () => {
     expect(textWidth("❤️")).toBe(2);
     expect(textWidth("日本")).toBe(4);
     expect(textWidth("é")).toBe(1);
+    expect(textWidth("a\u200bb\u00ad\ufeff")).toBe(2);
+    expect(textWidth("\u{1b000}\u2329")).toBe(4);
+    expect(lineWidth(text("a\x1b[2Jb"))).toBe(5);
   });
 
   it("cuts with an ellipsis and pads to an exact width", () => {

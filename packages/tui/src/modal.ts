@@ -45,8 +45,14 @@ export function editField(field: TextField, key: Key): "submit" | "cancel" | und
         field.value = chars.join("");
       }
       return undefined;
-    case "char": {
-      const added = [...(key.char ?? "")];
+    case "char":
+    case "paste": {
+      // Pasted text goes in as text: line breaks and other control characters are dropped.
+      const typed = key.name === "paste" ? (key.text ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "") : (key.char ?? "");
+      let added = [...typed];
+      if (key.name === "paste" && field.maxLength !== undefined) {
+        added = added.slice(0, Math.max(0, field.maxLength - chars.length));
+      }
       if (field.maxLength !== undefined && chars.length + added.length > field.maxLength) {
         return undefined;
       }
@@ -78,7 +84,13 @@ export function fieldLine(field: TextField, width: number): Line {
   ];
 }
 
-export type ConfirmModal = {
+/** What every dialog may carry. */
+type ModalBase = {
+  /** May be shown while the screen is locked in kiosk mode (the unlock and password dialogs only). */
+  whileLocked?: boolean;
+};
+
+export type ConfirmModal = ModalBase & {
   kind: "confirm";
   title: string;
   body: string[];
@@ -87,7 +99,7 @@ export type ConfirmModal = {
   onYes(): void;
 };
 
-export type InputModal = {
+export type InputModal = ModalBase & {
   kind: "input";
   title: string;
   body: string[];
@@ -98,7 +110,7 @@ export type InputModal = {
   onCancel?(): void;
 };
 
-export type ChoiceModal = {
+export type ChoiceModal = ModalBase & {
   kind: "choice";
   title: string;
   body: string[];
@@ -107,13 +119,17 @@ export type ChoiceModal = {
   onPick(index: number): void;
 };
 
-export type PanelModal = {
+export type PanelModal = ModalBase & {
   kind: "panel";
   title: string;
   /** The content, or a function that lays it out for the room there is (a QR only when it fits whole). */
   lines: Line[] | ((width: number, height: number) => Line[]);
   /** Shown at the bottom; Escape or Enter closes the panel. */
   footer?: string;
+  /** A key of the panel's own (return true when handled; the panel stays open). */
+  onKey?(key: Key): boolean;
+  /** Called however the panel goes away (closed, replaced, the screen locked). */
+  onClose?(): void;
 };
 
 export type Modal = ConfirmModal | InputModal | ChoiceModal | PanelModal;
@@ -128,6 +144,9 @@ export async function modalKey(modal: Modal, key: Key): Promise<boolean> {
       }
       return isChar(key, "n") || key.name === "escape" || key.name === "enter";
     case "panel":
+      if (modal.onKey?.(key)) {
+        return false;
+      }
       return key.name === "escape" || key.name === "enter" || isChar(key, "q");
     case "choice":
       if (key.name === "up") {
@@ -188,9 +207,12 @@ export function modalLines(modal: Modal, width: number, height: number): Line[] 
       lines.push(modal.error ? text(modal.error, { fg: "red" }) : []);
       lines.push(text("Enter to confirm · Esc to cancel", { dim: true }));
       break;
-    case "choice":
-      modal.options.forEach((option, index) => {
-        const chosen = index === modal.selected;
+    case "choice": {
+      // As many options as fit, scrolled to keep the chosen one in view.
+      const room = Math.max(1, height - lines.length - 2);
+      const first = Math.max(0, Math.min(modal.selected - Math.floor(room / 2), modal.options.length - room));
+      modal.options.slice(first, first + room).forEach((option, offset) => {
+        const chosen = first + offset === modal.selected;
         lines.push([
           { text: chosen ? "› " : "  ", style: { fg: "cyan" } },
           { text: padEnd(option.label, Math.min(inner - 2, 28)), style: chosen ? { inverse: true } : undefined },
@@ -200,6 +222,7 @@ export function modalLines(modal: Modal, width: number, height: number): Line[] 
       lines.push([]);
       lines.push(text("↑↓ choose · Enter to pick · Esc to cancel", { dim: true }));
       break;
+    }
     case "panel":
       lines.push(...(typeof modal.lines === "function" ? modal.lines(inner, Math.max(0, height - 4)) : modal.lines));
       lines.push([]);

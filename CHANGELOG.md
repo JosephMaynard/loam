@@ -16,6 +16,8 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 - **Kiosk mode** for a computer left out for people to join from: only the join QR, the network's name
   and the number of connected devices show until a password is entered. Press `k`, or start with
   `loam --kiosk`; Settings can make it start locked every time. It locks the screen, not the computer.
+- **Emergency Reset deletes diagnostics files** the terminal view wrote to the data folder, and the
+  terminal view forgets its log of who connected.
 - **Linking networks both ways, with a link code.** An admin (web admin sync settings) or the host phone
   (share screen) can show a "Link another LOAM node" code. It works once, for 10 minutes. Another LOAM
   phone scans it in setup and the two networks then share their public channels both ways, with nothing
@@ -100,7 +102,7 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 ### Changed
 - **`loamnet` no longer makes the first person to open a new network its admin.** As on the Android
   host, admin comes from the host's own screen: `o` in the terminal view, the People screen, or (without a
-  terminal) a one-time admin link printed while nobody is admin. The `admin.bootstrap` setting no longer
+  terminal) a one-time admin link kept in `admin-link.txt` in the data folder while nobody is admin. The `admin.bootstrap` setting no longer
   applies to a node run with `loamnet`.
 - **`loam` without a terminal, or with `--plain`, prints no line per request** (`--verbose` brings them
   back), so its QR code stays visible.

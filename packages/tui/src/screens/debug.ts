@@ -1,8 +1,11 @@
 /**
  * Debug: what this node is running on and how it is set up, recent problems, a switch for detailed logging,
- * and a diagnostics file to attach to a bug report. The file leaves out names, messages, keys and network
- * addresses.
+ * and a diagnostics file to attach to a bug report. The file leaves out names, messages and keys (none of
+ * which the log holds) and redacts what could identify people or the machine: addresses, hostnames, folder
+ * paths and ids (`redact`).
  */
+import { isIP } from "node:net";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { type Line, padEnd, text } from "../ansi.js";
@@ -11,11 +14,29 @@ import type { LogEntry } from "../log.js";
 import type { Screen, View } from "../types.js";
 import { clock, isProblem } from "./activity.js";
 
-const ADDRESS = /\b(?:\d{1,3}\.){3}\d{1,3}\b|\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}\b/gi;
+/** Candidate address tokens: anything made of hex digits, dots, colons, a zone id and brackets. */
+const ADDRESS_TOKEN = /\[?[0-9A-Fa-f:.]*[:.][0-9A-Fa-f:.]*(?:%[\w.-]+)?\]?/g;
 
-/** `text` with IPv4 and IPv6 addresses replaced. */
-export function withoutAddresses(value: string): string {
-  return value.replace(ADDRESS, "<address>");
+/**
+ * `text` without what could identify people or this machine: IPv4 and IPv6 addresses (every form `net.isIP`
+ * accepts, a zone id too), the host of any URL, the data folder and home folder, and ids in request paths.
+ * Times like `12:34:56` and version numbers are left alone (they aren't addresses).
+ */
+export function redact(value: string, folders: string[] = []): string {
+  let out = value;
+  for (const folder of folders.filter(Boolean).sort((a, b) => b.length - a.length)) {
+    out = out.split(folder).join("<folder>");
+  }
+  out = out.replace(/\b(https?|wss?):\/\/[^\s/"'<>]+/g, "$1://<host>");
+  out = out.replace(ADDRESS_TOKEN, (token) => {
+    const bare = token.replace(/^\[|\]$/g, "").replace(/%[\w.-]+$/, "");
+    return isIP(bare) ? "<address>" : token;
+  });
+  // Ids in paths (`/api/dms/user.1a2b…`, `/api/attachments/att_…`): keep the route, drop the id.
+  out = out.replace(/(\/api\/[a-z-]+(?:\/[a-z-]+)*)\/[^\s/?#]*[._][^\s/?#]*/g, "$1/<id>");
+  // LOAM's own ids anywhere else (an attachment's file name works like a link to the file).
+  out = out.replace(/\b(?:user|mesh|llm|sealed)\.[A-Za-z0-9_-]+|\b(?:att|avt|msg|react|seal|chan)_[A-Za-z0-9_-]+/g, "<id>");
+  return out;
 }
 
 function facts(view: View): [string, string][] {
@@ -60,7 +81,7 @@ export function diagnostics(view: View): string {
     lines.push("  none");
   }
   for (const entry of problems) {
-    lines.push(`  ${new Date(entry.time).toISOString()} ${withoutAddresses(problemText(entry))}`);
+    lines.push(`  ${new Date(entry.time).toISOString()} ${redact(problemText(entry), [view.options.launch.dataDir, homedir()])}`);
   }
   return `${lines.join("\n")}\n`;
 }

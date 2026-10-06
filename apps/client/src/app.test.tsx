@@ -4,6 +4,7 @@ import { render } from "preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./app";
+import { captureAdminClaimCode, takeAdminClaimCode } from "./lib/admin-link";
 import { CONFIRMED_USER_KEY } from "./lib/identity";
 import { destroyDatabase, getAllRecords, putRecord, putRecords, resetLocalStoreForTests } from "./lib/local-store";
 import { resetTransportStateForTests } from "./lib/transport";
@@ -36,17 +37,28 @@ interface NodeOptions {
   /** Everything else content-shaped (channels, users, messages) never answers unless set here. */
   content?: boolean;
   searchResults?: Message[];
+  /** `POST /api/admin/claim`: the status to answer (200 = the caller becomes admin). */
+  claimStatus?: number;
 }
 
 function stubNode(options: NodeOptions = {}) {
-  const currentUser = options.currentUser ?? me;
+  let currentUser = options.currentUser ?? me;
   const bootstrap = {
     joinUrl: "http://node.test/",
     websocketPath: "/ws",
     networkConfig: { transportEncryption: "off", nodeName: "Test node", enableDMs: true, enableReplies: true },
   };
-  const fetchMock = vi.fn(async (input: string) => {
+  const fetchMock = vi.fn(async (input: string, _init?: RequestInit) => {
     const url = String(input);
+    if (url === "/api/admin/claim") {
+      const status = options.claimStatus ?? 200;
+      if (status !== 200) {
+        return json({ error: "Invalid admin secret" }, status);
+      }
+      // Like the real node: the claim sticks, so later reads return the admin record.
+      currentUser = { ...currentUser, isAdmin: true, pending: false };
+      return json(currentUser);
+    }
     if (url === "/api/bootstrap") {
       return json(bootstrap);
     }
@@ -72,7 +84,7 @@ function stubNode(options: NodeOptions = {}) {
       return json([general]);
     }
     if (url === "/api/users") {
-      return json([me, troll]);
+      return json([currentUser.id === me.id ? currentUser : me, troll]);
     }
     return pending();
   });
@@ -254,5 +266,45 @@ describe("search results from a blocked author (review 2026-09-25 #3)", () => {
 
     expect(host.querySelector(".search-results")?.textContent).toContain("Message from a blocked user");
     expect(host.textContent).not.toContain("findable nasty words");
+  });
+});
+
+describe("the host terminal's one-time admin link", () => {
+  const CODE = "abcdefghijklmnopqrstuv";
+
+  function claims(fetchMock: ReturnType<typeof stubNode>) {
+    return fetchMock.mock.calls.filter(([url]) => url === "/api/admin/claim");
+  }
+
+  afterEach(() => {
+    takeAdminClaimCode();
+  });
+
+  it("claims admin with the code once at boot and shows the admin area", async () => {
+    window.history.replaceState(null, "", `/#a=${CODE}`);
+    captureAdminClaimCode();
+    const fetchMock = stubNode({ content: true });
+    const root = await boot("/channels");
+
+    expect(claims(fetchMock)).toHaveLength(1);
+    expect(JSON.parse(String(claims(fetchMock)[0]![1]?.body))).toEqual({ secret: CODE });
+    expect(root.textContent).toContain("Admin");
+  });
+
+  it("drops a refused code instead of presenting it again", async () => {
+    window.history.replaceState(null, "", `/#a=${CODE}`);
+    captureAdminClaimCode();
+    const fetchMock = stubNode({ claimStatus: 403 });
+    await boot("/channels");
+    expect(claims(fetchMock)).toHaveLength(1);
+    expect(takeAdminClaimCode()).toBeUndefined();
+  });
+
+  it("doesn't claim for a browser that is already admin", async () => {
+    window.history.replaceState(null, "", `/#a=${CODE}`);
+    captureAdminClaimCode();
+    const fetchMock = stubNode({ currentUser: { ...me, isAdmin: true } });
+    await boot("/channels");
+    expect(claims(fetchMock)).toHaveLength(0);
   });
 });

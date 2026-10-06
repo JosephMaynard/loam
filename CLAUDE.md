@@ -242,8 +242,9 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   claimer is an active admin. **`loamnet` mints a host token too** (`cli/bin/loam.js`), so it is always
   `hostDevice`: admin comes from the terminal UI's one-time claim codes (`admin-links.ts`: single-use,
   10 min, in memory, cleared by the kill switch; the claim route accepts one under `hostDevice`; the client
-  reads `#…&a=<code>` in `lib/admin-link.ts`), its People screen (`host.makeAdmin`), or plain mode's
-  printed admin link. The **host API** (`LoamApp.host`, `host-api.ts`) is in-process only (status, config
+  reads `#…&a=<code>` in `lib/admin-link.ts`; a banned caller can't use one, an admin caller spends it), its
+  People screen (`host.makeAdmin`), or plain mode's admin link (printed on a TTY, else `admin-link.txt`
+  0600 in the data dir, never the log; re-offered after a reset). The **host API** (`LoamApp.host`, `host-api.ts`) is in-process only (status, config
   via the shared `applyConfigUpdate`, `promoteUser`, link/invite/claim codes, join host, log level,
   Emergency Reset); never expose it over HTTP. The legacy demo users `user.1234`/`user.5678` are **deleted at boot** (their
   messages tombstoned via the normal delete path, sessions/identity tokens purged); a fresh node never

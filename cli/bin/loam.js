@@ -7,7 +7,7 @@
 // is the built-in node:sqlite (Node ≥22) — zero node-gyp; `--encrypt` opts into the optional native
 // SQLCipher driver.
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -137,9 +137,23 @@ if (requestedPort !== undefined) {
     process.exit(1);
   }
 } else {
-  // The port saved from the terminal UI is a preference like the default: step past it if it's taken.
-  const preferred = saved.port ?? 3000;
-  port = await findFreePort(preferred, listenHost);
+  // The port saved from the terminal UI is a preference like the default: step past it if it's taken. One
+  // this computer won't let us use at all (a port below 1024 without administrator rights) falls back to
+  // the default instead of stopping every start.
+  let preferred = saved.port ?? 3000;
+  try {
+    port = await findFreePort(preferred, listenHost);
+  } catch (error) {
+    if (saved.port === undefined) {
+      throw error;
+    }
+    console.log(
+      `The port saved in ${join(dataDir, "cli.json")} (${preferred}) can't be used here (${error?.code ?? error}), ` +
+        "so LOAM is using 3000 or the next free one. Change it on the Settings screen.",
+    );
+    preferred = 3000;
+    port = await findFreePort(preferred, listenHost);
+  }
   if (port === undefined) {
     console.error(`\nPorts ${preferred}–${preferred + 19} are all in use. Pick a free port:  loam --port <n>`);
     process.exit(1);
@@ -345,7 +359,8 @@ const {
 const system = processSystem();
 const savedJoinHost =
   saved.joinHost && system.lanAddresses().some((entry) => entry.address === saved.joinHost) ? saved.joinHost : undefined;
-const joinHost = process.env.LOAM_JOIN_HOST ?? savedJoinHost ?? firstLanIPv4();
+const envJoinHost = process.env.LOAM_JOIN_HOST;
+const joinHost = envJoinHost ?? savedJoinHost ?? firstLanIPv4();
 process.env.LOAM_JOIN_HOST = joinHost;
 const joinUrl = `http://${joinHost}:${port}`;
 
@@ -361,7 +376,9 @@ const verbose = args.includes("--verbose");
 const plainLogStream = {
   write(line) {
     if (verbose || !/"msg":"(incoming request|request completed)"/.test(line)) {
-      process.stdout.write(line);
+      // JSON escapes C0 control characters but not C1 ones (a request path can carry them); a terminal reading
+      // this output must never receive one.
+      process.stdout.write(line.replace(/[\u0080-\u009f]/g, ""));
     }
   },
 };
@@ -397,13 +414,16 @@ try {
 
 let tui;
 let stopping = false;
-/** Close the server and exit, once. */
+const originalConsoleError = console.error;
+/** Close the server and exit, once. A second Ctrl-C or SIGTERM while it closes stops at once. */
 async function shutdown(code = 0) {
   if (stopping) {
-    return;
+    process.exit(1);
   }
   stopping = true;
   tui?.stop();
+  // The terminal UI routed console output to its log; with the UI gone, errors go to the terminal again.
+  console.error = originalConsoleError;
   try {
     await app.close();
   } catch (error) {
@@ -423,7 +443,7 @@ if (useTui) {
   for (const [method, level] of [["log", "info"], ["info", "info"], ["warn", "warn"], ["error", "error"]]) {
     console[method] = (...parts) => logBook.note(level, parts.map(String).join(" "));
   }
-  if (savedJoinHost === undefined && saved.joinHost && !process.env.LOAM_JOIN_HOST) {
+  if (savedJoinHost === undefined && saved.joinHost && !envJoinHost) {
     logBook.note("warn", `The saved join address ${saved.joinHost} isn't on this computer now, so LOAM picked ${joinHost}.`);
   }
   tui = createTui({
@@ -486,19 +506,45 @@ function printPlain(app) {
     console.log("");
   }
 
-  // Until someone is admin, keep a fresh one-time admin link on hand (each lasts 10 minutes).
-  const printAdminLink = () => {
-    if (app.host.status().people.admins > 0) {
-      clearInterval(adminTimer);
+  // While nobody is admin (a new network, or again after an Emergency Reset), keep a one-time admin link on
+  // hand (each lasts 10 minutes). In a terminal it is printed. Without one (a service), it goes to a file only
+  // this user can read, never to the log: a journal or log shipper is read by more people than this.
+  const linkFile = join(dataDir, "admin-link.txt");
+  let current;
+  const offerAdminLink = () => {
+    let status;
+    try {
+      status = app.host.status();
+    } catch {
       return;
     }
-    const { code } = app.host.adminClaimCode();
+    if (status.people.admins > 0) {
+      if (current) {
+        rmSync(linkFile, { force: true });
+        current = undefined;
+      }
+      return;
+    }
+    if (current && current.expiresAt - Date.now() > 60_000 && current.resets === status.resets) {
+      return;
+    }
+    const minted = app.host.adminClaimCode();
+    if (!minted) {
+      return;
+    }
     const key = app.host.transportPublicKey();
-    console.log("Nobody is admin yet. Open this link to become admin (it works once, for 10 minutes):");
-    console.log(`  ${joinUrl}#${key ? `k=${key}&` : ""}a=${code}`);
-    console.log("");
+    const link = `${joinUrl}#${key ? `k=${key}&` : ""}a=${minted.code}`;
+    current = { expiresAt: minted.expiresAt, resets: status.resets };
+    if (process.stdout.isTTY) {
+      console.log("Nobody is admin yet. Open this link to become admin (it works once, for 10 minutes):");
+      console.log(`  ${link}`);
+      console.log("");
+      return;
+    }
+    writeFileSync(linkFile, `${link}\n`, { mode: 0o600 });
+    console.log(`Nobody is admin yet. A one-time admin link (renewed every 10 minutes) is in ${linkFile}`);
   };
-  const adminTimer = setInterval(printAdminLink, 10 * 60_000);
+  const adminTimer = setInterval(offerAdminLink, 30_000);
   adminTimer.unref();
-  printAdminLink();
+  offerAdminLink();
 }

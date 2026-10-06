@@ -23,6 +23,7 @@ function fakeHost(overrides: Partial<{ users: HostUser[]; profile: LoamConfig["s
     llm: { ollama: { enabled: false, model: "llama3.2" } },
   } as unknown as LoamConfig;
   const users: HostUser[] = overrides.users ?? [];
+  let minted = 0;
   const status: HostStatus = {
     nodeName: "Field kitchen",
     version: "0.6.0",
@@ -37,9 +38,15 @@ function fakeHost(overrides: Partial<{ users: HostUser[]; profile: LoamConfig["s
     people: { total: users.length, online: 0, pending: 0, admins: users.filter((user) => user.isAdmin).length },
     quarantined: 0,
     logLevel: "info",
+    resets: 0,
+    resetting: false,
   };
   const host = {
     status: vi.fn(() => ({ ...status, nodeName: config.node.name })),
+    /** Test hook: make the node look like it was just reset. */
+    reset() {
+      status.resets += 1;
+    },
     config: vi.fn(() => config),
     updateConfig: vi.fn((update: LoamConfigUpdate) => {
       if (update.node?.name) {
@@ -53,7 +60,8 @@ function fakeHost(overrides: Partial<{ users: HostUser[]; profile: LoamConfig["s
       user.isAdmin = true;
       return { ok: true as const, value: user };
     }),
-    adminClaimCode: vi.fn(() => ({ code: "abcdefghijklmnopqrstuv", expiresAt: 0 })),
+    adminClaimCode: vi.fn((): { code: string; expiresAt: number } | null => ({ code: `code${String(++minted).padStart(18, "0")}`, expiresAt: 0 })),
+    revokeAdminClaimCode: vi.fn(),
     linkCode: vi.fn(() => ({ code: "linkcode12345678", expiresAt: 0 })),
     invite: vi.fn(() => null),
     setJoinHost: vi.fn((value: string | undefined) => {
@@ -84,6 +92,12 @@ function fakeTerminal(columns = 120, rows = 40): Terminal & { output: string } {
 }
 
 const tuis: Tui[] = [];
+
+/** Escape on its own counts once nothing else follows it for a moment (keys.ts). */
+async function pressEscape(tui: Tui): Promise<void> {
+  await tui.input("\x1b");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+}
 afterEach(() => {
   for (const tui of tuis.splice(0)) {
     tui.stop();
@@ -96,6 +110,7 @@ function setup(
     terminal?: ReturnType<typeof fakeTerminal>;
     settings?: CliSettings;
     startLocked?: boolean;
+    now?: () => number;
   } = {},
 ) {
   const host = options.host ?? fakeHost();
@@ -122,6 +137,7 @@ function setup(
     writeFile: (path, contents) => writes.push({ path, contents }),
     startLocked: options.startLocked,
     quit,
+    now: options.now,
   });
   tuis.push(tui);
   tui.start();
@@ -156,33 +172,62 @@ describe("the Join screen", () => {
     expect(setup({ terminal: fakeTerminal(30, 10) }).screenText()).toBe("Make this window bigger to use LOAM.");
   });
 
-  it("opens the browser as admin with a one-time code, and offers a QR for a phone", async () => {
+  it("opens the browser as admin with a one-time code, and shows a phone QR only when asked", async () => {
+    const qrRows = (screen: string) => screen.split("\n").filter((line) => line.includes("│") && /[█▀▄]/.test(line)).length;
     const { tui, system, host, screenText } = setup();
     await tui.input("o");
-    expect(system.openUrl).toHaveBeenCalledWith(`http://localhost:3000#k=${KEY}&a=abcdefghijklmnopqrstuv`);
-    expect(host.adminClaimCode).toHaveBeenCalledTimes(2);
+    expect(system.openUrl).toHaveBeenCalledWith(`http://localhost:3000#k=${KEY}&a=code000000000000000001`);
+    expect(host.adminClaimCode).toHaveBeenCalledTimes(1);
     expect(screenText()).toContain("signed in as admin");
-    await tui.input("\x1b");
+    expect(qrRows(screenText())).toBe(0);
+
+    await tui.input("p");
+    expect(host.adminClaimCode).toHaveBeenCalledTimes(2);
+    expect(screenText()).toContain("Anyone who scans this becomes an admin");
+    expect(qrRows(screenText())).toBeGreaterThanOrEqual(18);
+
+    await pressEscape(tui);
     expect(tui.modal).toBeUndefined();
+    expect(host.revokeAdminClaimCode).toHaveBeenCalledWith("code000000000000000002");
   });
 
-  it("shows the phone QR whole or not at all, with the link in full when there's no room", async () => {
+  it("puts the phone's link on the join address, and shows it in full when the QR won't fit", async () => {
     const qrRows = (screen: string) => screen.split("\n").filter((line) => line.includes("│") && /[█▀▄]/.test(line)).length;
-
-    const roomy = setup();
-    await roomy.tui.input("o");
-    expect(qrRows(roomy.screenText())).toBeGreaterThanOrEqual(18);
-
     const cramped = setup({ terminal: fakeTerminal(70, 26) });
     vi.mocked(cramped.system.openUrl).mockResolvedValue(false);
     await cramped.tui.input("o");
+    await cramped.tui.input("p");
     const screen = cramped.screenText();
     expect(qrRows(screen)).toBe(0);
     expect(screen).toContain("Couldn't open a browser");
     expect(screen).toContain("Make the window bigger to show this as a QR code.");
-    // The local link, broken across lines but never cut short.
+    // Both links, broken across lines but never cut short.
     const joined = screen.split("\n").map((line) => line.replace(/^.*│ /, "").replace(/ *│.*$/, "")).join("");
-    expect(joined).toContain(`http://localhost:3000#k=${KEY}&a=abcdefghijklmnopqrstuv`);
+    expect(joined).toContain(`http://localhost:3000#k=${KEY}&a=code000000000000000001`);
+    expect(joined).toContain(`http://192.168.8.159:3000#k=${KEY}&a=code000000000000000002`);
+  });
+
+  it("never draws the admin dialog over a screen locked meanwhile", async () => {
+    let finishOpening: (opened: boolean) => void = () => {};
+    const { tui, system, host, screenText } = setup({
+      settings: { kiosk: { passwordHash: hashKioskPassword("abcd"), startLocked: false } },
+    });
+    vi.mocked(system.openUrl).mockImplementation(() => new Promise((resolve) => (finishOpening = resolve)));
+    const opening = tui.input("o");
+    await tui.input("k");
+    finishOpening(true);
+    await opening;
+    expect(tui.locked).toBe(true);
+    expect(tui.modal).toBeUndefined();
+    expect(screenText()).not.toContain("Open as admin");
+    expect(host.adminClaimCode).toHaveBeenCalledTimes(1);
+  });
+
+  it("encodes the node key and the invite in the join QR", () => {
+    const host = fakeHost();
+    host.invite.mockReturnValue({ code: "invitecode_0123456789a", expiresAt: 0 } as never);
+    expect(setup({ host }).tui.joinLink).toBe(`http://192.168.8.159:3000#k=${KEY}&i=invitecode_0123456789a`);
+    expect(setup().tui.joinLink).toBe(`http://192.168.8.159:3000#k=${KEY}`);
   });
 
   it("pins the join address and remembers it", async () => {
@@ -349,5 +394,180 @@ describe("kiosk mode", () => {
     const passwordHash = hashKioskPassword("letmein");
     const { tui } = setup({ settings: { kiosk: { passwordHash, startLocked: true } }, startLocked: true });
     expect(tui.locked).toBe(true);
+  });
+});
+
+describe("kiosk mode, the edges", () => {
+  const passwordHash = hashKioskPassword("abcd");
+
+  it("does nothing but offer to unlock while locked", async () => {
+    const { tui, host, screenText } = setup({ settings: { kiosk: { passwordHash, startLocked: true } }, startLocked: true });
+    await tui.input("2");
+    expect(tui.screen).toBe("join");
+    expect(tui.modal).toBeUndefined();
+    await tui.input("4o");
+    expect(host.updateConfig).not.toHaveBeenCalled();
+    expect(host.adminClaimCode).not.toHaveBeenCalled();
+    expect(screenText()).toContain("Locked. Press Enter to unlock.");
+  });
+
+  it("slows down guessing through the unlock dialog", async () => {
+    let now = 1_000_000;
+    const { tui, screenText } = setup({
+      settings: { kiosk: { passwordHash, startLocked: true } },
+      startLocked: true,
+      now: () => now,
+    });
+    await tui.input("\r");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await tui.input("nope\r");
+      await tui.input("\x7f".repeat(4));
+    }
+    await tui.input("abcd\r");
+    expect(screenText()).toContain("Too many wrong passwords. Try again in 2 s.");
+    expect(tui.locked).toBe(true);
+    now += 2_000;
+    await tui.input("\r");
+    expect(tui.locked).toBe(false);
+  });
+
+  it("starts locked with no password saved, and stays locked until one is chosen", async () => {
+    const { tui, saved, screenText } = setup({ startLocked: true });
+    expect(tui.locked).toBe(true);
+    expect(screenText()).toContain("Choose a password");
+    await pressEscape(tui);
+    expect(tui.locked).toBe(true);
+    await tui.input("2");
+    expect(tui.screen).toBe("join");
+    await tui.input("\r");
+    expect(screenText()).toContain("Choose a password");
+    await tui.input("wxyz\r");
+    await tui.input("wxyz\r");
+    expect(saved.at(-1)?.kiosk?.passwordHash).toMatch(/^scrypt:/);
+    expect(saved.at(-1)?.kiosk?.startLocked).toBe(false);
+    expect(tui.locked).toBe(true);
+  });
+});
+
+describe("robustness", () => {
+  it("shows a screen that fails to draw instead of stopping, and keeps taking keys", async () => {
+    const host = fakeHost();
+    host.users.mockImplementation(() => {
+      throw new Error("store closed");
+    });
+    const { tui, screenText } = setup({ host });
+    await tui.input("3");
+    expect(screenText()).toContain("Couldn't draw this screen: store closed");
+    await tui.input("1");
+    expect(tui.screen).toBe("join");
+  });
+
+  it("treats pasted text as text: into a field, and never as keys", async () => {
+    const { tui, host, quit, screenText } = setup();
+    await tui.input("\x1b[200~qy\x1b[201~");
+    expect(tui.modal).toBeUndefined();
+    expect(quit).not.toHaveBeenCalled();
+
+    await tui.input("4\r");
+    await tui.input("\x7f".repeat(20) + "\x1b[200~Village\nhall\x1b[201~\r");
+    expect(host.updateConfig).toHaveBeenCalledWith({ node: { name: "Villagehall" } });
+    expect(screenText()).toContain("Name saved");
+  });
+
+  it("does nothing in a window too small to show what it would do", async () => {
+    const { tui, quit } = setup({ terminal: fakeTerminal(30, 10) });
+    await tui.input("qy");
+    expect(tui.modal).toBeUndefined();
+    expect(quit).not.toHaveBeenCalled();
+  });
+
+  it("forgets its log after an Emergency Reset from anywhere", async () => {
+    const host = fakeHost();
+    const { tui, log, screenText } = setup({ host });
+    log.note("info", "192.168.8.20 joined earlier");
+    host.reset();
+    await tui.input("2");
+    expect(log.entries()).toEqual([]);
+    expect(screenText()).toContain("Emergency Reset");
+    expect(screenText()).not.toContain("joined earlier");
+  });
+});
+
+describe("People, with names anyone can copy", () => {
+  it("flags a shared name and shows enough to tell the two apart", async () => {
+    const users: HostUser[] = [
+      { id: "user.aaaaaa111111", displayName: "amber.oak.heron", isAdmin: false, online: true, pending: false, banned: false, createdAt: 1 },
+      { id: "user.bbbbbb222222", displayName: "Amber.Oak.Heron", isAdmin: false, online: false, pending: false, banned: false, createdAt: 2 },
+    ];
+    const { tui, screenText } = setup({ host: fakeHost({ users }) });
+    await tui.input("3");
+    expect(screenText()).toContain("…111111");
+    expect(screenText()).toContain("…222222");
+    expect(screenText().match(/same name as someone else/g)).toHaveLength(2);
+    await tui.input("m");
+    expect(screenText()).toContain("Id ending …111111");
+    expect(screenText()).toContain("Someone else uses this name too");
+  });
+});
+
+describe("Settings, row by row", () => {
+  async function openRow(tui: Tui, index: number): Promise<void> {
+    // The screen remembers the chosen row: start from the top.
+    await tui.input("4" + "\x1b[A".repeat(20));
+    for (let step = 0; step < index; step += 1) {
+      await tui.input("\x1b[B");
+    }
+    await tui.input("\r");
+  }
+
+  it("sends who can join and how long messages last as the schema expects", async () => {
+    const { tui, host } = setup();
+    await openRow(tui, 2);
+    await tui.input("\x1b[B\r");
+    expect(host.updateConfig).toHaveBeenLastCalledWith({ access: { joinPolicy: "approval" } });
+    await openRow(tui, 4);
+    await tui.input("\x1b[B\x1b[B\r");
+    expect(host.updateConfig).toHaveBeenLastCalledWith({ retention: { messageTtlMs: 86_400_000 } });
+  });
+
+  it("keeps a message lifetime set elsewhere on offer and chosen", async () => {
+    const host = fakeHost();
+    host.config().retention.messageTtlMs = 30 * 60_000;
+    const { tui, screenText } = setup({ host });
+    await openRow(tui, 4);
+    expect(screenText()).toContain("› After 30 minutes");
+    await tui.input("\r");
+    expect(host.updateConfig).toHaveBeenLastCalledWith({ retention: { messageTtlMs: 1_800_000 } });
+  });
+
+  it("only saves a port that can exist, and forgets the kiosk password when asked", async () => {
+    const { tui, saved, screenText } = setup({
+      settings: { kiosk: { passwordHash: hashKioskPassword("abcd"), startLocked: false } },
+    });
+    await openRow(tui, 10);
+    await tui.input("\x7f".repeat(5) + "70000\r");
+    expect(screenText()).toContain("Enter a number from 1 to 65535.");
+    await tui.input("\x7f".repeat(5) + "3005\r");
+    expect(saved.at(-1)?.port).toBe(3005);
+
+    await openRow(tui, 12);
+    expect(saved.at(-1)?.kiosk?.startLocked).toBe(true);
+    await openRow(tui, 13);
+    await tui.input("y");
+    expect(saved.at(-1)?.kiosk).toBeUndefined();
+  });
+});
+
+describe("the diagnostics file", () => {
+  it("leaves out addresses of every form, hosts, folders and ids, but keeps times", async () => {
+    const { tui, log, writes } = setup();
+    log.note("error", "Peer fe80::1ff:fe23:4567:890a%en0 and [2001:db8::1]:3000 refused at 12:34:56");
+    log.note("warn", "Sync from http://pi.local:3000 failed; rm /home/ada/.loam/attachments/att_0123abcd.webp");
+    log.note("warn", "GET /api/dms/user.1a2b3c4d answered 404");
+    await tui.input("5w");
+    const contents = writes[0]!.contents;
+    expect(contents).not.toMatch(/fe80|2001:db8|pi\.local|\/home\/ada|att_0123|user\.1a2b/);
+    expect(contents).toContain("12:34:56");
+    expect(contents).toContain("/api/dms/<id>");
   });
 });

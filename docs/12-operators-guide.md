@@ -63,16 +63,18 @@ npx loamnet                 # or: npm install -g loamnet && loam
 
 In a terminal it opens a full-screen view that keeps the join QR on screen, with **Activity**, **People**,
 **Settings** and **Debug** screens a number key away (`?` lists the keys). **Press `o` to become admin:**
-your browser opens LOAM already signed in as admin, through a link that works once, for 10 minutes; the
-same dialog shows a QR that makes a phone admin instead. Nobody becomes admin by opening a new network
+your browser opens LOAM already signed in as admin, through a link that works once, for 10 minutes; press
+`p` in that dialog for a QR that makes a phone admin instead (it stops working when the dialog closes). Nobody becomes admin by opening a new network
 first. Your admin identity lives in that browser, so keep using it. **People → m** makes anyone who has
 joined an admin too.
 
 **Kiosk mode** (`k`, or start with `--kiosk`) leaves only the join QR, the network's name and the number
 of connected devices on screen until a password is entered, for a computer left out for people to join
-from. It locks the screen, not the computer, so run `loam` under its own user account on a machine left
-alone. Without a terminal (a service) or with `--plain`, `loam` prints the address, the QR and, while
-nobody is admin, a one-time admin link instead. Useful options (`loam --help` has them all):
+from. On an approval network its QR lets people straight in. It locks the screen, not the computer, so on a
+machine left alone run `exec loam --kiosk` under its own user account. Without a terminal (a service) or
+with `--plain`, `loam` prints the address and the QR instead; while nobody is admin, a one-time admin link
+is printed (in a terminal) or written to `admin-link.txt` in the data folder (for a service), never to the
+log. Useful options (`loam --help` has them all):
 
 | Option | Effect |
 |---|---|

@@ -63,6 +63,9 @@ export function registerAdminRoutes(ctx: AppContext): void {
     const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
 
     if (currentUser.isAdmin) {
+      // Spend a one-time code from the host's screen anyway, so a link opened in a browser that was already
+      // admin isn't left usable by someone else for the rest of its 10 minutes.
+      ctx.adminClaimCodes.consume(body.data.secret);
       return currentUser;
     }
 
@@ -101,8 +104,9 @@ export function registerAdminRoutes(ctx: AppContext): void {
     }
 
     // Or a one-time code the host's own screen handed out (admin-links.ts): the terminal UI's "open as
-    // admin" link. Spent on first use, so honoured before the limiter like the token.
-    if (strategy === "hostDevice" && hostToken && ctx.adminClaimCodes.consume(body.data.secret)) {
+    // admin" link. Spent on first use, so honoured before the limiter like the token. A banned person can't
+    // use one (the host's People screen refuses them too), and doesn't spend it trying.
+    if (strategy === "hostDevice" && hostToken && !currentUser.banned && ctx.adminClaimCodes.consume(body.data.secret)) {
       return promote();
     }
 

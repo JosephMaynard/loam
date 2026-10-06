@@ -36,8 +36,8 @@ const FG: Record<Color, number> = {
   gray: 90,
 };
 
-/** Control characters (C0, DEL, C1) and the bidi overrides that could reorder what the operator reads. */
-const UNSAFE = /[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/gu;
+/** Control characters (C0, DEL, C1) and the bidi controls that could reorder what the operator reads. */
+const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
 
 /** `text` with every control character removed (tabs become a space). */
 export function clean(text: string): string {
@@ -46,24 +46,45 @@ export function clean(text: string): string {
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
-/** Wide (two-column) East Asian ranges, approximately per UAX #11. */
+/**
+ * Wide (two-column) ranges, per UAX #11's East Asian Wide and Fullwidth classes (the blocks that matter for
+ * text: JavaScript has no East_Asian_Width property to ask). Line wrap is off while the UI runs, so a
+ * character this misses can only cut its own row short, never spill into the next.
+ */
+const WIDE_RANGES: [number, number][] = [
+  [0x1100, 0x115f],
+  [0x231a, 0x231b],
+  [0x2329, 0x232a],
+  [0x2e80, 0x303e],
+  [0x3041, 0x33ff],
+  [0x3400, 0x4dbf],
+  [0x4e00, 0x9fff],
+  [0xa000, 0xa4cf],
+  [0xa960, 0xa97f],
+  [0xac00, 0xd7a3],
+  [0xf900, 0xfaff],
+  [0xfe10, 0xfe19],
+  [0xfe30, 0xfe6f],
+  [0xff00, 0xff60],
+  [0xffe0, 0xffe6],
+  [0x16fe0, 0x16fe4],
+  [0x17000, 0x18cff],
+  [0x1aff0, 0x1b2ff],
+  [0x1f200, 0x1f2ff],
+  [0x20000, 0x3fffd],
+];
+
 function isWideCodePoint(cp: number): boolean {
-  return (
-    (cp >= 0x1100 && cp <= 0x115f) ||
-    (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f) ||
-    (cp >= 0xac00 && cp <= 0xd7a3) ||
-    (cp >= 0xf900 && cp <= 0xfaff) ||
-    (cp >= 0xfe30 && cp <= 0xfe4f) ||
-    (cp >= 0xff00 && cp <= 0xff60) ||
-    (cp >= 0xffe0 && cp <= 0xffe6) ||
-    (cp >= 0x20000 && cp <= 0x3fffd)
-  );
+  return WIDE_RANGES.some(([low, high]) => cp >= low && cp <= high);
 }
 
-/** Columns one grapheme takes: 2 for emoji and wide characters, 0 for a lone combining mark, else 1. */
+/**
+ * Columns one grapheme takes: 2 for emoji and wide characters, 0 for a lone combining mark or an invisible
+ * format character (zero-width space, soft hyphen, BOM…), else 1.
+ */
 export function graphemeWidth(grapheme: string): number {
   const first = grapheme.codePointAt(0) ?? 0;
-  if (/^\p{M}+$/u.test(grapheme)) {
+  if (/^[\p{M}\p{Default_Ignorable_Code_Point}]+$/u.test(grapheme)) {
     return 0;
   }
   if (/\p{Emoji_Presentation}|\p{Extended_Pictographic}️/u.test(grapheme) || isWideCodePoint(first)) {

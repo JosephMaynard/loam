@@ -4,7 +4,7 @@
  * kiosk mode), and nothing secret in the clear: the kiosk password is kept as a scrypt hash. Flags and
  * environment variables still win over it.
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export type KioskSettings = {
@@ -61,6 +61,8 @@ export function writeCliSettings(dataDir: string, settings: CliSettings): void {
   const path = cliSettingsPath(dataDir);
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.tmp`;
+  // A leftover temporary file would keep its old permissions (`mode` only applies to a new file).
+  rmSync(temporary, { force: true });
   writeFileSync(temporary, `${JSON.stringify(parseCliSettings(settings), null, 2)}\n`, { mode: 0o600 });
   renameSync(temporary, path);
 }

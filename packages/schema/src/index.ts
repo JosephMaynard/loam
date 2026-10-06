@@ -1420,6 +1420,10 @@ export type HostStatus = {
   /** Stored rows set aside at boot because they no longer validate. */
   quarantined: number;
   logLevel: HostLogLevel;
+  /** Emergency Resets since this process started: when it goes up, the host's screen drops what it kept. */
+  resets: number;
+  /** A reset is running, or one didn't finish and the node is locked until a restart. */
+  resetting: boolean;
 };
 
 export type HostLogLevel = "info" | "debug";
@@ -1444,14 +1448,21 @@ export type HostApi = {
   status(): HostStatus;
   /** The node's configuration, secrets redacted (as the admin API returns it). */
   config(): LoamConfig;
-  /** Apply a change exactly as `PATCH /api/admin/config` would: same validation, persistence, broadcast. */
+  /** Apply a change exactly as `PATCH /api/admin/config` would: same validation, persistence, broadcast.
+   *  Refused while a reset is running or unfinished. */
   updateConfig(update: LoamConfigUpdate): HostResult<LoamConfig>;
   /** Everyone who can be shown on the People screen (humans only, newest last). */
   users(): HostUser[];
-  /** Make someone an admin; approves them first if they were waiting. Refuses a banned user. */
+  /** Make someone an admin; approves them first if they were waiting. Refuses a banned user, and refuses
+   *  while a reset is running or unfinished. */
   makeAdmin(userId: string): HostResult<HostUser>;
-  /** A single-use, 10-minute code that makes whoever presents it an admin (`POST /api/admin/claim`). */
-  adminClaimCode(): HostCode;
+  /**
+   * A single-use, 10-minute code that makes whoever presents it an admin (`POST /api/admin/claim`), or null
+   * when this node has no host token (only a launcher's token makes the claim route accept these codes).
+   */
+  adminClaimCode(): HostCode | null;
+  /** Retire an unused admin code (the screen that showed it closed). */
+  revokeAdminClaimCode(code: string): void;
   /** A "Link another node" code (docs/11). */
   linkCode(): HostCode;
   /** The rotating invite for the join QR on an approval-only node, else null. */

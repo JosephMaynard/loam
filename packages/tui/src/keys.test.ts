@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isChar, parseKeys } from "./keys.js";
+import { createKeyReader, isChar, parseKeys } from "./keys.js";
 
 describe("parseKeys", () => {
   it("reads arrows, editing keys and controls", () => {
@@ -43,5 +43,38 @@ describe("parseKeys", () => {
   it("matches characters regardless of case", () => {
     expect(isChar({ name: "char", char: "Q" }, "q")).toBe(true);
     expect(isChar({ name: "enter" }, "q")).toBe(false);
+  });
+});
+
+describe("createKeyReader", () => {
+  it("skips F1 to F4 and other unused sequences whole", () => {
+    expect(parseKeys("\x1bOP\x1bOQa\x1b[15~")).toEqual([{ name: "char", char: "a" }]);
+  });
+
+  it("joins a sequence split across reads", () => {
+    const reader = createKeyReader();
+    expect(reader.feed("\x1b")).toEqual([]);
+    expect(reader.pending()).toBe(true);
+    expect(reader.feed("[A")).toEqual([{ name: "up" }]);
+    expect(reader.feed("\x1b[1;5")).toEqual([]);
+    expect(reader.feed("A1")).toEqual([{ name: "char", char: "1" }]);
+  });
+
+  it("makes a lone Escape an Escape only when flushed", () => {
+    const reader = createKeyReader();
+    expect(reader.feed("\x1b")).toEqual([]);
+    expect(reader.flush()).toEqual([{ name: "escape" }]);
+    expect(reader.pending()).toBe(false);
+  });
+
+  it("reads Alt+arrow as Escape then the arrow, never as letters", () => {
+    expect(parseKeys("\x1b\x1b[A")).toEqual([{ name: "escape" }, { name: "up" }]);
+  });
+
+  it("turns a bracketed paste into one paste event, even across reads", () => {
+    const reader = createKeyReader();
+    expect(reader.feed("\x1b[200~hello\nq")).toEqual([]);
+    expect(reader.flush()).toEqual([]);
+    expect(reader.feed("y\x1b[201~x")).toEqual([{ name: "paste", text: "hello\nqy" }, { name: "char", char: "x" }]);
   });
 });

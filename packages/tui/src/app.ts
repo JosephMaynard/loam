@@ -9,7 +9,7 @@
 import type { HostStatus } from "@loam/schema";
 
 import { type Line, lineWidth, text } from "./ansi.js";
-import { isChar, type Key, parseKeys } from "./keys.js";
+import { createKeyReader, isChar, type Key } from "./keys.js";
 import { createKioskGuard, hashKioskPassword, KIOSK_PASSWORD_MIN_LENGTH, verifyKioskPassword } from "./kiosk.js";
 import { type Modal, modalKey, modalLines, textField } from "./modal.js";
 import { activityScreen } from "./screens/activity.js";
@@ -28,6 +28,8 @@ export const MIN_COLUMNS = 40;
 export const MIN_ROWS = 12;
 
 const TOAST_MS = 4_000;
+/** How long a lone Escape waits for the rest of a key sequence before it counts as Escape. */
+const ESCAPE_WAIT_MS = 40;
 const REFRESH_MS = 1_000;
 /** How often the Activity screen looks for new log lines. */
 const LOG_POLL_MS = 250;
@@ -46,6 +48,8 @@ export type Tui = {
   readonly screen: ScreenId;
   readonly locked: boolean;
   readonly modal: Modal | undefined;
+  /** What the join QR encodes right now. */
+  readonly joinLink: string;
 };
 
 export function createTui(options: TuiOptions): Tui {
@@ -63,8 +67,11 @@ export function createTui(options: TuiOptions): Tui {
   let timers: ReturnType<typeof setInterval>[] = [];
   let logVersion = options.log.version();
   let running = false;
+  let resets = status.resets;
   /** Keys are handled strictly in order, one chunk after another (a dialog step can be async). */
   let queue: Promise<void> = Promise.resolve();
+  const reader = createKeyReader();
+  let escapeTimer: ReturnType<typeof setTimeout> | undefined;
 
   const state: ScreenState = {
     qrHidden: false,
@@ -84,7 +91,15 @@ export function createTui(options: TuiOptions): Tui {
     },
     now,
     open(next) {
-      modal = next;
+      // Nothing but the unlock and password dialogs may appear over the kiosk lock: a dialog an earlier
+      // action was still preparing (the admin QR, say) is dropped once the screen is locked.
+      if (locked && !next.whileLocked) {
+        if (next.kind === "panel") {
+          next.onClose?.();
+        }
+        return;
+      }
+      setModal(next);
       redraw();
     },
     toast(message, tone = "ok") {
@@ -111,11 +126,31 @@ export function createTui(options: TuiOptions): Tui {
     lockKiosk: () => lockKiosk(),
   };
 
+  /** Replace the open dialog, letting a panel that goes away clean up after itself. */
+  function setModal(next: Modal | undefined): void {
+    if (modal && modal !== next && modal.kind === "panel") {
+      modal.onClose?.();
+    }
+    modal = next;
+  }
+
   function refreshStatus(): void {
     try {
       status = host.status();
     } catch {
       // Keep the last status (the store may be mid-reset); the next tick tries again.
+    }
+    if (status.resets !== resets) {
+      // An Emergency Reset (from here, the web app or the panic token): drop what this screen kept about
+      // the old network, its log of who connected included.
+      resets = status.resets;
+      options.log.clear();
+      state.activity = { errorsOnly: state.activity.errorsOnly, scroll: 0 };
+      state.people.selected = 0;
+      if (modal && !modal.whileLocked) {
+        setModal(undefined);
+      }
+      toast = { message: "Emergency Reset: everything from before is gone, this screen's log too", tone: "ok", until: now() + TOAST_MS };
     }
   }
 
@@ -167,7 +202,10 @@ export function createTui(options: TuiOptions): Tui {
     const inner = Math.min(width - 4, Math.max(50, Math.min(76, width - 8)));
     const content = modalLines(modal, inner, height - 2);
     const boxWidth = Math.min(width, Math.max(inner, ...content.map(lineWidth)) + 4);
-    const shown = content.slice(0, Math.max(1, height - 2));
+    // Too tall: cut from the middle, keeping the title and the last lines (the field, its error, the keys).
+    const room = Math.max(1, height - 2);
+    const tail = Math.min(4, room - 1);
+    const shown = content.length <= room ? content : [...content.slice(0, room - tail), ...content.slice(-tail)];
     const left = " ".repeat(Math.max(0, Math.floor((width - boxWidth) / 2)));
     const top = Math.max(0, Math.floor((height - shown.length - 2) / 2));
     const border = (l: string, r: string): Line => [{ text: left }, { text: `${l}${"─".repeat(boxWidth - 2)}${r}`, style: { fg: "cyan" } }];
@@ -226,14 +264,34 @@ export function createTui(options: TuiOptions): Tui {
       return kioskFrame(width, height);
     }
     const bodyHeight = height - 3;
-    const body = screen.render(view, width, bodyHeight).slice(0, bodyHeight);
+    let body: Line[];
+    try {
+      body = screen.render(view, width, bodyHeight).slice(0, bodyHeight);
+    } catch (error) {
+      body = [[], text(`  Couldn't draw this screen: ${error instanceof Error ? error.message : String(error)}`, { fg: "red" })];
+    }
     while (body.length < bodyHeight) body.push([]);
     return [header(width), tabs(), ...withModal(body, width, bodyHeight), footer()];
   }
 
+  function tooSmall(): boolean {
+    return terminal.columns() < MIN_COLUMNS || terminal.rows() < MIN_ROWS;
+  }
+
+  /** Draw now. A failure to draw is shown, never thrown: it must not take the network down or stop the keys. */
   function redraw(): void {
-    if (running) {
+    if (!running) {
+      return;
+    }
+    try {
       painter.paint(frame());
+    } catch (error) {
+      try {
+        painter.invalidate();
+        painter.paint([text(`Couldn't draw the screen: ${error instanceof Error ? error.message : String(error)}`, { fg: "red" })]);
+      } catch {
+        // Nothing more to try; the next tick will.
+      }
     }
   }
 
@@ -241,18 +299,28 @@ export function createTui(options: TuiOptions): Tui {
 
   function lock(): void {
     locked = true;
-    modal = undefined;
+    setModal(undefined);
+    // Clear the terminal's scrollback too, where it can be scrolled to from the locked screen.
+    terminal.write("\x1b[3J");
     redraw();
   }
 
-  /** Lock now, asking for a password first if none is set. */
-  function lockKiosk(): void {
+  /**
+   * Lock now, asking for a password first if none is set. Asked by the operator (`k`), Escape cancels; at a
+   * locked start (`--kiosk`), the screen is locked first and stays locked until a password is chosen.
+   */
+  function lockKiosk(lockedFirst = false): void {
     if (settings.kiosk) {
       lock();
       return;
     }
+    if (lockedFirst) {
+      locked = true;
+      setModal(undefined);
+    }
     let first = "";
     view.open({
+      whileLocked: true,
       kind: "input",
       title: "Kiosk mode",
       body: [
@@ -268,6 +336,7 @@ export function createTui(options: TuiOptions): Tui {
         first = value;
         // Opening the next dialog replaces this one.
         view.open({
+          whileLocked: true,
           kind: "input",
           title: "Kiosk mode",
           body: ["Type the password again:"],
@@ -289,11 +358,12 @@ export function createTui(options: TuiOptions): Tui {
   function askToUnlock(): void {
     const kiosk = settings.kiosk;
     if (!kiosk) {
-      locked = false;
-      redraw();
+      // Locked at start with no password chosen yet: choosing one is the only way on.
+      lockKiosk(true);
       return;
     }
     view.open({
+      whileLocked: true,
       kind: "input",
       title: "Unlock",
       body: ["Kiosk password:"],
@@ -360,14 +430,22 @@ export function createTui(options: TuiOptions): Tui {
       painter.invalidate();
       return;
     }
+    // Nothing can be seen in a window this small, so nothing is done either (a "stop?" no one can read).
+    if (tooSmall()) {
+      return;
+    }
 
     if (modal) {
       const current = modal;
       if (await modalKey(current, key)) {
         if (modal === current) {
-          modal = undefined;
+          setModal(undefined);
         }
       }
+      return;
+    }
+    // Pasted text only means something in a text field.
+    if (key.name === "paste") {
       return;
     }
 
@@ -389,7 +467,7 @@ export function createTui(options: TuiOptions): Tui {
       const index = SCREENS.indexOf(screen);
       screen = SCREENS[(index + (key.name === "tab" ? 1 : SCREENS.length - 1)) % SCREENS.length]!;
     } else if (isChar(key, "?")) {
-      modal = help();
+      setModal(help());
     } else if (isChar(key, "k")) {
       lockKiosk();
     } else if (isChar(key, "q") || key.name === "ctrl-c" || key.name === "ctrl-d") {
@@ -397,8 +475,8 @@ export function createTui(options: TuiOptions): Tui {
     }
   }
 
-  async function process(chunk: string): Promise<void> {
-    for (const key of parseKeys(chunk)) {
+  async function process(keys: Key[]): Promise<void> {
+    for (const key of keys) {
       try {
         await handle(key);
       } catch (error) {
@@ -409,9 +487,29 @@ export function createTui(options: TuiOptions): Tui {
     redraw();
   }
 
-  function input(chunk: string): Promise<void> {
-    queue = queue.then(() => process(chunk));
+  /** Queue keys; a step that fails never blocks the ones after it. */
+  function enqueue(keys: Key[]): Promise<void> {
+    queue = queue.then(() => process(keys)).catch(() => undefined);
     return queue;
+  }
+
+  function input(chunk: string): Promise<void> {
+    if (escapeTimer) {
+      clearTimeout(escapeTimer);
+      escapeTimer = undefined;
+    }
+    const done = enqueue(reader.feed(chunk));
+    if (reader.pending()) {
+      escapeTimer = setTimeout(() => {
+        escapeTimer = undefined;
+        const keys = reader.flush();
+        if (keys.length) {
+          void enqueue(keys);
+        }
+      }, ESCAPE_WAIT_MS);
+      escapeTimer.unref?.();
+    }
+    return done;
   }
 
   return {
@@ -443,11 +541,7 @@ export function createTui(options: TuiOptions): Tui {
         timer.unref?.();
       }
       if (options.startLocked) {
-        if (settings.kiosk) {
-          locked = true;
-        } else {
-          lockKiosk();
-        }
+        lockKiosk(true);
       }
       painter.invalidate();
       redraw();
@@ -457,6 +551,9 @@ export function createTui(options: TuiOptions): Tui {
         clearInterval(timer);
       }
       timers = [];
+      if (escapeTimer) {
+        clearTimeout(escapeTimer);
+      }
       running = false;
       terminal.stop();
     },
@@ -471,6 +568,9 @@ export function createTui(options: TuiOptions): Tui {
     },
     get modal() {
       return modal;
+    },
+    get joinLink() {
+      return view.joinLink();
     },
   };
 }

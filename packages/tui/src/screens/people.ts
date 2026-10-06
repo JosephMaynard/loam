@@ -2,12 +2,33 @@
  * People: who has joined, who is online, who is waiting. The one thing done from here is making someone an
  * admin (approving them first if they were waiting); everything else about people (approvals, bans,
  * channels) happens in the web app.
+ *
+ * Anyone can choose any display name, so each row also shows the end of the person's id and when they
+ * joined, and a name shared by two people is flagged: copying someone's name mustn't be enough to be
+ * promoted in their place.
  */
 import type { HostUser } from "@loam/schema";
 
 import { type Line, padEnd, text } from "../ansi.js";
 import { isChar } from "../keys.js";
 import type { Screen, View } from "../types.js";
+import { clock } from "./activity.js";
+
+/** The last characters of an id: enough to tell two people with the same name apart. */
+export function shortId(id: string): string {
+  return id.slice(-6);
+}
+
+/** Display names used by more than one person. */
+function sharedNames(users: HostUser[]): Set<string> {
+  const seen = new Set<string>();
+  const shared = new Set<string>();
+  for (const user of users) {
+    const name = user.displayName.trim().toLowerCase();
+    (seen.has(name) ? shared : seen).add(name);
+  }
+  return shared;
+}
 
 function badges(user: HostUser): Line {
   const line: Line = [];
@@ -41,7 +62,8 @@ export const peopleScreen: Screen = {
     state.selected = Math.max(0, Math.min(state.selected, users.length - 1));
     const room = Math.max(1, height - lines.length);
     const first = Math.max(0, Math.min(state.selected - Math.floor(room / 2), users.length - room));
-    const nameWidth = Math.max(16, Math.min(40, width - 30));
+    const nameWidth = Math.max(16, Math.min(40, width - 50));
+    const shared = sharedNames(users);
     users.slice(first, first + room).forEach((user, offset) => {
       const index = first + offset;
       const chosen = index === state.selected;
@@ -49,8 +71,11 @@ export const peopleScreen: Screen = {
         { text: chosen ? " › " : "   ", style: { fg: "cyan" } },
         { text: user.online ? "● " : "○ ", style: { fg: user.online ? "green" : "gray" } },
         { text: padEnd(user.displayName, nameWidth), style: chosen ? { inverse: true } : undefined },
-        { text: "  " },
+        { text: `  …${shortId(user.id)}  joined ${clock(user.createdAt)}  `, style: { dim: true } },
         ...badges(user),
+        ...(shared.has(user.displayName.trim().toLowerCase())
+          ? [{ text: "same name as someone else", style: { fg: "yellow" as const } }]
+          : []),
       ]);
     });
     return lines;
@@ -81,10 +106,19 @@ function makeAdmin(view: View, user: HostUser): void {
     view.toast(`${user.displayName} is already an admin`);
     return;
   }
+  const sameName = view.options.host
+    .users()
+    .filter((other) => other.id !== user.id && other.displayName.trim().toLowerCase() === user.displayName.trim().toLowerCase()).length;
   view.open({
     kind: "confirm",
     title: `Make ${user.displayName} an admin?`,
     body: [
+      `Id ending …${shortId(user.id)}, joined at ${clock(user.createdAt)}, ${user.online ? "online now" : "not online"}.`,
+      ...(sameName
+        ? [
+            `${sameName === 1 ? "Someone else uses" : `${sameName} others use`} this name too. To make your own browser or phone admin, use o on the Join screen instead: its link can't pick the wrong person.`,
+          ]
+        : []),
       ...(user.pending ? ["They are waiting for approval; this lets them in too."] : []),
       "Admins can change every setting, remove people and wipe the network. This can't be undone from LOAM: an admin stays an admin.",
     ],

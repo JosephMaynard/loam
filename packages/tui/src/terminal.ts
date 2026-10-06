@@ -1,7 +1,9 @@
 /**
  * The terminal the UI draws on, behind a small interface so tests can use a fake. The real one switches to
  * the alternate screen (like `top` or `less`: the shell's scrollback is left as it was and comes back on
- * exit), hides the cursor, and reads keys in raw mode. Whatever happens, `stop()` puts the terminal back.
+ * exit), hides the cursor, turns line wrap off (a row can never spill into the next one), asks for
+ * bracketed paste (so pasted text can't act as keys) and reads keys in raw mode. Whatever happens, `stop()`
+ * puts the terminal back.
  */
 import type { Line } from "./ansi.js";
 import { renderLine } from "./ansi.js";
@@ -27,8 +29,8 @@ export function processTerminal(): Terminal {
       return;
     }
     started = false;
-    // Show the cursor, reset styles, leave the alternate screen.
-    stdout.write("\x1b[0m\x1b[?25h\x1b[?1049l");
+    // Reset styles; paste markers off, line wrap back on, cursor shown; leave the alternate screen.
+    stdout.write("\x1b[0m\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?1049l");
     if (stdin.isTTY) {
       stdin.setRawMode(false);
     }
@@ -55,8 +57,8 @@ export function processTerminal(): Terminal {
       stdin.setRawMode(true);
       stdin.setEncoding("utf8");
       stdin.resume();
-      // Alternate screen, hidden cursor, cleared.
-      stdout.write("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H");
+      // Alternate screen, hidden cursor, no line wrap, bracketed paste, cleared.
+      stdout.write("\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?2004h\x1b[2J\x1b[H");
       process.once("exit", restore);
     },
     stop: restore,

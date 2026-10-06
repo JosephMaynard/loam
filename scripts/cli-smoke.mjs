@@ -10,14 +10,15 @@
 //   4. an explicit `--port` that is taken is refused with a message (exit 1), not a stack trace;
 //   5. `--encrypt` with $LOAM_DB_KEY starts, writes a database that isn't plaintext SQLite, and reopens
 //      it with the same key;
-//   6. without a terminal it prints the plain join output (no line per request, and a one-time admin
-//      link while nobody is admin), refuses `--kiosk`, and starts on a port saved in cli.json.
+//   6. without a terminal it prints the plain join output (no line per request; while nobody is admin, a
+//      one-time admin link written to a file only its owner can read), refuses `--kiosk`, and starts on a
+//      port saved in cli.json.
 //
 // Needs `pnpm build` first (it runs scripts/build-cli.mjs itself). Uses the network for `npm install`.
 // Usage: node scripts/cli-smoke.mjs
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, openSync, readSync, closeSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, openSync, readFileSync, readSync, closeSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -147,9 +148,15 @@ async function main() {
     check(shell.ok && (await shell.text()).includes("<html"), "the web client is served (SPA route → shell)");
     await new Promise((resolve) => setTimeout(resolve, 500));
     check(!/incoming request|request completed/.test(node.output()), "plain mode prints no line per request");
+    const linkFile = join(work, "plain", "admin-link.txt");
     check(
-      /Nobody is admin yet[^\n]*\n\s+http:\/\/\S+#k=[A-Za-z0-9_-]+&a=[A-Za-z0-9_-]{22}/.test(node.output()),
-      "plain mode prints a one-time admin link while nobody is admin",
+      node.output().includes(`admin link (renewed every 10 minutes) is in ${linkFile}`) && !/#k=[^\s]*&a=/.test(node.output()),
+      "without a terminal, the one-time admin link goes to a file, never to the output",
+    );
+    check(
+      /^http:\/\/\S+#k=[A-Za-z0-9_-]+&a=[A-Za-z0-9_-]{22}\n$/.test(readFileSync(linkFile, "utf8")) &&
+        (process.platform === "win32" || (statSync(linkFile).mode & 0o777) === 0o600),
+      "the admin link file holds the link and only its owner can read it",
     );
     await node.stop();
   } finally {

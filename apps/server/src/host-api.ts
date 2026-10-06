@@ -5,6 +5,7 @@
 import {
   type HostApi,
   type HostLogLevel,
+  type HostResult,
   type HostStatus,
   type HostUser,
   LoamConfigUpdateSchema,
@@ -40,7 +41,24 @@ function isPerson(ctx: AppContext, user: User): boolean {
   return user.type === "human" && !ctx.isMeshSentinelUser(user.id);
 }
 
+const RESETTING = "The network is being reset. Try again once it has finished (or restart loam if it didn't).";
+
 export function createHostApi(ctx: AppContext, hooks: HostApiHooks): HostApi {
+  /** Mid-wipe, or locked after a wipe that didn't finish (the HTTP routes answer 503 then). */
+  function resetting(): boolean {
+    return ctx.wipeInProgress || ctx.awaitingWipeRestart;
+  }
+
+  /** A change that fails half-way (a store write refused) is reported, never thrown into the caller's UI. */
+  function guarded<T>(change: () => HostResult<T>): HostResult<T> {
+    try {
+      return change();
+    } catch (error) {
+      ctx.server.log.error(error, "A change from the host's screen failed");
+      return { ok: false, error: "That couldn't be saved. The details are in the log." };
+    }
+  }
+
   function people(): User[] {
     return ctx.data.users.filter((user) => isPerson(ctx, user));
   }
@@ -73,19 +91,26 @@ export function createHostApi(ctx: AppContext, hooks: HostApiHooks): HostApi {
         },
         quarantined: quarantine.users.size + quarantine.channels.size + quarantine.messages.size,
         logLevel: ctx.server.log.level === "debug" ? "debug" : "info",
+        resets: ctx.wipeGeneration,
+        resetting: resetting(),
       };
     },
     config() {
       return ctx.redactedConfig();
     },
     updateConfig(update) {
+      if (resetting()) {
+        return { ok: false, error: RESETTING };
+      }
       // The caller is trusted, but a terminal form can still build a bad value: parse it as the route does.
       const parsed = LoamConfigUpdateSchema.safeParse(update);
       if (!parsed.success) {
         return { ok: false, error: "Invalid config update request" };
       }
-      const result = applyConfigUpdate(ctx, parsed.data);
-      return result.ok ? { ok: true, value: ctx.redactedConfig() } : { ok: false, error: result.error };
+      return guarded(() => {
+        const result = applyConfigUpdate(ctx, parsed.data);
+        return result.ok ? { ok: true, value: ctx.redactedConfig() } : { ok: false, error: result.error };
+      });
     },
     users() {
       const online = new Set(ctx.onlineUserIds());
@@ -94,13 +119,21 @@ export function createHostApi(ctx: AppContext, hooks: HostApiHooks): HostApi {
         .sort((a, b) => a.createdAt - b.createdAt);
     },
     makeAdmin(userId) {
-      const result = promoteUser(ctx, userId, { approve: true });
-      return result.ok
-        ? { ok: true, value: hostUser(result.user, new Set(ctx.onlineUserIds())) }
-        : { ok: false, error: result.error };
+      if (resetting()) {
+        return { ok: false, error: RESETTING };
+      }
+      return guarded(() => {
+        const result = promoteUser(ctx, userId, { approve: true });
+        return result.ok
+          ? { ok: true, value: hostUser(result.user, new Set(ctx.onlineUserIds())) }
+          : { ok: false, error: result.error };
+      });
     },
     adminClaimCode() {
-      return ctx.adminClaimCodes.mint();
+      return ctx.options.hostToken ? ctx.adminClaimCodes.mint() : null;
+    },
+    revokeAdminClaimCode(code) {
+      ctx.adminClaimCodes.consume(code);
     },
     linkCode() {
       return ctx.linkCodes.mint();

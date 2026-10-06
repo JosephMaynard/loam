@@ -157,12 +157,18 @@ function rows(view: View, config: LoamConfig): Row[] {
       value: lifetimeLabel(config.retention.messageTtlMs),
       locked: byProfile,
       activate(view) {
+        const current = config.retention.messageTtlMs ?? null;
+        // A lifetime set in the web app that isn't one of these stays on offer (and chosen), so pressing
+        // Enter to keep it can't quietly switch deleting off.
+        const choices = LIFETIMES.some((entry) => entry.ms === current)
+          ? LIFETIMES
+          : [{ label: lifetimeLabel(current ?? undefined), ms: current }, ...LIFETIMES];
         choose(
           view,
           "Delete messages",
           "Older messages are deleted from this computer and from everyone's screen.",
-          LIFETIMES.map((entry) => ({ label: entry.label, value: entry.ms })),
-          config.retention.messageTtlMs ?? null,
+          choices.map((entry) => ({ label: entry.label, value: entry.ms })),
+          current,
           (value) => save(view, { retention: { messageTtlMs: value } }, "Saved"),
         );
       },
@@ -212,7 +218,10 @@ function rows(view: View, config: LoamConfig): Row[] {
         view.open({
           kind: "input",
           title: "Port",
-          body: ["Used the next time you start loam (a --port flag still wins). Joiners will need the new QR code."],
+          body: [
+            "Used the next time you start loam (a --port flag still wins). Joiners will need the new QR code.",
+            "Ports below 1024 usually need administrator rights; if this one can't be used, loam starts on 3000 instead.",
+          ],
           field: textField(String(settings.port ?? view.status.port), { maxLength: 5 }),
           onSubmit(value) {
             const port = Number(value);
