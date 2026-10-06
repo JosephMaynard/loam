@@ -15,9 +15,9 @@ export const Colors = {
     backgroundSelected: '#e6e1d6',
     textSecondary: '#5b6862',
     /** Ember: the selected segment of a choice (e.g. the share screen's Hotspot / Wi-Fi control). */
-    accent: '#f26b1d',
-    /** Ink on `accent`: dark in both schemes (white on this orange is ~3:1, too faint for small text). */
-    onAccent: '#1d2622',
+    accent: '#d84000',
+    /** Ink on `accent`: white in both schemes (4.5:1 on this orange; the dark ink is only 3.4:1). */
+    onAccent: '#ffffff',
     /** Moss green: borders and emphasis. */
     primary: '#2f5f4c',
     /** Destructive actions (Emergency reset), with its legible ink. */
@@ -36,8 +36,8 @@ export const Colors = {
     backgroundElement: '#171b18',
     backgroundSelected: '#263a30',
     textSecondary: '#a3aca6',
-    accent: '#f26b1d',
-    onAccent: '#1d2622',
+    accent: '#d84000',
+    onAccent: '#ffffff',
     primary: '#3a745b',
     danger: '#e5534b',
     onDanger: '#1d2622',
