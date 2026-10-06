@@ -119,4 +119,13 @@ export const bn: Partial<AppCatalog> = {
   "reset.closeApp": "LOAM বন্ধ করুন",
   "reset.keyClearFailed": "সবকিছু মোছা হয়েছে, কিন্তু এই ফোনের এনক্রিপশন চাবি মোছা যায়নি: {error}",
   "reset.retry": "আবার চেষ্টা করুন",
+  "update.available": "Google Play-তে LOAM-এর নতুন সংস্করণ পাওয়া যাচ্ছে।",
+  "update.update": "আপডেট করুন",
+  "update.check": "আপডেট খুঁজুন",
+  "update.checking": "যাচাই করা হচ্ছে…",
+  "update.current": "আপনার কাছে সর্বশেষ সংস্করণ আছে ({version})।",
+  "update.newer": "LOAM {version} পাওয়া যাচ্ছে। এই ফোনে আছে {current}।",
+  "update.download": "GitHub থেকে ডাউনলোড করুন",
+  "update.failed": "GitHub-এ পৌঁছানো যায়নি। এই ফোনের ইন্টারনেট সংযোগ দেখে আবার চেষ্টা করুন।",
+  "update.githubNote": "এটি GitHub-এর কাছে LOAM-এর সর্বশেষ সংস্করণ নম্বর জানতে চায়। GitHub এই ফোনের ইন্টারনেট ঠিকানা দেখতে পায়; আর কিছু পাঠানো হয় না।",
 };

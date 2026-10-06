@@ -124,6 +124,15 @@ export const en = {
   "reset.closeApp": "Close LOAM",
   "reset.keyClearFailed": "Everything was erased, but this phone's encryption key couldn't be cleared: {error}",
   "reset.retry": "Try again",
+  "update.available": "A new version of LOAM is ready on Google Play.",
+  "update.update": "Update",
+  "update.check": "Check for updates",
+  "update.checking": "Checking…",
+  "update.current": "You have the latest version ({version}).",
+  "update.newer": "LOAM {version} is available. This phone has {current}.",
+  "update.download": "Download from GitHub",
+  "update.failed": "Couldn't reach GitHub. Check this phone's internet connection and try again.",
+  "update.githubNote": "This asks GitHub for LOAM's latest version number. GitHub sees this phone's internet address; nothing else is sent.",
 } as const;
 
 export type AppCatalog = { [K in keyof typeof en]: string };

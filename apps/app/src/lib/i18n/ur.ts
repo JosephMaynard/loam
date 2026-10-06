@@ -119,4 +119,13 @@ export const ur: Partial<AppCatalog> = {
   "reset.closeApp": "LOAM بند کریں",
   "reset.keyClearFailed": "سب کچھ مٹا دیا گیا، لیکن اس فون کی خفیہ کاری کی کلید صاف نہیں ہو سکی: {error}",
   "reset.retry": "دوبارہ کوشش کریں",
+  "update.available": "LOAM کا نیا ورژن Google Play پر دستیاب ہے۔",
+  "update.update": "اپ ڈیٹ کریں",
+  "update.check": "اپ ڈیٹس چیک کریں",
+  "update.checking": "چیک کیا جا رہا ہے…",
+  "update.current": "آپ کے پاس تازہ ترین ورژن ہے ({version})۔",
+  "update.newer": "LOAM {version} دستیاب ہے۔ اس فون میں {current} ہے۔",
+  "update.download": "GitHub سے ڈاؤن لوڈ کریں",
+  "update.failed": "GitHub تک رسائی نہیں ہو سکی۔ اس فون کا انٹرنیٹ کنکشن چیک کریں اور دوبارہ کوشش کریں۔",
+  "update.githubNote": "یہ GitHub سے LOAM کے تازہ ترین ورژن کا نمبر پوچھتا ہے۔ GitHub اس فون کا انٹرنیٹ پتہ دیکھتا ہے؛ اور کچھ نہیں بھیجا جاتا۔",
 };

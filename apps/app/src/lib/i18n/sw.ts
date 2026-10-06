@@ -119,4 +119,13 @@ export const sw: Partial<AppCatalog> = {
   "reset.closeApp": "Funga LOAM",
   "reset.keyClearFailed": "Kila kitu kimefutwa, lakini ufunguo wa usimbaji wa simu hii haukuweza kufutwa: {error}",
   "reset.retry": "Jaribu tena",
+  "update.available": "Toleo jipya la LOAM linapatikana kwenye Google Play.",
+  "update.update": "Sasisha",
+  "update.check": "Angalia masasisho",
+  "update.checking": "Inaangalia…",
+  "update.current": "Una toleo la karibuni ({version}).",
+  "update.newer": "LOAM {version} inapatikana. Simu hii ina {current}.",
+  "update.download": "Pakua kutoka GitHub",
+  "update.failed": "Imeshindwa kufikia GitHub. Angalia muunganisho wa intaneti wa simu hii kisha ujaribu tena.",
+  "update.githubNote": "Hii inauliza GitHub nambari ya toleo la karibuni la LOAM. GitHub inaona anwani ya intaneti ya simu hii; hakuna kingine kinachotumwa.",
 };

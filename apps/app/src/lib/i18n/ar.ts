@@ -119,4 +119,13 @@ export const ar: Partial<AppCatalog> = {
   "reset.closeApp": "إغلاق LOAM",
   "reset.keyClearFailed": "مُحي كل شيء، لكن تعذّر حذف مفتاح التشفير على هذا الهاتف: {error}",
   "reset.retry": "إعادة المحاولة",
+  "update.available": "يتوفر إصدار جديد من LOAM على Google Play.",
+  "update.update": "تحديث",
+  "update.check": "البحث عن تحديثات",
+  "update.checking": "جارٍ التحقق…",
+  "update.current": "لديك أحدث إصدار ({version}).",
+  "update.newer": "يتوفر LOAM {version}. على هذا الهاتف الإصدار {current}.",
+  "update.download": "التنزيل من GitHub",
+  "update.failed": "تعذّر الوصول إلى GitHub. تحقق من اتصال هذا الهاتف بالإنترنت وحاول مرة أخرى.",
+  "update.githubNote": "يسأل هذا GitHub عن رقم أحدث إصدار من LOAM. يرى GitHub عنوان الإنترنت لهذا الهاتف، ولا يُرسل أي شيء آخر.",
 };

@@ -119,4 +119,13 @@ export const tr: Partial<AppCatalog> = {
   "reset.closeApp": "LOAM'u kapat",
   "reset.keyClearFailed": "Her şey silindi ancak bu telefonun şifreleme anahtarı temizlenemedi: {error}",
   "reset.retry": "Tekrar dene",
+  "update.available": "LOAM'ın yeni bir sürümü Google Play'de.",
+  "update.update": "Güncelle",
+  "update.check": "Güncellemeleri denetle",
+  "update.checking": "Denetleniyor…",
+  "update.current": "En son sürüme sahipsiniz ({version}).",
+  "update.newer": "LOAM {version} yayımlandı. Bu telefonda {current} var.",
+  "update.download": "GitHub'dan indir",
+  "update.failed": "GitHub'a ulaşılamadı. Bu telefonun internet bağlantısını kontrol edip yeniden deneyin.",
+  "update.githubNote": "Bu, GitHub'a LOAM'ın en son sürüm numarasını sorar. GitHub bu telefonun internet adresini görür; başka hiçbir şey gönderilmez.",
 };

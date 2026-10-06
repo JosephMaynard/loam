@@ -119,4 +119,13 @@ export const ps: Partial<AppCatalog> = {
   "reset.closeApp": "LOAM بند کړئ",
   "reset.keyClearFailed": "هر څه پاک شول، خو د دې تلیفون د کوډ کولو کیلي پاکه نه شوه: {error}",
   "reset.retry": "بیا هڅه وکړئ",
+  "update.available": "د LOAM نوې نسخه په Google Play کې شته.",
+  "update.update": "تازه کول",
+  "update.check": "د تازه کولو لټون",
+  "update.checking": "کتل کېږي…",
+  "update.current": "تاسو وروستۍ نسخه لرئ ({version}).",
+  "update.newer": "LOAM {version} شته. په دې تلیفون کې {current} نسخه ده.",
+  "update.download": "له GitHub څخه یې ښکته کړئ",
+  "update.failed": "GitHub ته لاسرسی ونشو. د دې تلیفون انټرنیټ وګورئ او بیا هڅه وکړئ.",
+  "update.githubNote": "دا له GitHub څخه د LOAM د وروستۍ نسخې شمېره پوښتي. GitHub د دې تلیفون انټرنیټي پته ویني؛ بل هېڅ نه لېږل کېږي.",
 };

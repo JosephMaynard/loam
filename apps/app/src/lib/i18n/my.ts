@@ -119,4 +119,13 @@ export const my: Partial<AppCatalog> = {
   "reset.closeApp": "LOAM ကို ပိတ်ရန်",
   "reset.keyClearFailed": "အရာအားလုံးကို ဖျက်ပြီးပါပြီ၊ သို့သော် ဤဖုန်း၏ ကုဒ်ဝှက်သော့ကို ရှင်းလင်း၍မရပါ- {error}",
   "reset.retry": "ထပ်ကြိုးစားရန်",
+  "update.available": "LOAM ဗားရှင်းအသစ်ကို Google Play တွင် ရနိုင်ပါပြီ။",
+  "update.update": "အပ်ဒိတ်လုပ်ရန်",
+  "update.check": "အပ်ဒိတ်များ စစ်ဆေးရန်",
+  "update.checking": "စစ်ဆေးနေသည်…",
+  "update.current": "နောက်ဆုံးဗားရှင်း ({version}) ကို သုံးနေပါသည်။",
+  "update.newer": "LOAM {version} ရနိုင်ပါပြီ။ ဤဖုန်းတွင် {current} ရှိသည်။",
+  "update.download": "GitHub မှ ဒေါင်းလုဒ်လုပ်ရန်",
+  "update.failed": "GitHub ကို ချိတ်ဆက်၍ မရပါ။ ဤဖုန်း၏ အင်တာနက်ချိတ်ဆက်မှုကို စစ်ဆေးပြီး ထပ်ကြိုးစားပါ။",
+  "update.githubNote": "၎င်းသည် GitHub ထံ LOAM ၏ နောက်ဆုံးဗားရှင်းနံပါတ်ကို မေးမြန်းသည်။ GitHub သည် ဤဖုန်း၏ အင်တာနက်လိပ်စာကို မြင်ရသည်။ အခြားမည်သည့်အရာမျှ မပို့ပါ။",
 };

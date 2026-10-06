@@ -18,6 +18,7 @@ import { CodeScanner } from '@/components/code-scanner';
 import { HoldToConfirm } from '@/components/hold-to-confirm';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { GitHubUpdateCheck, PlayUpdateNotice } from '@/components/update-notice';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { chooseAppLocale, loadAppLocale, useAppLocale } from '@/hooks/use-app-locale';
 import { loadHostMode, setHostMode } from '@/hooks/use-host-mode';
@@ -142,6 +143,9 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
       newNetwork: false,
     });
   }
+
+  // The screen setup opens on: "Welcome back", or the first question when there's nothing to continue.
+  const opening = step === 'home' || (step === 'type' && !continuable);
 
   const rememberedName = remembered && remembered.nodeName !== DEFAULT_NODE_NAME ? remembered.nodeName : undefined;
 
@@ -349,7 +353,10 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
             {step === 'language' || (step === 'type' && !continuable) ? (
               <Hero title={t('setup.welcomeTitle')} body={t('setup.welcomeBody')} />
             ) : null}
+            {/* Update news only on the screen setup opens on, where no network is running yet. */}
+            {opening ? <PlayUpdateNotice /> : null}
             {content}
+            {opening ? <GitHubUpdateCheck /> : null}
             {error ? (
               <ThemedText type="small" style={{ color: theme.danger }}>
                 {error}

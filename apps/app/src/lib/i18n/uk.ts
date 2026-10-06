@@ -119,4 +119,13 @@ export const uk: Partial<AppCatalog> = {
   "reset.closeApp": "Закрити LOAM",
   "reset.keyClearFailed": "Усе стерто, але ключ шифрування на цьому телефоні видалити не вдалося: {error}",
   "reset.retry": "Повторити",
+  "update.available": "Нова версія LOAM доступна в Google Play.",
+  "update.update": "Оновити",
+  "update.check": "Перевірити оновлення",
+  "update.checking": "Перевірка…",
+  "update.current": "У вас остання версія ({version}).",
+  "update.newer": "Доступна LOAM {version}. На цьому телефоні {current}.",
+  "update.download": "Завантажити з GitHub",
+  "update.failed": "Не вдалося з'єднатися з GitHub. Перевірте інтернет-з'єднання цього телефона й спробуйте ще раз.",
+  "update.githubNote": "Це запитує в GitHub номер останньої версії LOAM. GitHub бачить інтернет-адресу цього телефона; більше нічого не надсилається.",
 };

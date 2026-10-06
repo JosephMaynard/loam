@@ -119,4 +119,13 @@ export const fa: Partial<AppCatalog> = {
   "reset.closeApp": "بستن LOAM",
   "reset.keyClearFailed": "همه چیز پاک شد، اما کلید رمزگذاری این گوشی پاک نشد: {error}",
   "reset.retry": "تلاش دوباره",
+  "update.available": "نسخهٔ جدیدی از LOAM در Google Play موجود است.",
+  "update.update": "به‌روزرسانی",
+  "update.check": "بررسی به‌روزرسانی",
+  "update.checking": "در حال بررسی…",
+  "update.current": "آخرین نسخه را دارید ({version}).",
+  "update.newer": "LOAM {version} موجود است. نسخهٔ این تلفن {current} است.",
+  "update.download": "دریافت از GitHub",
+  "update.failed": "اتصال به GitHub ممکن نشد. اتصال اینترنت این تلفن را بررسی کنید و دوباره تلاش کنید.",
+  "update.githubNote": "این کار شمارهٔ آخرین نسخهٔ LOAM را از GitHub می‌پرسد. GitHub نشانی اینترنتی این تلفن را می‌بیند؛ چیز دیگری فرستاده نمی‌شود.",
 };

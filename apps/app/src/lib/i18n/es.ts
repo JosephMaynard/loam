@@ -119,4 +119,13 @@ export const es: Partial<AppCatalog> = {
   "reset.closeApp": "Cerrar LOAM",
   "reset.keyClearFailed": "Se borró todo, pero no se pudo eliminar la clave de cifrado de este teléfono: {error}",
   "reset.retry": "Reintentar",
+  "update.available": "Hay una nueva versión de LOAM en Google Play.",
+  "update.update": "Actualizar",
+  "update.check": "Buscar actualizaciones",
+  "update.checking": "Comprobando…",
+  "update.current": "Tienes la última versión ({version}).",
+  "update.newer": "LOAM {version} está disponible. Este teléfono tiene la {current}.",
+  "update.download": "Descargar de GitHub",
+  "update.failed": "No se pudo conectar con GitHub. Comprueba la conexión a internet de este teléfono e inténtalo de nuevo.",
+  "update.githubNote": "Esto pregunta a GitHub cuál es la última versión de LOAM. GitHub ve la dirección de internet de este teléfono; no se envía nada más.",
 };

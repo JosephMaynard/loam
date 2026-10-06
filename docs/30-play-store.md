@@ -18,6 +18,11 @@ device checks below, and size headroom before a production track.
   `libreactnative.so`) and both vendored `better_sqlite3.node` prebuilds report LOAD `p_align 0x4000`;
   `zipalign -c -P 16` passes. The only `0x1000` files are Hexagon **DSP** blobs under `assets/`, outside the
   check. **Re-verify after any llama.rn, nodejs-mobile or SQLite-prebuild bump.**
+- **Update notice, not self-updating.** The AAB (`-PloamDistribution=play`, `modules/loam-updates`) links
+  Google's `app-update` library and, on the opening setup screen only, asks the Play Store app whether a newer
+  version exists; "Update" opens the Play listing. The APK on GitHub Releases (`github`) contains no Play code
+  and has a tap-only "Check for updates" (GitHub's latest-release API, version tag only; "Download" opens the
+  releases page). Neither downloads or installs anything, so Play's rule against updating outside Play holds.
 - **No dynamic code.** expo-updates absent; the server bundle is built at build time; no `eval`. The on-device
   model download is *data* (GGUF), which policy allows.
 - **No telemetry** in the app or server (PostHog is marketing-site only). For Data safety, "No data

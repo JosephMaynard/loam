@@ -47,6 +47,19 @@ export const PRIVACY_POLICY: PolicySection[] = [
     ],
   },
   {
+    heading: "Checking for updates",
+    blocks: [
+      {
+        kind: "p",
+        text:
+          "The Android app from Google Play asks the Play Store app on the phone whether a newer LOAM exists, " +
+          "when LOAM opens. The Android app from GitHub checks only when you tap **Check for updates**: it asks " +
+          "GitHub for LOAM's latest version number, and GitHub sees your phone's internet address. Neither " +
+          "check sends anything from your LOAM network, and neither downloads or installs anything by itself.",
+      },
+    ],
+  },
+  {
     heading: "What the host device stores",
     blocks: [
       {
