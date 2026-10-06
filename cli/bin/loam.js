@@ -362,7 +362,6 @@ const savedJoinHost =
 const envJoinHost = process.env.LOAM_JOIN_HOST;
 const joinHost = envJoinHost ?? savedJoinHost ?? firstLanIPv4();
 process.env.LOAM_JOIN_HOST = joinHost;
-const joinUrl = `http://${joinHost}:${port}`;
 
 // A per-boot host token, as the Android host has: nobody on the network becomes admin by being first to open
 // the app. Admin comes from this computer instead: the terminal UI's "open as admin" link or People screen,
@@ -476,6 +475,12 @@ if (useTui) {
 
 /** The plain print-out: URLs, the join QR, and a one-time admin link while nobody is admin. */
 function printPlain(app) {
+  // What the server advertises to joiners (its join host and client port, which `CLIENT_PORT` can set apart
+  // from the port it listens on), as the terminal UI shows; `port` stays the local listener's.
+  const advertised = app.host.status();
+  const advertisedHost =
+    advertised.joinHost.includes(":") && !advertised.joinHost.startsWith("[") ? `[${advertised.joinHost}]` : advertised.joinHost;
+  const joinUrl = `http://${advertisedHost}:${advertised.port}`;
   const transportKey = app.host.transportPublicKey();
   const qrUrl = transportKey ? `${joinUrl}#k=${transportKey}` : joinUrl;
 
