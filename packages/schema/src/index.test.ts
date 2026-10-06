@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ChannelSchema,
   DbEncryptionModeSchema,
   IdSchema,
+  isReactionEmoji,
   LoamConfigSchema,
   LoamConfigUpdateSchema,
   MessageCreateRequestSchema,
@@ -537,5 +538,47 @@ describe("schema refinements", () => {
       expect(ok("A".repeat(1_398_108))).toBe(false);
       expect(ok("A".repeat(1_398_104))).toBe(true);
     });
+  });
+});
+
+describe("isReactionEmoji", () => {
+  it("accepts one emoji, including multi-code-point sequences", () => {
+    for (const emoji of ["👍", "❤️", "😐", "🤞", "✅", "👍🏽", "👩‍👩‍👧", "🇬🇧", "1️⃣", "🏴󠁧󠁢󠁳󠁣󠁴󠁿"]) {
+      expect(isReactionEmoji(emoji), emoji).toBe(true);
+    }
+  });
+
+  it("refuses text, several emoji, padding and the empty string", () => {
+    for (const value of ["", "lol", "a", "1", "#", "👍👍", "👍 ", " 👍", "👍x", "❤"]) {
+      expect(isReactionEmoji(value), JSON.stringify(value)).toBe(false);
+    }
+  });
+
+  it("keeps the same verdicts on an engine without the regex v flag (the older-browser fallback)", async () => {
+    const NativeRegExp = RegExp;
+    vi.stubGlobal(
+      "RegExp",
+      new Proxy(NativeRegExp, {
+        construct(target, args: [string, string?]) {
+          if (args[1]?.includes("v")) {
+            throw new SyntaxError("Invalid flags supplied to RegExp constructor 'v'");
+          }
+          return Reflect.construct(target, args);
+        },
+      }),
+    );
+    vi.resetModules();
+    try {
+      const { isReactionEmoji: fallback } = await import("./index.js");
+      for (const emoji of ["👍", "❤️", "😐", "🤞", "✅", "👍🏽", "👩‍👩‍👧", "🏳️‍🌈", "🇬🇧", "1️⃣", "🏴󠁧󠁢󠁳󠁣󠁴󠁿"]) {
+        expect(fallback(emoji), emoji).toBe(true);
+      }
+      for (const value of ["", "lol", "a", "1", "#", "👍👍", "👍 ", " 👍", "👍x", "❤", "©", "™", "🇬", "1⃣", "👍\u200d"]) {
+        expect(fallback(value), JSON.stringify(value)).toBe(false);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
   });
 });

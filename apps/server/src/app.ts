@@ -10,6 +10,7 @@ import {
 } from "@loam/crypto";
 import {
   ChannelSchema,
+  isReactionEmoji,
   LoamConfigUpdateSchema,
   MessageSchema,
   UserSchema,
@@ -1689,6 +1690,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
       if (blockError) {
         return { error: blockError, forbidden: true };
+      }
+
+      // A new reaction is one emoji (the client offers a set plus any emoji from the device keyboard).
+      // Checked after the toggle-off above, so a reaction stored before this rule can still be removed.
+      if (!isReactionEmoji(input.reaction)) {
+        return { error: "Reaction must be a single emoji" };
       }
     }
 
