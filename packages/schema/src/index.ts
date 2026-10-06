@@ -1392,3 +1392,75 @@ export const StreamEventSchema = z.discriminatedUnion("type", [
   }),
 ]);
 export type StreamEvent = z.infer<typeof StreamEventSchema>;
+
+// ---------------------------------------------------------------------------------------------------------
+// Host API: the in-process interface a launcher on the host machine drives (the `loamnet` terminal UI).
+// Never on the wire: whoever runs the node's process owns the node, so these calls need no session. Plain
+// types (no schemas) because nothing here is parsed from untrusted input.
+// ---------------------------------------------------------------------------------------------------------
+
+/** What the host's own screen shows about the running node. */
+export type HostStatus = {
+  nodeName: string;
+  version: string;
+  /** The address joiners are told to use (the join QR's host). */
+  joinHost: string;
+  /** The port joiners connect to. */
+  port: number;
+  /** The posture actually enforced (Developer Mode forces "off"). */
+  transportEncryption: TransportEncryption;
+  /** At-rest encryption actually in effect ("off" when the store was opened without a key). */
+  dbEncryption: DbEncryptionMode;
+  securityProfile: SecurityProfile;
+  joinPolicy: JoinPolicy;
+  devMode: boolean;
+  /** Distinct addresses of other devices with an open connection (never the host's own). */
+  clients: string[];
+  people: { total: number; online: number; pending: number; admins: number };
+  /** Stored rows set aside at boot because they no longer validate. */
+  quarantined: number;
+  logLevel: HostLogLevel;
+};
+
+export type HostLogLevel = "info" | "debug";
+
+/** One person on the node, for the host's People screen. */
+export type HostUser = {
+  id: string;
+  displayName: string;
+  isAdmin: boolean;
+  online: boolean;
+  pending: boolean;
+  banned: boolean;
+  createdAt: number;
+};
+
+/** A one-time code with the last moment it can be used. */
+export type HostCode = { code: string; expiresAt: number };
+
+export type HostResult<T> = { ok: true; value: T } | { ok: false; error: string };
+
+export type HostApi = {
+  status(): HostStatus;
+  /** The node's configuration, secrets redacted (as the admin API returns it). */
+  config(): LoamConfig;
+  /** Apply a change exactly as `PATCH /api/admin/config` would: same validation, persistence, broadcast. */
+  updateConfig(update: LoamConfigUpdate): HostResult<LoamConfig>;
+  /** Everyone who can be shown on the People screen (humans only, newest last). */
+  users(): HostUser[];
+  /** Make someone an admin; approves them first if they were waiting. Refuses a banned user. */
+  makeAdmin(userId: string): HostResult<HostUser>;
+  /** A single-use, 10-minute code that makes whoever presents it an admin (`POST /api/admin/claim`). */
+  adminClaimCode(): HostCode;
+  /** A "Link another node" code (docs/11). */
+  linkCode(): HostCode;
+  /** The rotating invite for the join QR on an approval-only node, else null. */
+  invite(): HostCode | null;
+  /** Pin the address joiners are told to use; `undefined` goes back to picking the best one automatically. */
+  setJoinHost(host: string | undefined): void;
+  setLogLevel(level: HostLogLevel): void;
+  /** The node's transport public key for the join QR's `#k=`, or undefined in Developer Mode. */
+  transportPublicKey(): string | undefined;
+  /** Emergency Reset, from the host itself: no admin session needed, whatever `killSwitch.enabled` says. */
+  emergencyReset(): Promise<{ complete: boolean }>;
+};

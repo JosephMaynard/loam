@@ -214,29 +214,11 @@ export function registerUserRoutes(ctx: AppContext): void {
       return reply.code(403).send(errorBody("Admin access required"));
     }
 
-    const user = ctx.data.users.find((candidate) => candidate.id === request.params.userId);
-
-    if (!user) {
-      return reply.code(404).send(errorBody("User does not exist"));
+    const result = promoteUser(ctx, request.params.userId);
+    if (!result.ok) {
+      return reply.code(result.status).send(errorBody(result.error));
     }
-
-    if (user.type !== "human") {
-      return reply.code(400).send(errorBody("Only people can be admins"));
-    }
-
-    if (user.banned || user.pending) {
-      return reply.code(400).send(errorBody("Approve or unban this user before promoting them"));
-    }
-
-    if (user.isAdmin) {
-      return user;
-    }
-
-    const next = UserSchema.parse({ ...user, isAdmin: true });
-    ctx.store.upsertUser(next);
-    Object.assign(user, next);
-    ctx.broadcast({ type: "userUpserted", user });
-    return user;
+    return result.user;
   });
 
   // Ban / shadow-ban / unban a user. Open to admins and moderators; never usable against an admin
@@ -885,4 +867,45 @@ export function registerUserRoutes(ctx: AppContext): void {
       }
     },
   );
+}
+
+/**
+ * Make a person an admin (one-way, docs/12): `POST /api/admin/users/:userId/promote`, and the host's own
+ * screen. Only the host may also approve a waiting person in the same step (`approve`): an admin in the web
+ * app approves first, as before.
+ */
+export function promoteUser(
+  ctx: AppContext,
+  userId: string,
+  { approve = false }: { approve?: boolean } = {},
+): { ok: true; user: User } | { ok: false; status: 400 | 404; error: string } {
+  const user = ctx.data.users.find((candidate) => candidate.id === userId);
+
+  if (!user) {
+    return { ok: false, status: 404, error: "User does not exist" };
+  }
+
+  if (user.type !== "human") {
+    return { ok: false, status: 400, error: "Only people can be admins" };
+  }
+
+  if (user.banned || (user.pending && !approve)) {
+    return { ok: false, status: 400, error: "Approve or unban this user before promoting them" };
+  }
+
+  if (user.pending) {
+    // Approve through the same path as the approval queue, so whatever it does for a newly let-in member
+    // happens here too.
+    ctx.applyUserModeration(user, { pending: false });
+  }
+
+  if (user.isAdmin) {
+    return { ok: true, user };
+  }
+
+  const next = UserSchema.parse({ ...user, isAdmin: true });
+  ctx.store.upsertUser(next);
+  Object.assign(user, next);
+  ctx.broadcast({ type: "userUpserted", user });
+  return { ok: true, user };
 }

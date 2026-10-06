@@ -37,6 +37,8 @@ import { createMeshLayer } from "./mesh.js";
 import type { Runtime } from "./runtime.js";
 import { createStoreLifecycle } from "./store-lifecycle.js";
 import type { AppContext } from "./app-context.js";
+import { createAdminClaimCodes } from "./admin-links.js";
+import { createHostApi } from "./host-api.js";
 import { createInviteIssuer } from "./invites.js";
 import { createKillSwitch, type KillSwitchResult } from "./kill-switch.js";
 import { createLinkCodes } from "./sync-links.js";
@@ -100,8 +102,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * resolved it at boot, or pinned a hostname); otherwise re-resolved on every call (docs/15 A7) so
    * the web-served QR reflects whatever's reachable right now, not whatever was up at listen() time.
    */
+  // The host's own screen can pin a different join address at runtime (`LoamApp.host.setJoinHost`).
+  let joinHostOverride = options.joinHost;
+
   function currentJoinHost(): string {
-    return options.joinHost ?? resolveLanAddress();
+    return joinHostOverride ?? resolveLanAddress();
   }
 
   const server = Fastify({
@@ -154,6 +159,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const claimAttempts = new Map<string, { count: number; resetAt: number }>();
   const invites = createInviteIssuer();
   const linkCodes = createLinkCodes();
+  const adminClaimCodes = createAdminClaimCodes();
   const panicAttempts = new Map<string, { count: number; resetAt: number }>();
   // The host's static transport keypair (docs/08). Loaded/generated in loadData, persisted in the
   // config table (encrypted at rest when the DB is), rotated by the kill switch. Its public key goes
@@ -348,6 +354,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     claimAttempts,
     invites,
     linkCodes,
+    adminClaimCodes,
     panicAttempts,
     identityMintCounters,
     maxNewIdentitiesPerWindow,
@@ -2439,6 +2446,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     sockets,
     getTransportPublicKey: () =>
       effectiveTransportEncryption() === "off" ? undefined : ensureTransportIdentity().publicKey,
+    host: createHostApi(ctx, {
+      setJoinHost(host) {
+        joinHostOverride = host;
+      },
+      async emergencyReset() {
+        const result = await killSwitch.executeKillSwitch();
+        return { complete: result.complete };
+      },
+    }),
     async close() {
       clearInterval(reaperTimer);
       clearInterval(syncTimer);

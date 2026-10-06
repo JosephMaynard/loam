@@ -63,6 +63,7 @@ export function createKillSwitch(ctx: AppContext) {
     ctx.invites.rotate();
     // And every "Link a node" code shown: a photo of one must not link a node to the fresh network.
     ctx.linkCodes.clear();
+    ctx.adminClaimCodes.clear();
     /** Synchronous in-memory lockdown for an INCOMPLETE wipe: 503-gate on, drop every in-memory mirror,
      *  tell clients to purge, close sockets, then report the distinct incomplete notice. Used by the
      *  no-hook fail-closed paths (a phase-write failure and a deletion failure) so nothing stale is served
