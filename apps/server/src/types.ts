@@ -1,7 +1,7 @@
 // Shared server types: the socket/session shapes, the in-memory data mirror, the client event union,
 // and the public `buildApp` option/handle types. Extracted from app.ts (2026-09-04 split).
 import type { FastifyInstance } from "fastify";
-import type { Channel, DbEncryptionMode, Message, NetworkConfig, User } from "@loam/schema";
+import type { Channel, DbEncryptionMode, HostApi, Message, NetworkConfig, User } from "@loam/schema";
 
 import type { LoamStore, StoreDriver } from "./db.js";
 
@@ -263,5 +263,7 @@ export type LoamApp = {
    * always wipe it. Never reachable from the network. `keyClearRequested`: see `KillSwitchResult`.
    */
   emergencyReset(): Promise<{ complete: boolean; keyClearRequested: boolean }>;
+  /** The in-process host API (host-api.ts) for a launcher on the host machine: the `loamnet` terminal UI. */
+  host: HostApi;
   close(): Promise<void>;
 };

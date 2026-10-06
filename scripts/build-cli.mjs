@@ -39,7 +39,7 @@ function assertBuilt(path, hint) {
   }
 }
 
-for (const pkg of ["schema", "display-name", "avatar", "qr", "crypto"]) {
+for (const pkg of ["schema", "display-name", "avatar", "qr", "crypto", "tui"]) {
   assertBuilt(join(repoRoot, `packages/${pkg}/dist/index.js`), "pnpm -r build");
 }
 assertBuilt(clientDist, "pnpm --filter client build");

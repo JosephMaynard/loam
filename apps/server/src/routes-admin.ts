@@ -1,6 +1,6 @@
 // Admin: claim, config read/patch, kill switch, and the unauthenticated panic token. Extracted verbatim
 // from app.ts (2026-09-04 split) over the shared AppContext.
-import { AdminClaimRequestSchema, KillSwitchRequestSchema, type LoamConfig, LoamConfigUpdateSchema, PanicRequestSchema, UserSchema } from "@loam/schema";
+import { AdminClaimRequestSchema, KillSwitchRequestSchema, type LoamConfig, type LoamConfigUpdate, LoamConfigUpdateSchema, PanicRequestSchema, UserSchema } from "@loam/schema";
 import { readFileSync } from "node:fs";
 
 import type { AppContext } from "./app-context.js";
@@ -63,6 +63,9 @@ export function registerAdminRoutes(ctx: AppContext): void {
     const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
 
     if (currentUser.isAdmin) {
+      // Spend a one-time code from the host's screen anyway, so a link opened in a browser that was already
+      // admin isn't left usable by someone else for the rest of its 10 minutes.
+      ctx.adminClaimCodes.consume(body.data.secret);
       return currentUser;
     }
 
@@ -97,6 +100,13 @@ export function registerAdminRoutes(ctx: AppContext): void {
     // loopback, a bucket every co-located Android app can also hit, and a 256-bit random token cannot be
     // brute-forced, so exempting a match costs nothing — while a wrong guess still counts against the bucket.
     if (strategy === "hostDevice" && hostToken && timingSafeEqualStrings(body.data.secret, hostToken)) {
+      return promote();
+    }
+
+    // Or a one-time code the host's own screen handed out (admin-links.ts): the terminal UI's "open as
+    // admin" link. Spent on first use, so honoured before the limiter like the token. A banned person can't
+    // use one (the host's People screen refuses them too), and doesn't spend it trying.
+    if (strategy === "hostDevice" && hostToken && !currentUser.banned && ctx.adminClaimCodes.consume(body.data.secret)) {
       return promote();
     }
 
@@ -231,42 +241,56 @@ export function registerAdminRoutes(ctx: AppContext): void {
       return reply.code(400).send(errorBody("Invalid config update request"));
     }
 
-    // A link code (sync-links.ts) is written by setup and removed once used; a form an admin loaded
-    // earlier still holding it must not put a spent code back, nor can a save add one.
-    const update = body.data;
-    if (update.sync?.peers) {
-      update.sync.peers = update.sync.peers.map(({ linkCode, ...peer }) => {
-        const saved = ctx.appConfig.sync.peers.find((entry) => entry.url === peer.url);
-        return linkCode && saved?.linkCode === linkCode ? { ...peer, linkCode } : peer;
-      });
-    }
-
-    let next: LoamConfig;
-
-    try {
-      next = mergeConfig(ctx.appConfig, update);
-    } catch {
-      return reply.code(400).send(errorBody("Invalid config values"));
-    }
-
-    // Passphrase bootstrap without a passphrase would advertise a claim flow that can never
-    // succeed (and clearing the passphrase while the mode is active would lock admins out).
-    if (next.admin.bootstrap === "passphrase" && !next.admin.passphrase) {
-      return reply.code(400).send(errorBody("The passphrase bootstrap strategy requires a passphrase"));
-    }
-
-    // Validate the assistant bot BEFORE persisting: a botId naming an existing person would otherwise turn
-    // them into a bot (demoting an admin past the no-demote rule), and a bot record that fails validation
-    // would 500 here and then fail the next boot.
-    if (ctx.llm.botConfigError(next)) {
-      return reply.code(400).send(errorBody("Invalid config values"));
-    }
-
-    if (commitAdminConfig(ctx, next) === "failed") {
-      return reply.code(500).send(errorBody("Internal server error"));
+    const result = applyConfigUpdate(ctx, body.data);
+    if (!result.ok) {
+      return reply.code(result.status).send(errorBody(result.error));
     }
     return ctx.redactedConfig();
   });
+}
+
+/**
+ * Merge, check and commit a config change: the whole of `PATCH /api/admin/config` after authorisation,
+ * shared with the host's own screen (`LoamApp.host.updateConfig`) so the two can never validate differently.
+ */
+export function applyConfigUpdate(
+  ctx: AppContext,
+  update: LoamConfigUpdate,
+): { ok: true } | { ok: false; status: 400 | 500; error: string } {
+  // A link code (sync-links.ts) is written by setup and removed once used; a form an admin loaded
+  // earlier still holding it must not put a spent code back, nor can a save add one.
+  if (update.sync?.peers) {
+    update.sync.peers = update.sync.peers.map(({ linkCode, ...peer }) => {
+      const saved = ctx.appConfig.sync.peers.find((entry) => entry.url === peer.url);
+      return linkCode && saved?.linkCode === linkCode ? { ...peer, linkCode } : peer;
+    });
+  }
+
+  let next: LoamConfig;
+
+  try {
+    next = mergeConfig(ctx.appConfig, update);
+  } catch {
+    return { ok: false, status: 400, error: "Invalid config values" };
+  }
+
+  // Passphrase bootstrap without a passphrase would advertise a claim flow that can never
+  // succeed (and clearing the passphrase while the mode is active would lock admins out).
+  if (next.admin.bootstrap === "passphrase" && !next.admin.passphrase) {
+    return { ok: false, status: 400, error: "The passphrase bootstrap strategy requires a passphrase" };
+  }
+
+  // Validate the assistant bot BEFORE persisting: a botId naming an existing person would otherwise turn
+  // them into a bot (demoting an admin past the no-demote rule), and a bot record that fails validation
+  // would 500 here and then fail the next boot.
+  if (ctx.llm.botConfigError(next)) {
+    return { ok: false, status: 400, error: "Invalid config values" };
+  }
+
+  if (commitAdminConfig(ctx, next) === "failed") {
+    return { ok: false, status: 500, error: "Internal server error" };
+  }
+  return { ok: true };
 }
 
 /**

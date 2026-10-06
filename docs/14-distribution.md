@@ -30,12 +30,16 @@ esbuild over `cli/cli-entry.ts`:
   `import.meta.url` so the CommonJS deps that call `require(...)` (e.g. `@fastify/websocket` and Fastify itself) work in the
   ESM output.
 - **`cli/cli-entry.ts`** is a thin library entry that re-exports `startEmbeddedServer` + `firstLanIPv4`
-  from `apps/server/src/embedded.ts` and `encodeQR` + `renderQRToTerminal` from `@loam/qr`. Bundling a
-  library (not a boot-on-import `main`) lets `bin/loam.js` own env setup and the QR print before the
-  server starts.
+  from `apps/server/src/embedded.ts`, `encodeQR` + `renderQRToTerminal` from `@loam/qr`, and the terminal
+  UI (`createTui`, its log book, terminal and settings helpers) from `@loam/tui`. Bundling a library (not
+  a boot-on-import `main`) lets `bin/loam.js` own env setup, the passphrase prompt and the port check
+  before the server starts, then hand the running node to the terminal UI (or print the plain output).
+- **The terminal UI** (`packages/tui`) drives the node only through the in-process host API
+  (`LoamApp.host`, `HostApi` in `@loam/schema`): never over the network. `bin/loam.js` passes a per-boot
+  host token, so admin comes from the host's own screen (`hostDevice`), as on Android.
 - The **`@loam/*` workspace packages are inlined** from their compiled `dist/` (run `pnpm -r build`
   first — `prepublishOnly` does). `build-cli.mjs` fails early if any of them (`schema`, `display-name`,
-  `avatar`, `qr`, `crypto`) hasn't been built.
+  `avatar`, `qr`, `crypto`, `tui`) hasn't been built.
 - The **three SQLite drivers stay external**: `node:sqlite` (the builtin default), `better-sqlite3`,
   and `better-sqlite3-multiple-ciphers`. Only the ciphers driver is a package dependency, and it is an
   **`optionalDependency`** — so encryption is opt-in and a native build failure never aborts

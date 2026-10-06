@@ -3,7 +3,8 @@
 // the shared AppContext.
 import { randomBytes } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
+import { join } from "node:path";
 
 import type { AppContext } from "./app-context.js";
 import { reportBootNotice } from "./boot-bridge.js";
@@ -63,6 +64,7 @@ export function createKillSwitch(ctx: AppContext) {
     ctx.invites.rotate();
     // And every "Link a node" code shown: a photo of one must not link a node to the fresh network.
     ctx.linkCodes.clear();
+    ctx.adminClaimCodes.clear();
     /** Synchronous in-memory lockdown for an INCOMPLETE wipe: 503-gate on, drop every in-memory mirror,
      *  tell clients to purge, close sockets, then report the distinct incomplete notice. Used by the
      *  no-hook fail-closed paths (a phase-write failure and a deletion failure) so nothing stale is served
@@ -370,6 +372,13 @@ export function createKillSwitch(ctx: AppContext) {
 
     await rm(ctx.avatarsDir, { recursive: true, force: true });
     await rm(ctx.attachmentsDir, { recursive: true, force: true });
+    // Diagnostics files the host's terminal UI wrote into the data folder (they hold no names, messages or
+    // addresses, but do say when the node had trouble): a reset leaves nothing of the old network behind.
+    for (const name of await readdir(ctx.dataDir).catch(() => [] as string[])) {
+      if (/^loam-diagnostics-[\w.-]+\.txt$/.test(name)) {
+        await rm(join(ctx.dataDir, name), { force: true }).catch(() => undefined);
+      }
+    }
     ctx.attachmentOwners.clear();
     ctx.sessions.clear();
     // Drop every secure identity token (docs/20): the DB rows are gone (wipeAll / encrypted file delete),

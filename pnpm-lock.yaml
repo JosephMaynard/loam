@@ -53,6 +53,9 @@ importers:
       '@loam/qr':
         specifier: workspace:*
         version: link:packages/qr
+      '@loam/tui':
+        specifier: workspace:*
+        version: link:packages/tui
       esbuild:
         specifier: 'catalog:'
         version: 0.28.2
@@ -377,6 +380,25 @@ importers:
       vitest:
         specifier: 'catalog:'
         version: 5.0.2(@types/node@26.1.2)(jsdom@30.1.1(@noble/hashes@1.8.0))(vite@8.3.0(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))
+
+  packages/tui:
+    dependencies:
+      '@loam/qr':
+        specifier: workspace:*
+        version: link:../qr
+      '@loam/schema':
+        specifier: workspace:*
+        version: link:../schema
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.6
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 5.0.2(@types/node@24.13.6)(jsdom@30.1.1(@noble/hashes@1.8.0))(vite@8.3.0(@types/node@24.13.6)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))
 
 packages:
 

@@ -87,8 +87,19 @@ export function resolveEphemeralDbKey(dbKeyEnv: string | undefined): boolean {
   return dbKeyEnv === "ephemeral";
 }
 
+/** What a launcher can hand `startEmbeddedServer` directly, beside the env. */
+export type EmbeddedServerOptions = {
+  /** Where the server's log lines go instead of stdout (the `loamnet` terminal UI reads them). */
+  logStream?: { write(line: string): void };
+  /** A per-boot host token; overrides `LOAM_HOST_TOKEN`. See `AppOptions.hostToken`. */
+  hostToken?: string;
+  /** Install SIGINT/SIGTERM handlers that close the server and exit (default true). A launcher that
+   * restarts the server in-process, or owns shutdown itself, turns this off. */
+  handleSignals?: boolean;
+};
+
 /** Build and start the server from environment variables — the Android host's boot path (see the module note). */
-export async function startEmbeddedServer(): Promise<LoamApp> {
+export async function startEmbeddedServer(launcher: EmbeddedServerOptions = {}): Promise<LoamApp> {
   const dataDir = process.env.LOAM_DATA_DIR;
 
   if (!dataDir) {
@@ -140,7 +151,8 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
     version: process.env.LOAM_VERSION?.trim() || "dev",
     // The launcher's per-boot host token (`LOAM_HOST_TOKEN`, minted in main.js): forces the `hostDevice`
     // admin bootstrap and gates the loopback mesh bridge — see `AppOptions.hostToken`. Never logged.
-    hostToken: process.env.LOAM_HOST_TOKEN || undefined,
+    hostToken: launcher.hostToken || process.env.LOAM_HOST_TOKEN || undefined,
+    logStream: launcher.logStream,
   });
 
   if (app.adminSetupCode) {
@@ -157,8 +169,10 @@ export async function startEmbeddedServer(): Promise<LoamApp> {
       },
     );
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  if (launcher.handleSignals !== false) {
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+  }
 
   await app.server.listen({ host, port });
   app.server.log.info(`LOAM embedded server listening on ${host}:${port}`);

@@ -6,6 +6,7 @@
 import type { TransportIdentity } from "@loam/crypto";
 import type { AdminBootstrapStrategy, AvatarImageMimeType, Channel, ChannelCreateRequest, ChannelUpdateRequest, LoamConfig, LoamConfigUpdate, Message, MessageCreateRequest, NetworkConfig, StreamEvent, TransportEncryption, User, UserUpdateRequest } from "@loam/schema";
 import type { LoamStore, StoreQuarantine } from "./db.js";
+import type { AdminClaimCodes } from "./admin-links.js";
 import type { InviteIssuer } from "./invites.js";
 import type { KillSwitchResult } from "./kill-switch.js";
 import { createLlmLayer } from "./llm.js";
@@ -40,6 +41,8 @@ export type AppContext = {
   invites: InviteIssuer;
   /** Outstanding "Link a node" codes (sync-links.ts); cleared by the kill switch. */
   linkCodes: LinkCodes;
+  /** Outstanding one-time admin claim codes from the host's own screen (admin-links.ts); cleared by the kill switch. */
+  adminClaimCodes: AdminClaimCodes;
   panicAttempts: Map<string, { count: number; resetAt: number }>;
   transportSessions: Map<string, TransportSession>;
   identityTokens: Map<string, string>;

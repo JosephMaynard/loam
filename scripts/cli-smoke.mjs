@@ -9,13 +9,16 @@
 //      health check and the web client there;
 //   4. an explicit `--port` that is taken is refused with a message (exit 1), not a stack trace;
 //   5. `--encrypt` with $LOAM_DB_KEY starts, writes a database that isn't plaintext SQLite, and reopens
-//      it with the same key.
+//      it with the same key;
+//   6. without a terminal it prints the plain join output (no line per request; while nobody is admin, a
+//      one-time admin link written to a file only its owner can read), refuses `--kiosk`, and starts on a
+//      port saved in cli.json.
 //
 // Needs `pnpm build` first (it runs scripts/build-cli.mjs itself). Uses the network for `npm install`.
 // Usage: node scripts/cli-smoke.mjs
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, openSync, readSync, closeSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, openSync, readFileSync, readSync, closeSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -143,10 +146,39 @@ async function main() {
     check(health.ok && (await health.json()).ok === true, "the health check answers on the chosen port");
     const shell = await fetch(`http://127.0.0.1:${node.port}/channels`);
     check(shell.ok && (await shell.text()).includes("<html"), "the web client is served (SPA route → shell)");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    check(!/incoming request|request completed/.test(node.output()), "plain mode prints no line per request");
+    const linkFile = join(work, "plain", "admin-link.txt");
+    check(
+      node.output().includes(`admin link (renewed every 10 minutes) is in ${linkFile}`) && !/#k=[^\s]*&a=/.test(node.output()),
+      "without a terminal, the one-time admin link goes to a file, never to the output",
+    );
+    check(
+      /^http:\/\/\S+#k=[A-Za-z0-9_-]+&a=[A-Za-z0-9_-]{22}\n$/.test(readFileSync(linkFile, "utf8")) &&
+        (process.platform === "win32" || (statSync(linkFile).mode & 0o777) === 0o600),
+      "the admin link file holds the link and only its owner can read it",
+    );
     await node.stop();
   } finally {
     await releaseDefault?.();
   }
+
+  // --kiosk needs the terminal UI.
+  const kiosk = spawnSync(process.execPath, [bin, "--kiosk", "--data-dir", join(work, "kiosk")], {
+    encoding: "utf8",
+    env: baseEnv,
+    timeout: 30_000,
+  });
+  check(kiosk.status === 1 && /--kiosk needs the terminal UI/.test(kiosk.stderr), "--kiosk without a terminal is refused");
+
+  // A port saved from the terminal UI (cli.json) is used when no --port is given.
+  const savedDir = join(work, "saved");
+  const savedPort = await freePort();
+  run("mkdir", ["-p", savedDir]);
+  writeFileSync(join(savedDir, "cli.json"), JSON.stringify({ port: savedPort }));
+  const savedNode = await startLoam(bin, ["--data-dir", savedDir], baseEnv);
+  check(savedNode.port === savedPort, `the port saved in cli.json (${savedPort}) is used`);
+  await savedNode.stop();
 
   // Explicit port taken → refused.
   const takenPort = await freePort();

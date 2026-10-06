@@ -35,6 +35,7 @@ import { ApiError, fetchJson, requestJson, REQUEST_TIMEOUT_MS } from "./lib/api"
 import { bytesToBase64, exceededAttachmentLimit, formatByteLimit, prepareImageAttachment } from "./lib/attachments";
 import { cachedBlockListFor, fetchBlockList, persistBlockList, setUserBlocked, withoutBlockedAuthors } from "./lib/blocks";
 import { confirmIdentity, forgetConfirmedIdentity, listenForIdentityChange, readConfirmedIdentity } from "./lib/identity";
+import { takeAdminClaimCode } from "./lib/admin-link";
 import { takeInviteCode } from "./lib/invite";
 import {
   compareCreatedAt,
@@ -1550,6 +1551,26 @@ function LoamApp() {
             nextConfig = { ...nextConfig, currentUser: claimed };
           } catch {
             // Keep the token; retried on the next resync (WS reconnect / boot retry).
+          } finally {
+            hostClaimInFlightRef.current = false;
+          }
+          if (!active) {
+            return;
+          }
+        }
+
+        // The host's own terminal opened this page with a one-time admin code (lib/admin-link.ts). It is
+        // presented once: a code that was refused (expired, already used) or lost to a network blip is dropped,
+        // and the person opens the link from the terminal again. A browser that is already admin presents it
+        // too, so the server spends it and nobody else holding the same link can use it.
+        const adminCode = !hostClaimInFlightRef.current ? takeAdminClaimCode() : undefined;
+        if (adminCode) {
+          hostClaimInFlightRef.current = true;
+          try {
+            const claimed = await claimAdmin(adminCode);
+            nextConfig = { ...nextConfig, currentUser: claimed };
+          } catch {
+            // Dropped, as above.
           } finally {
             hostClaimInFlightRef.current = false;
           }

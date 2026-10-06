@@ -1,6 +1,7 @@
 import { render } from "preact";
 import "./global.css";
 import { App } from "./app.tsx";
+import { captureAdminClaimCode } from "./lib/admin-link.ts";
 import { captureInviteCode } from "./lib/invite.ts";
 import { captureJoinKey } from "./lib/transport.ts";
 import { recoverPendingWipe } from "./lib/local-store.ts";
@@ -12,9 +13,10 @@ import { installViewportSync } from "./lib/viewport.ts";
 // stays un-hydratable meanwhile, so no wiped data is loaded even if this retry is still deferred.
 void recoverPendingWipe();
 
-// Read the join link before anything rewrites the URL: an invite code, then the `#k=` key (the router's
-// first redirect drops the fragment). A key from the URL only ever establishes or offers a pin; the Android
+// Read the join link before anything rewrites the URL: the host terminal's one-time admin code, an invite
+// code, then the `#k=` key (the router's first redirect drops the fragment). A key from the URL only ever establishes or offers a pin; the Android
 // host's own key override comes solely from its native injection (`__loamHostTransportKey`), never a URL.
+captureAdminClaimCode();
 captureInviteCode();
 captureJoinKey();
 

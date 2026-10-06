@@ -61,18 +61,35 @@ policy**, plus **Emergency reset** on a Private network.
 npx loamnet                 # or: npm install -g loamnet && loam
 ```
 
-It prints the address to open and a QR code. **Open it yourself first:** on a computer the first person to
-open a new network becomes its admin. Your admin identity lives in that browser, so keep using it. Useful
-options (`loam --help` has them all):
+In a terminal it opens a full-screen view that keeps the join QR on screen, with **Activity**, **People**,
+**Settings** and **Debug** screens a number key away (`?` lists the keys). **Press `o` to become admin:**
+your browser opens LOAM already signed in as admin, through a link that works once, for 10 minutes; press
+`p` in that dialog for a QR that makes a phone admin instead (it stops working when the dialog closes). Nobody becomes admin by opening a new network
+first. Your admin identity lives in that browser, so keep using it. **People → m** makes anyone who has
+joined an admin too.
+
+**Kiosk mode** (`k`, or start with `--kiosk`) leaves only the join QR, the network's name and the number
+of connected devices on screen until a password is entered, for a computer left out for people to join
+from. On an approval network its QR lets people straight in. It locks the screen, not the computer, so on a
+machine left alone run `exec loam --kiosk` under its own user account. Without a terminal (a service) or
+with `--plain`, `loam` prints the address and the QR instead; while nobody is admin, a one-time admin link
+is printed (in a terminal) or written to `admin-link.txt` in the data folder (for a service), never to the
+log. Useful options (`loam --help` has them all):
 
 | Option | Effect |
 |---|---|
 | `--port <n>` | Listen on another port (default 3000, or the next free one). |
 | `--data-dir <dir>` | Where the data lives (default `$XDG_DATA_HOME/loam` or `~/.loam`). |
 | `--encrypt` | Encrypt the database (pictures and files are stored beside it, unencrypted). The passphrase comes from `$LOAM_DB_KEY` or a prompt; `--encrypt ephemeral` uses a key that lives only in memory. |
+| `--kiosk` | Start locked in kiosk mode. |
+| `--plain` | Print the QR and addresses instead of the full-screen view. `--verbose` adds a line per request. |
 
-Prefer not to rely on "whoever opens it first"? Choose another way to become admin in the config file or
-**Admin → Bootstrap**:
+The terminal's **Settings** screen changes the main network settings live (the same ones as the web
+admin's) and remembers the port, a pinned join address and kiosk mode for the next start, in `cli.json` in
+the data folder.
+
+A node run some other way (`pnpm --filter @loam/server start`, for one) uses the **bootstrap** strategy
+from the config file or **Admin → Bootstrap**:
 
 | Strategy | How admin is claimed |
 |---|---|
@@ -81,7 +98,8 @@ Prefer not to rely on "whoever opens it first"? Choose another way to become adm
 | `passphrase` | A secret from the config, entered the same way. Stored hashed, never in the clear. |
 | `none` | Nobody can claim admin. |
 
-(The Android app uses its own `hostDevice` strategy, whatever is configured.)
+(The Android app and `loamnet` use their own `hostDevice` strategy, whatever is configured: admin comes
+from the host's own screen.)
 
 ## 3. Letting people in
 
