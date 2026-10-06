@@ -1541,3 +1541,43 @@ code {
     transition: none;
   }
 }
+
+/* ---- The terminal screen (loamnet's TUI), as drawn in the terminal mockups ---- */
+
+.t-badge {
+  padding: 1px 6px;
+  margin-right: 4px;
+  border-radius: 3px;
+  background: #dde7e0;
+  color: #0d1410;
+  font-weight: 700;
+}
+
+.t-tab {
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(221, 231, 224, 0.16);
+  color: #eef4f0;
+  font-weight: 600;
+}
+
+.t-on {
+  color: #7fd3a5;
+}
+
+.t-warn {
+  color: #f2c46d;
+}
+
+/* The TUI draws its join code black on white, so it scans on any terminal theme. */
+.terminal-body .t-qr {
+  padding: 6px;
+  border-radius: 4px;
+  background: #eef4f0;
+  color: #0d1410;
+}
+
+.terminal-showcase {
+  width: 100%;
+  max-width: 520px;
+}

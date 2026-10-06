@@ -82,10 +82,8 @@ Android 8 or newer.
 npx loamnet
 ```
 
-In a terminal it opens a full-screen view with the QR code to scan, which stays on screen, plus
-Activity, People, Settings and Debug screens. Press **o** to open LOAM in your browser as the network's
-admin; nobody becomes admin just by opening it first. **k** locks the screen in kiosk mode, so a
-computer can be left out for people to join from. Needs [Node.js](https://nodejs.org) 22.14 or newer.
+It opens LOAM's terminal screen, with the QR code to scan (see below). Needs
+[Node.js](https://nodejs.org) 22.14 or newer.
 
 ```bash
 npx loamnet --port 8080            # another port (by default 3000, or the next free one)
@@ -96,6 +94,28 @@ npx loamnet --kiosk                # start locked, showing only the join QR
 npx loamnet --plain                # print the QR and addresses instead (also what a service gets)
 npm install -g loamnet && loam     # install it for good
 ```
+
+#### The terminal screen
+
+In a terminal, `loamnet` takes over the window (your scrollback comes back when it stops) and keeps the
+join code on screen. Everything else is a number key away, and **?** lists the keys:
+
+| Key | Screen | What it's for |
+|---|---|---|
+| **1** | Join | The QR code and the address. **o** opens LOAM in your browser as the network's admin (**p** then shows a QR that makes a phone admin), **a** picks which network address to advertise, **h** hides the code. |
+| **2** | Activity | Requests and problems as they happen. **e** shows only problems, space pauses. |
+| **3** | People | Who has joined and who is online. **m** makes someone an admin. |
+| **4** | Settings | The network's name, security profile, who can join, encryption and how long messages last, changed live; a code to link another network; Emergency Reset; and the port and kiosk mode for next time. |
+| **5** | Debug | Versions, how the node is set up, recent problems, detailed logging, and a diagnostics file for a bug report. |
+
+Messages, approvals and moderation stay in the web app. Nobody becomes admin just by opening a new
+network first: admin comes from this screen.
+
+**Kiosk mode** (**k**, or start with `--kiosk`) locks the terminal to the join code, the network's name
+and the number of connected devices until a password is entered, so a computer can be left on a desk
+for people to join from. It locks the screen, not the computer.
+
+Run as a service, or with `--plain`, `loamnet` prints the address and the QR code instead.
 
 More in the [`loamnet` README](cli/README.md).
 
