@@ -228,8 +228,9 @@ function rows(view: View, config: LoamConfig): Row[] {
             if (!/^\d+$/.test(value) || port < 1 || port > 65535) {
               return "Enter a number from 1 to 65535.";
             }
-            view.saveSettings({ ...view.settings, port });
-            view.toast(`Port ${port} from the next start`);
+            if (view.saveSettings({ ...view.settings, port })) {
+              view.toast(`Port ${port} from the next start`);
+            }
             return undefined;
           },
         });
@@ -249,8 +250,9 @@ function rows(view: View, config: LoamConfig): Row[] {
       activate(view) {
         const kiosk = view.settings.kiosk;
         if (kiosk) {
-          view.saveSettings({ ...view.settings, kiosk: { ...kiosk, startLocked: !kiosk.startLocked } });
-          view.toast(kiosk.startLocked ? "Starts unlocked" : "Starts locked in kiosk mode");
+          if (view.saveSettings({ ...view.settings, kiosk: { ...kiosk, startLocked: !kiosk.startLocked } })) {
+            view.toast(kiosk.startLocked ? "Starts unlocked" : "Starts locked in kiosk mode");
+          }
         }
       },
     },
@@ -267,8 +269,9 @@ function rows(view: View, config: LoamConfig): Row[] {
           yes: "forget it",
           onYes() {
             const { kiosk: _removed, ...rest } = view.settings;
-            view.saveSettings(rest);
-            view.toast("Kiosk password forgotten");
+            if (view.saveSettings(rest)) {
+              view.toast("Kiosk password forgotten");
+            }
           },
         });
       },

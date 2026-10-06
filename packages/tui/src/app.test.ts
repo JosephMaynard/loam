@@ -43,9 +43,18 @@ function fakeHost(overrides: Partial<{ users: HostUser[]; profile: LoamConfig["s
   };
   const host = {
     status: vi.fn(() => ({ ...status, nodeName: config.node.name })),
-    /** Test hook: make the node look like it was just reset. */
-    reset() {
+    /** Test hook: make the node look like a reset started (and, unless `finished` is false, ended). */
+    reset(finished = true) {
       status.resets += 1;
+      status.resetting = !finished;
+    },
+    /** Test hook: the reset that was running ends. */
+    finishReset() {
+      status.resetting = false;
+    },
+    /** Test hook: point joiners somewhere. */
+    setJoinHostDirect(value: string) {
+      status.joinHost = value;
     },
     config: vi.fn(() => config),
     updateConfig: vi.fn((update: LoamConfigUpdate) => {
@@ -111,6 +120,7 @@ function setup(
     settings?: CliSettings;
     startLocked?: boolean;
     now?: () => number;
+    failSaves?: boolean;
   } = {},
 ) {
   const host = options.host ?? fakeHost();
@@ -133,7 +143,12 @@ function setup(
     system,
     launch: { dataDir: "/home/ada/.loam", nodeVersion: "v24.15.0", platform: "darwin arm64", databaseDriver: "node:sqlite" },
     settings: options.settings ?? {},
-    saveSettings: (next) => saved.push(next),
+    saveSettings: (next) => {
+      if (options.failSaves) {
+        throw new Error("ENOSPC: no space left on device");
+      }
+      saved.push(next);
+    },
     writeFile: (path, contents) => writes.push({ path, contents }),
     startLocked: options.startLocked,
     quit,
@@ -569,5 +584,62 @@ describe("the diagnostics file", () => {
     expect(contents).not.toMatch(/fe80|2001:db8|pi\.local|\/home\/ada|att_0123|user\.1a2b/);
     expect(contents).toContain("12:34:56");
     expect(contents).toContain("/api/dms/<id>");
+  });
+});
+
+describe("findings from the second review", () => {
+  it("doesn't announce a reset that hasn't finished, and says when one is stuck", async () => {
+    const host = fakeHost();
+    const { tui, log, screenText } = setup({ host });
+    log.note("info", "from before");
+    host.reset(false);
+    await tui.input("2");
+    expect(log.entries()).toHaveLength(1);
+    expect(screenText()).toContain("RESETTING (if this stays, restart loam)");
+    expect(screenText()).not.toContain("everything from before is gone");
+
+    host.finishReset();
+    await tui.input("2");
+    expect(log.entries()).toEqual([]);
+    expect(screenText()).toContain("everything from before is gone");
+    expect(screenText()).not.toContain("RESETTING");
+  });
+
+  it("reports a startup setting that couldn't be written, and doesn't pretend it was", async () => {
+    const { tui, screenText } = setup({ failSaves: true });
+    await tui.input("4" + "\x1b[B".repeat(10) + "\r");
+    await tui.input("\x7f".repeat(5) + "3005\r");
+    expect(screenText()).toContain("Not saved: couldn't write cli.json (ENOSPC: no space left on device)");
+    expect(screenText()).not.toContain("Port 3005 from the next start");
+    expect(screenText()).toMatch(/Port\s+3000/);
+
+    await tui.input("k");
+    await tui.input("abcd\r");
+    await tui.input("abcd\r");
+    expect(tui.locked).toBe(false);
+    expect(screenText()).toContain("kiosk mode isn't on");
+  });
+
+  it("keeps the QR on the kiosk screen in an 80x24 window", () => {
+    const { tui, screenText } = setup({
+      terminal: fakeTerminal(80, 24),
+      settings: { kiosk: { passwordHash: hashKioskPassword("abcd"), startLocked: true } },
+      startLocked: true,
+    });
+    expect(tui.locked).toBe(true);
+    const screen = screenText();
+    expect(screen.split("\n").filter((line) => /[█▀▄]/.test(line)).length).toBeGreaterThanOrEqual(18);
+    expect(screen).toContain("Scan to join");
+    expect(screen).toContain("http://192.168.8.159:3000");
+  });
+
+  it("hands out the whole link, key included, when the address is too long for a QR", () => {
+    const host = fakeHost();
+    host.setJoinHostDirect("a-very-long-host-name-that-will-not-fit.example.internal.network.local");
+    const { screenText } = setup({ host });
+    const screen = screenText();
+    expect(screen).toContain("Share this whole link instead");
+    const joined = screen.split("\n").map((line) => line.trim()).join("");
+    expect(joined).toContain(`.local:3000#k=${KEY}`);
   });
 });

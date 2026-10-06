@@ -78,11 +78,20 @@ export const joinScreen: Screen = {
       return [...qr.lines.map((line) => [{ text: "  " }, ...line]), [], ...info];
     }
 
+    if (!view.state.qrHidden && !qr) {
+      // Too long to encode: hand out the whole link, key (and invite) included, or a joiner would lose the
+      // protection the QR gives, and couldn't join a network that requires it at all.
+      return [
+        [],
+        text("  This join address is too long for a QR code. Share this whole link instead:", { fg: "yellow" }),
+        ...breakLink(view.joinLink(), Math.max(20, width - 4)).map((piece) => text(`  ${piece}`, { fg: "cyan" })),
+        [],
+        ...info,
+      ];
+    }
     const note = view.state.qrHidden
       ? "The QR code is hidden. Press h to show it."
-      : qr
-        ? "Make this window a little bigger to show the QR code (or press k: kiosk mode uses the whole window)."
-        : "This join address is too long for a QR code. Share the link instead.";
+      : "Make this window a little bigger to show the QR code (or press k: kiosk mode uses the whole window).";
     return [[], text(`  ${note}`, { fg: "yellow" }), [], ...info];
   },
   key(view, key) {
@@ -122,8 +131,11 @@ export function pickJoinAddress(view: View): void {
     onPick(index) {
       const address = index === 0 ? undefined : addresses[index - 1]?.address;
       view.options.host.setJoinHost(address);
-      view.saveSettings({ ...view.settings, joinHost: address });
-      view.toast(address ? `Joiners now use ${address}` : "Join address is picked automatically");
+      // In use now either way; only remembering it for the next start can fail.
+      const remembered = view.saveSettings({ ...view.settings, joinHost: address });
+      if (remembered) {
+        view.toast(address ? `Joiners now use ${address}` : "Join address is picked automatically");
+      }
     },
   });
 }

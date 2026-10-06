@@ -1558,9 +1558,9 @@ function LoamApp() {
 
         // The host's own terminal opened this page with a one-time admin code (lib/admin-link.ts). It is
         // presented once: a code that was refused (expired, already used) or lost to a network blip is dropped,
-        // and the person opens the link from the terminal again.
-        const adminCode =
-          !nextConfig.currentUser.isAdmin && !hostClaimInFlightRef.current ? takeAdminClaimCode() : undefined;
+        // and the person opens the link from the terminal again. A browser that is already admin presents it
+        // too, so the server spends it and nobody else holding the same link can use it.
+        const adminCode = !hostClaimInFlightRef.current ? takeAdminClaimCode() : undefined;
         if (adminCode) {
           hostClaimInFlightRef.current = true;
           try {

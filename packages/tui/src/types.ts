@@ -62,7 +62,8 @@ export type View = {
   joinLink(): string;
   /** `http://localhost:<port>`. */
   localUrl(): string;
-  saveSettings(next: CliSettings): void;
+  /** Save the startup settings; false (and an error shown) when they couldn't be written. */
+  saveSettings(next: CliSettings): boolean;
   lockKiosk(): void;
 };
 

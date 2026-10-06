@@ -116,12 +116,15 @@ export function createTui(options: TuiOptions): Tui {
     },
     localUrl: () => `http://localhost:${status.port}`,
     saveSettings(next) {
-      settings = next;
+      // Kept in memory only once it is on disk, so the screen never shows a setting that wasn't saved.
       try {
         options.saveSettings(next);
       } catch (error) {
-        view.toast(`Couldn't save to cli.json: ${error instanceof Error ? error.message : String(error)}`, "error");
+        view.toast(`Not saved: couldn't write cli.json (${error instanceof Error ? error.message : String(error)})`, "error");
+        return false;
       }
+      settings = next;
+      return true;
     },
     lockKiosk: () => lockKiosk(),
   };
@@ -140,9 +143,10 @@ export function createTui(options: TuiOptions): Tui {
     } catch {
       // Keep the last status (the store may be mid-reset); the next tick tries again.
     }
-    if (status.resets !== resets) {
-      // An Emergency Reset (from here, the web app or the panic token): drop what this screen kept about
-      // the old network, its log of who connected included.
+    // An Emergency Reset (from here, the web app or the panic token) counts up as it starts. Only once it
+    // has finished does this screen drop what it kept about the old network (its log of who connected
+    // included) and say so; one that stops part-way leaves `resetting` set, shown in the header instead.
+    if (status.resets !== resets && !status.resetting) {
       resets = status.resets;
       options.log.clear();
       state.activity = { errorsOnly: state.activity.errorsOnly, scroll: 0 };
@@ -170,6 +174,9 @@ export function createTui(options: TuiOptions): Tui {
         : { text: status.transportEncryption === "required" ? "encrypted only" : "encrypted", style: { fg: "green" } },
       { text: ` · v${status.version} `, style: { dim: true } },
     ];
+    if (status.resetting) {
+      right.unshift({ text: "RESETTING (if this stays, restart loam) · ", style: { fg: "red", bold: true } });
+    }
     const gap = Math.max(1, width - lineWidth(left) - lineWidth(right));
     return [...left, { text: " ".repeat(gap) }, ...right];
   }
@@ -230,22 +237,34 @@ export function createTui(options: TuiOptions): Tui {
 
   function kioskFrame(width: number, height: number): Line[] {
     const qr = state.qrHidden ? undefined : qrFor(view.joinLink());
-    const lines: Line[] = [];
-    const center = (line: Line): Line => [{ text: " ".repeat(Math.max(0, Math.floor((width - lineWidth(line)) / 2))) }, ...line];
-    const below: Line[] = [
+    const room = height - 1;
+    const info: Line[] = [
       text(status.nodeName, { bold: true }),
       text("Scan to join", { fg: "cyan" }),
       text(view.joinUrl(), { dim: true }),
       [],
       text(status.clients.length === 1 ? "1 device connected" : `${status.clients.length} devices connected`, { dim: true }),
     ];
-    const fits = qr && qr.width <= width && qr.lines.length + below.length + 3 <= height;
-    const block = [...(fits ? [...qr.lines, []] : []), ...below];
-    const top = Math.max(0, Math.floor((height - block.length - 2) / 2));
+    const pad = (count: number): Line => [{ text: " ".repeat(Math.max(0, count)) }];
+    let block: Line[];
+    // The QR beside the text where the width allows (an 80×24 window does), under it where the height does,
+    // and the text alone only when neither fits.
+    const sideWidth = Math.max(0, ...info.map(lineWidth));
+    if (qr && qr.lines.length <= room && qr.width + 4 + sideWidth <= width) {
+      const left = Math.floor((width - qr.width - 4 - sideWidth) / 2);
+      const infoTop = Math.floor((qr.lines.length - info.length) / 2);
+      block = qr.lines.map((line, row) => [...pad(left), ...line, ...pad(4), ...(info[row - infoTop] ?? [])]);
+    } else {
+      const center = (line: Line): Line => [...pad(Math.floor((width - lineWidth(line)) / 2)), ...line];
+      const stacked = qr && qr.width <= width && qr.lines.length + 1 + info.length <= room;
+      block = [...(stacked ? [...qr.lines, []] : []), ...info].map(center);
+    }
+    const lines: Line[] = [];
+    const top = Math.max(0, Math.floor((room - block.length) / 2));
     for (let row = 0; row < top; row += 1) lines.push([]);
-    for (const line of block) lines.push(center(line));
-    while (lines.length < height - 1) lines.push([]);
-    lines.length = height - 1;
+    lines.push(...block);
+    while (lines.length < room) lines.push([]);
+    lines.length = room;
     lines.push(
       toast && toast.until > now()
         ? text(` ${toast.message}`, { fg: toast.tone === "error" ? "red" : "green" })
@@ -300,8 +319,10 @@ export function createTui(options: TuiOptions): Tui {
   function lock(): void {
     locked = true;
     setModal(undefined);
-    // Clear the terminal's scrollback too, where it can be scrolled to from the locked screen.
+    // Clear the terminal's scrollback too, where it can be scrolled to from the locked screen. Some terminals
+    // clear the visible screen with it as well, so everything is repainted after.
     terminal.write("\x1b[3J");
+    painter.invalidate();
     redraw();
   }
 
@@ -345,7 +366,9 @@ export function createTui(options: TuiOptions): Tui {
             if (again !== first) {
               return "The passwords didn't match. Press Esc and start again.";
             }
-            view.saveSettings({ ...settings, kiosk: { passwordHash: hashKioskPassword(again), startLocked: false } });
+            if (!view.saveSettings({ ...settings, kiosk: { passwordHash: hashKioskPassword(again), startLocked: false } })) {
+              return "The password couldn't be saved (see below), so kiosk mode isn't on. Press Esc.";
+            }
             lock();
             return undefined;
           },

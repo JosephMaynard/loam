@@ -300,11 +300,12 @@ describe("the host terminal's one-time admin link", () => {
     expect(takeAdminClaimCode()).toBeUndefined();
   });
 
-  it("doesn't claim for a browser that is already admin", async () => {
+  it("presents the code even in a browser that is already admin, so the server spends it", async () => {
     window.history.replaceState(null, "", `/#a=${CODE}`);
     captureAdminClaimCode();
     const fetchMock = stubNode({ currentUser: { ...me, isAdmin: true } });
-    await boot("/channels");
-    expect(claims(fetchMock)).toHaveLength(0);
+    const root = await boot("/channels");
+    expect(claims(fetchMock)).toHaveLength(1);
+    expect(root.textContent).toContain("Admin");
   });
 });
