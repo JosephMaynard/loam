@@ -65,6 +65,10 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   server's own limiter sends no `x-ratelimit-*` headers.
 
 ### Fixed
+- **Messages crashed the app on older Android WebViews.** Checking whether a message is only emoji (to
+  show it large) relied on `Intl.Segmenter`, which arrived in Chrome 87 and Safari 14.1, but LOAM supports
+  WebViews back to about Chrome 80. Without it, any message with text threw and the app fell to its error
+  screen. Text is now split with a fallback that keeps emoji sequences (skin tones, families, flags) whole.
 - **The privacy policy, README and website overstated connection encryption.** Joining by the code
   encrypts messages, but on a network that doesn't require encryption (the default) pictures and files
   are downloaded unencrypted. They now say so, and that the website also counts copies of the

@@ -3,6 +3,7 @@
  * `createdAt`; these functions preserve that invariant while merging incoming messages cheaply.
  */
 import type { Message } from "@loam/schema";
+import { graphemes } from "./graphemes";
 import type { Conversation } from "./protocol";
 
 /** Aggregated reaction bucket for one emoji on a target message: its count and whether the current user reacted. */
@@ -304,7 +305,7 @@ const EMOJI_CODE_POINT = /\p{Extended_Pictographic}/u;
 
 /**
  * Whether `body`, trimmed, is nothing but 1 to 3 emoji and no other text — the WhatsApp-style "jumbo
- * emoji" rule (render big, no bubble). Counts by *grapheme cluster* via `Intl.Segmenter` so a
+ * emoji" rule (render big, no bubble). Counts by *grapheme cluster* ({@link graphemes}) so a
  * multi-codepoint emoji — a ZWJ sequence like a family emoji, a skin-tone modifier, or a
  * variation-selector pair — counts as a single emoji rather than one per code point. Every
  * non-whitespace cluster must contain an `Extended_Pictographic` code point (checked with
@@ -321,10 +322,9 @@ export function isJumboEmoji(body: string): boolean {
     return false;
   }
 
-  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
   let emojiCount = 0;
 
-  for (const { segment } of segmenter.segment(trimmed)) {
+  for (const segment of graphemes(trimmed)) {
     if (/^\s+$/.test(segment)) {
       continue;
     }

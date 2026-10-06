@@ -1020,28 +1020,33 @@ export const ReactionMessageSchema = BaseMessageSchema.extend({
 export type ReactionMessage = z.infer<typeof ReactionMessageSchema>;
 
 /**
- * One emoji element for the fallback below: an emoji-presentation character, or a pictograph made emoji
+ * One emoji element of {@link EMOJI_SEQUENCE_PATTERN}: an emoji-presentation character, or a pictograph made emoji
  * by U+FE0F (so a text-style `❤`, `©` or digit doesn't count), with an optional skin tone. Half a flag
  * isn't one.
  */
 const EMOJI_ELEMENT = "(?!\\p{Regional_Indicator})(?:\\p{Emoji_Presentation}|\\p{Extended_Pictographic}\\ufe0f)\\p{Emoji_Modifier}?";
 
 /**
+ * Regex source (for the `u` flag, unanchored) of one emoji sequence: elements joined only by ZWJ, with an
+ * optional tag sequence, or a flag pair, or a keycap. A structural stand-in for `\p{RGI_Emoji}` on engines
+ * without the `v` flag: it can't tell an RGI ZWJ sequence from an unlisted one without Unicode's sequence
+ * data. The client also uses it to keep emoji whole when splitting text where `Intl.Segmenter` is missing.
+ */
+export const EMOJI_SEQUENCE_PATTERN =
+  `(?:${EMOJI_ELEMENT}(?:\\u200d${EMOJI_ELEMENT})*(?:[\\u{e0020}-\\u{e007e}]+\\u{e007f})?` +
+  "|\\p{Regional_Indicator}{2}|[#*0-9]\\ufe0f\\u20e3)";
+
+/**
  * Exactly one emoji: one RGI emoji, so a flag, keycap, skin-tone or ZWJ sequence counts as one. Built at
- * runtime because the `v` flag needs a 2023+ engine. An older browser (iOS 16, say) gets the closest
- * structural check: elements joined only by ZWJ, an optional tag sequence, a flag pair or a keycap. It
- * can't tell an RGI ZWJ sequence from an unlisted one without Unicode's sequence data, so it is only the
- * client's pre-check; the server, on Node 24, always has the precise matcher and decides.
+ * runtime because the `v` flag needs a 2023+ engine. An older browser (iOS 16, say) gets
+ * {@link EMOJI_SEQUENCE_PATTERN}, so it is only the client's pre-check; the server, on Node 24, always has
+ * the precise matcher and decides.
  */
 const SINGLE_EMOJI = (() => {
   try {
     return new RegExp("^\\p{RGI_Emoji}$", "v");
   } catch {
-    return new RegExp(
-      `^(?:${EMOJI_ELEMENT}(?:\\u200d${EMOJI_ELEMENT})*(?:[\\u{e0020}-\\u{e007e}]+\\u{e007f})?` +
-        "|\\p{Regional_Indicator}{2}|[#*0-9]\\ufe0f\\u20e3)$",
-      "u",
-    );
+    return new RegExp(`^${EMOJI_SEQUENCE_PATTERN}$`, "u");
   }
 })();
 

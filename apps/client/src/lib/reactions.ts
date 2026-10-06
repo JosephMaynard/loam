@@ -9,6 +9,8 @@
  */
 import { isReactionEmoji } from "@loam/schema";
 
+import { graphemes } from "./graphemes";
+
 /** One-tap reactions on the desktop hover toolbar. */
 export const QUICK_REACTIONS = ["👍", "👎", "❤️", "😂", "✅"];
 
@@ -31,11 +33,7 @@ export const MAX_RECENT_REACTIONS = 4;
  * @param text - What the user put in the emoji field.
  */
 export function firstEmoji(text: string): string | undefined {
-  const segments =
-    typeof Intl !== "undefined" && "Segmenter" in Intl
-      ? Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text), (part) => part.segment)
-      : Array.from(text);
-  return segments.find((segment) => isReactionEmoji(segment));
+  return graphemes(text).find((segment) => isReactionEmoji(segment));
 }
 
 /** The remembered picks, newest first: never one already in the sheet, never anything but an emoji. */

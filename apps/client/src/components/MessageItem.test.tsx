@@ -183,6 +183,31 @@ describe("MessageItem", () => {
     expect(host.querySelector(".message-sheet")).toBeNull();
   });
 
+  it("renders text and emoji-only messages where Intl.Segmenter is missing (Chrome 80 to 86)", () => {
+    const nativeSegmenter = Intl.Segmenter;
+    delete (Intl as { Segmenter?: unknown }).Segmenter;
+    try {
+      const text = mount(
+        <MessageItem currentUser={currentUser} message={post()} reactions={[]} usersById={new Map()} {...noop} />,
+      );
+      expect(text.querySelector(".markdown-body strong")?.textContent).toBe("world");
+      expect(text.querySelector(".jumbo")).toBeNull();
+
+      const emoji = mount(
+        <MessageItem
+          currentUser={currentUser}
+          message={post({ body: "👍🏽 👩‍👩‍👧" } as Partial<Message>)}
+          reactions={[]}
+          usersById={new Map()}
+          {...noop}
+        />,
+      );
+      expect(emoji.querySelector(".jumbo")).not.toBeNull();
+    } finally {
+      (Intl as { Segmenter?: unknown }).Segmenter = nativeSegmenter;
+    }
+  });
+
   it("shows the avatar and name only on the first message of a group", () => {
     const first = mount(
       <MessageItem currentUser={currentUser} message={post()} reactions={[]} usersById={new Map([[author.id, author]])} {...noop} />,
