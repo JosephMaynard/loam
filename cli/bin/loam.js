@@ -513,9 +513,17 @@ function printPlain(app) {
 
   // While nobody is admin (a new network, or again after an Emergency Reset), keep a one-time admin link on
   // hand (each lasts 10 minutes). In a terminal it is printed. Without one (a service), it goes to a file only
-  // this user can read, never to the log: a journal or log shipper is read by more people than this.
+  // this user can read, never to the log: a journal or log shipper is read by more people than this. A code
+  // that is replaced, or no longer needed because someone is admin, is retired on the server too: deleting
+  // the file alone would leave it usable until it expired.
   const linkFile = join(dataDir, "admin-link.txt");
   let current;
+  const retireCurrent = () => {
+    if (current) {
+      app.host.revokeAdminClaimCode(current.code);
+      current = undefined;
+    }
+  };
   const offerAdminLink = () => {
     let status;
     try {
@@ -526,20 +534,21 @@ function printPlain(app) {
     if (status.people.admins > 0) {
       if (current) {
         rmSync(linkFile, { force: true });
-        current = undefined;
+        retireCurrent();
       }
       return;
     }
     if (current && current.expiresAt - Date.now() > 60_000 && current.resets === status.resets) {
       return;
     }
+    retireCurrent();
     const minted = app.host.adminClaimCode();
     if (!minted) {
       return;
     }
     const key = app.host.transportPublicKey();
     const link = `${joinUrl}#${key ? `k=${key}&` : ""}a=${minted.code}`;
-    current = { expiresAt: minted.expiresAt, resets: status.resets };
+    current = { code: minted.code, expiresAt: minted.expiresAt, resets: status.resets };
     if (process.stdout.isTTY) {
       console.log("Nobody is admin yet. Open this link to become admin (it works once, for 10 minutes):");
       console.log(`  ${link}`);
