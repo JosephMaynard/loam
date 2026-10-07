@@ -505,6 +505,15 @@ export function registerChannelRoutes(ctx: AppContext): void {
       return reply.code(400).send(errorBody("Invalid channel update request"));
     }
 
+    // A new name or description is published text: it needs the member rules agreed. Settings like
+    // archiving or posting rules stay open, so an admin can still manage a channel before agreeing.
+    const textRulesError =
+      body.data.name !== undefined || body.data.description !== undefined ? ctx.rulesError(currentUser) : undefined;
+
+    if (textRulesError) {
+      return reply.code(403).send(errorBody(textRulesError));
+    }
+
     return ctx.applyChannelUpdate(channel, body.data);
   });
 

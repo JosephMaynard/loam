@@ -73,7 +73,7 @@ export const PRIVACY_POLICY: PolicySection[] = [
           "**That you agreed to the network rules**, and which version of them.",
           "**Moderation records:** reports you make, and actions the host or moderators take (bans, timeouts, " +
             "removed messages, join approvals). When you report a message, the network's moderators can read " +
-            "that message, even in a direct message, while your report is open.",
+            "that message and see its pictures and files, even in a direct message, while your report is open.",
           "**Your block list:** the people you have blocked. Only you see it; it isn't shared with them, with " +
             "moderators, or with other networks.",
           "**Network settings** chosen by the host.",

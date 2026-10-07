@@ -643,7 +643,6 @@ export const ar: Translation = {
   "report.shared": "سيرى مشرفو هذه الشبكة ما تُبلغ عنه.",
   "moderation.reports.inChannel": "{author} في #{channel}",
   "moderation.reports.inDm": "{author}، في رسالة مباشرة إلى {other}",
-  "moderation.reports.attachments": "المرفقات: {names}",
   "moderation.reports.reaction": "تفاعل: {emoji}",
   "moderation.reports.gone": "هذه الرسالة لم تعد متاحة.",
   "moderation.reports.alreadyRemoved": "حُذفت بالفعل",

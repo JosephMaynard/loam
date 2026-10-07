@@ -799,37 +799,6 @@ export const ReportSchema = z.object({
 });
 export type Report = z.infer<typeof ReportSchema>;
 
-/**
- * The reported message as the moderation queue shows it, read live when the queue loads (never stored with
- * the report): a moderator sees exactly the message that was reported, and nothing else from that
- * conversation. Once the message is deleted or expires, the queue shows that it's gone.
- */
-export const ReportedMessageSchema = z.object({
-  authorId: IdSchema,
-  /** The text, empty for a reaction or an attachment-only message. */
-  body: z.string().max(20_000),
-  /** The names of any attached files or pictures (the files themselves aren't shown in the queue). */
-  attachmentNames: z.array(z.string().max(255)).max(8),
-  /** A reaction's emoji, when the reported item is a reaction. */
-  reaction: z.string().max(64).optional(),
-  /** Where it was posted: a channel (by id and name) or a direct message between two people. */
-  where: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("channel"), channelId: IdSchema, channelName: z.string().max(200) }),
-    z.object({ kind: z.literal("dm"), userIds: z.array(IdSchema).length(2) }),
-  ]),
-  createdAt: TimestampSchema,
-  /** Already removed by a moderator. */
-  removed: z.boolean().optional(),
-});
-export type ReportedMessage = z.infer<typeof ReportedMessageSchema>;
-
-/** A report in the moderation queue: the stored report plus, for a message, what was reported. */
-export const ModerationReportSchema = ReportSchema.extend({
-  message: ReportedMessageSchema.optional(),
-  /** A message report whose message no longer exists (deleted, or expired under the retention setting). */
-  messageGone: z.boolean().optional(),
-});
-export type ModerationReport = z.infer<typeof ModerationReportSchema>;
 
 /** How a moderator resolves a report: record the action taken (and an optional private note). */
 export const ReportResolveRequestSchema = z.object({
@@ -910,6 +879,41 @@ export const MessageAttachmentSchema = z.object({
   name: z.string().min(1).max(255).optional(),
 });
 export type MessageAttachment = z.infer<typeof MessageAttachmentSchema>;
+
+/**
+ * The reported message as the moderation queue shows it, read live when the queue loads (never stored with
+ * the report): a moderator sees exactly the message that was reported, and nothing else from that
+ * conversation. Once the message is deleted or expires, the queue shows that it's gone.
+ */
+export const ReportedMessageSchema = z.object({
+  authorId: IdSchema,
+  /** The text, empty for a reaction or an attachment-only message. */
+  body: z.string().max(20_000),
+  /**
+   * Its pictures and files. While the report is open, the moderators who can see it may fetch them, even from
+   * a direct message or a private channel they're not in (`GET /api/attachments`), so they can judge them.
+   */
+  attachments: z.array(MessageAttachmentSchema).max(8),
+  /** A reaction's emoji, when the reported item is a reaction. */
+  reaction: z.string().max(64).optional(),
+  /** Where it was posted: a channel (by id and name) or a direct message between two people. */
+  where: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("channel"), channelId: IdSchema, channelName: z.string().max(200) }),
+    z.object({ kind: z.literal("dm"), userIds: z.array(IdSchema).length(2) }),
+  ]),
+  createdAt: TimestampSchema,
+  /** Already removed by a moderator. */
+  removed: z.boolean().optional(),
+});
+export type ReportedMessage = z.infer<typeof ReportedMessageSchema>;
+
+/** A report in the moderation queue: the stored report plus, for a message, what was reported. */
+export const ModerationReportSchema = ReportSchema.extend({
+  message: ReportedMessageSchema.optional(),
+  /** A message report whose message no longer exists (deleted, or expired under the retention setting). */
+  messageGone: z.boolean().optional(),
+});
+export type ModerationReport = z.infer<typeof ModerationReportSchema>;
 
 /**
  * Upload one message-attachment image (base64 body, like avatars). Clients downscale before

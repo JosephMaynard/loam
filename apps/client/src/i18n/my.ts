@@ -629,7 +629,6 @@ export const my: Translation = {
   "report.shared": "သင် တိုင်ကြားသည်များကို ဤကွန်ရက်၏ moderator များ မြင်ရပါမည်။",
   "moderation.reports.inChannel": "#{channel} တွင် {author}",
   "moderation.reports.inDm": "{author}၊ {other} ထံ တိုက်ရိုက်စာတွင်",
-  "moderation.reports.attachments": "ပူးတွဲပါ: {names}",
   "moderation.reports.reaction": "တုံ့ပြန်မှု: {emoji}",
   "moderation.reports.gone": "ဤစာကို မရနိုင်တော့ပါ။",
   "moderation.reports.alreadyRemoved": "ဖယ်ရှားပြီးသား",

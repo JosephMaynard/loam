@@ -48,28 +48,54 @@ export function parseSaveFileMessage(message: unknown): SaveFileRequest | undefi
   return { name: safeFileName(name), mimeType: mimeType as string, data };
 }
 
+/**
+ * Bumped by every `clearSharedFiles` (launch, Emergency Reset). A save that started before a clear checks it
+ * after each step and stops, deleting what it wrote, so a reset can't be undone by a save still in flight.
+ */
+let clearEpoch = 0;
+
 /** The cache folder the share sheet reads from. */
 function sharedDir(): string | undefined {
   return FileSystem.cacheDirectory ? `${FileSystem.cacheDirectory}loam-shared/` : undefined;
 }
 
-/** Remove every file handed to the share sheet. Best effort. */
-export async function clearSharedFiles(): Promise<void> {
+/** Delete the share folder. Best effort. */
+async function removeSharedDir(): Promise<void> {
   const dir = sharedDir();
   if (dir) {
     await FileSystem.deleteAsync(dir, { idempotent: true }).catch(() => undefined);
   }
 }
 
+/** Remove every file handed to the share sheet, and stop any save still in flight from writing one back. */
+export async function clearSharedFiles(): Promise<void> {
+  clearEpoch += 1;
+  await removeSharedDir();
+}
+
 /** Write the file to the share folder (emptied first) and open Android's share sheet for it. */
 export async function shareReceivedFile(request: SaveFileRequest): Promise<void> {
+  const epoch = clearEpoch;
+  const cleared = () => clearEpoch !== epoch;
   const dir = sharedDir();
-  if (!dir || !(await Sharing.isAvailableAsync())) {
+  if (!dir || !(await Sharing.isAvailableAsync()) || cleared()) {
     return;
   }
-  await clearSharedFiles();
+  await removeSharedDir();
+  if (cleared()) {
+    return;
+  }
   await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+  if (cleared()) {
+    await removeSharedDir();
+    return;
+  }
   const uri = `${dir}${request.name}`;
   await FileSystem.writeAsStringAsync(uri, request.data, { encoding: FileSystem.EncodingType.Base64 });
+  // A reset that landed while the file was being written: take it straight back out, never share it.
+  if (cleared()) {
+    await removeSharedDir();
+    return;
+  }
   await Sharing.shareAsync(uri, { mimeType: request.mimeType, dialogTitle: request.name });
 }

@@ -629,7 +629,6 @@ export const pt: Translation = {
   "report.shared": "Os moderadores desta rede verão o que você denunciar.",
   "moderation.reports.inChannel": "{author} em #{channel}",
   "moderation.reports.inDm": "{author}, em uma mensagem direta para {other}",
-  "moderation.reports.attachments": "Anexos: {names}",
   "moderation.reports.reaction": "Reação: {emoji}",
   "moderation.reports.gone": "Esta mensagem não está mais disponível.",
   "moderation.reports.alreadyRemoved": "Já removida",

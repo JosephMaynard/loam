@@ -630,7 +630,6 @@ export const prs: Translation = {
   "report.shared": "ناظران این شبکه آنچه را گزارش می‌دهید می‌بینند.",
   "moderation.reports.inChannel": "{author} در #{channel}",
   "moderation.reports.inDm": "{author}، در پیام مستقیم به {other}",
-  "moderation.reports.attachments": "ضمیمه‌ها: {names}",
   "moderation.reports.reaction": "واکنش: {emoji}",
   "moderation.reports.gone": "این پیام دیگر در دسترس نیست.",
   "moderation.reports.alreadyRemoved": "قبلاً حذف شده",

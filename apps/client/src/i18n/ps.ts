@@ -629,7 +629,6 @@ export const ps: Translation = {
   "report.shared": "د دې شبکې څارونکي به هغه څه وګوري چې تاسو یې راپور ورکوئ.",
   "moderation.reports.inChannel": "{author} په #{channel} کې",
   "moderation.reports.inDm": "{author}، {other} ته په مستقیم پیغام کې",
-  "moderation.reports.attachments": "ضمیمې: {names}",
   "moderation.reports.reaction": "غبرګون: {emoji}",
   "moderation.reports.gone": "دا پیغام نور شتون نه لري.",
   "moderation.reports.alreadyRemoved": "دمخه لرې شوی",

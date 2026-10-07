@@ -639,7 +639,6 @@ export const ru: Translation = {
   "report.shared": "Модераторы этой сети увидят ваши жалобы.",
   "moderation.reports.inChannel": "{author} в #{channel}",
   "moderation.reports.inDm": "{author}, в личном сообщении для {other}",
-  "moderation.reports.attachments": "Вложения: {names}",
   "moderation.reports.reaction": "Реакция: {emoji}",
   "moderation.reports.gone": "Это сообщение больше недоступно.",
   "moderation.reports.alreadyRemoved": "Уже удалено",

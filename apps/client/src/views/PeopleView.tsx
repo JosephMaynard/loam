@@ -9,12 +9,15 @@ import {
 import { generateDisplayName } from "@loam/display-name";
 import { useCallback, useEffect, useState } from "preact/hooks";
 
+import { AttachmentFile } from "../components/AttachmentFile";
+import { AttachmentImage } from "../components/AttachmentImage";
 import { Avatar } from "../components/Avatar";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CardHeader } from "../components/ScreenParts";
 import { ScreenHeader } from "../components/ScreenHeader";
 import { errorText, t } from "../i18n";
 import { fetchJson, parseUserList, requestJson, REQUEST_TIMEOUT_MS } from "../lib/api";
+import { isImageAttachment } from "../lib/attachments";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "../lib/capabilities";
 import { useIsTimedOut } from "../lib/timeout";
 import { encryptedFetch } from "../lib/transport";
@@ -451,10 +454,16 @@ function ReportedMessageView({ report, nameFor }: { report: ModerationReport; na
         </p>
       ) : null}
       {message.reaction ? <span className="row-meta">{t("moderation.reports.reaction", { emoji: message.reaction })}</span> : null}
-      {message.attachmentNames.length ? (
-        <span className="row-meta" dir="auto">
-          {t("moderation.reports.attachments", { names: message.attachmentNames.join(", ") })}
-        </span>
+      {message.attachments.length ? (
+        <div className="reported-attachments">
+          {message.attachments.map((attachment) =>
+            isImageAttachment(attachment) ? (
+              <AttachmentImage alt={attachment.name ?? ""} attachment={attachment} key={attachment.id} />
+            ) : (
+              <AttachmentFile attachment={attachment} key={attachment.id} />
+            ),
+          )}
+        </div>
       ) : null}
     </div>
   );

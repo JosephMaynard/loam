@@ -629,7 +629,6 @@ export const ur: Translation = {
   "report.shared": "آپ جو رپورٹ کریں گے، اس نیٹ ورک کے ناظمین اسے دیکھیں گے۔",
   "moderation.reports.inChannel": "#{channel} میں {author}",
   "moderation.reports.inDm": "{author}، {other} کو براہِ راست پیغام میں",
-  "moderation.reports.attachments": "منسلکات: {names}",
   "moderation.reports.reaction": "ردِعمل: {emoji}",
   "moderation.reports.gone": "یہ پیغام اب دستیاب نہیں ہے۔",
   "moderation.reports.alreadyRemoved": "پہلے ہی ہٹا دیا گیا",

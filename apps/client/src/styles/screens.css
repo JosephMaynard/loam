@@ -663,6 +663,21 @@
   padding-inline-start: 10px;
 }
 
+/* A reported message's pictures, as thumbnails, and its files as links. */
+.reported-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.reported-attachments .message-attachment {
+  width: auto;
+  max-width: 160px;
+  height: auto;
+  max-height: 160px;
+  border-radius: var(--radius-sm);
+}
+
 .reported-message-body {
   font-size: var(--text-md);
   white-space: pre-wrap;

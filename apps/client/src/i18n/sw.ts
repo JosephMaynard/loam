@@ -629,7 +629,6 @@ export const sw: Translation = {
   "report.shared": "Wasimamizi wa mtandao huu wataona unachoripoti.",
   "moderation.reports.inChannel": "{author} katika #{channel}",
   "moderation.reports.inDm": "{author}, katika ujumbe wa moja kwa moja kwa {other}",
-  "moderation.reports.attachments": "Viambatisho: {names}",
   "moderation.reports.reaction": "Mwitikio: {emoji}",
   "moderation.reports.gone": "Ujumbe huu haupatikani tena.",
   "moderation.reports.alreadyRemoved": "Tayari imeondolewa",

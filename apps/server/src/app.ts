@@ -1423,6 +1423,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // content broadcasting through PATCH on pre-shutdown messages (Sol round 2, P1) — but not
       // deletes: removing content a disabled feature created is cleanup, not use of the feature.
       if (!opts.isDelete) {
+        // An edit publishes new text, so it needs the member rules agreed like a new post does (someone who
+        // posted before the rules existed agrees before editing). Deleting stays open.
+        const rules = rulesError(actor);
+
+        if (rules) {
+          return { code: 403, error: rules };
+        }
+
         if (target.type === "dm" && !appConfig.features.enableDMs) {
           return { code: 403, error: "Direct messages are disabled on this LOAM node" };
         }

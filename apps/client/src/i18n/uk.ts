@@ -639,7 +639,6 @@ export const uk: Translation = {
   "report.shared": "Модератори цієї мережі бачитимуть ваші скарги.",
   "moderation.reports.inChannel": "{author} у #{channel}",
   "moderation.reports.inDm": "{author}, у прямому повідомленні для {other}",
-  "moderation.reports.attachments": "Вкладення: {names}",
   "moderation.reports.reaction": "Реакція: {emoji}",
   "moderation.reports.gone": "Це повідомлення більше недоступне.",
   "moderation.reports.alreadyRemoved": "Уже видалено",

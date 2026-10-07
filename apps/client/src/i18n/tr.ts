@@ -629,7 +629,6 @@ export const tr: Translation = {
   "report.shared": "Bu ağın moderatörleri bildirdiklerinizi görecek.",
   "moderation.reports.inChannel": "#{channel} kanalında {author}",
   "moderation.reports.inDm": "{author}, {other} kişisine doğrudan mesajda",
-  "moderation.reports.attachments": "Ekler: {names}",
   "moderation.reports.reaction": "Tepki: {emoji}",
   "moderation.reports.gone": "Bu mesaj artık mevcut değil.",
   "moderation.reports.alreadyRemoved": "Zaten kaldırıldı",

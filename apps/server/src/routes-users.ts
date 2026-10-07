@@ -902,6 +902,8 @@ export function registerUserRoutes(ctx: AppContext): void {
           !!message.attachments?.some((entry) => entry.id === attachment.id),
       );
       const sessionUserId = ctx.getSessionUserIdFromRequest(request);
+      // Served only because a moderator is judging a report about it: never cached past this request.
+      let reviewingReport = false;
 
       if (!owningMessage) {
         if (!sessionUserId || ctx.attachmentOwners.get(attachment.id)?.userId !== sessionUserId) {
@@ -918,7 +920,11 @@ export function registerUserRoutes(ctx: AppContext): void {
 
         const audience = ctx.messageAudienceUserIds(owningMessage);
 
-        if (audience && !audience.has(user.id)) {
+        // A moderator judging a report sees the reported message's pictures and files too, even from a
+        // direct message or a private channel they're not in: only while the report is in their queue.
+        reviewingReport = reportVisibleTo(ctx, user, owningMessage.id);
+
+        if (!reviewingReport && audience && !audience.has(user.id)) {
           return reply.code(404).send(errorBody("Attachment does not exist"));
         }
 
@@ -929,7 +935,7 @@ export function registerUserRoutes(ctx: AppContext): void {
         // too, matching how the message body itself is filtered.
         const owningAuthor = ctx.data.users.find((candidate) => candidate.id === owningMessage.authorId);
 
-        if (owningAuthor?.shadowBanned && owningMessage.authorId !== user.id) {
+        if (!reviewingReport && owningAuthor?.shadowBanned && owningMessage.authorId !== user.id) {
           return reply.code(404).send(errorBody("Attachment does not exist"));
         }
       }
@@ -939,7 +945,9 @@ export function registerUserRoutes(ctx: AppContext): void {
         // raw request param — the served path is then provably derived from the whitelisted pattern, never
         // from user input.
         const fileBytes = await readFile(join(ctx.attachmentsDir, attachmentFileName(attachment)));
-        reply.header("cache-control", "private, max-age=3600").header("x-content-type-options", "nosniff");
+        reply
+          .header("cache-control", reviewingReport ? "no-store" : "private, max-age=3600")
+          .header("x-content-type-options", "nosniff");
 
         // Images render inline with their real type (safe — images aren't executable). A NON-image file is
         // ALWAYS served as `application/octet-stream` + `Content-Disposition: attachment`, so the browser
@@ -1051,11 +1059,28 @@ function reportedMessage(ctx: AppContext, messageId: string): ReportedMessage | 
   return {
     authorId: message.authorId,
     body: message.type === "reaction" ? "" : message.body,
-    attachmentNames:
-      message.type === "reaction" ? [] : (message.attachments ?? []).slice(0, 8).map((attachment) => attachment.name ?? attachment.id),
+    attachments: message.type === "reaction" ? [] : (message.attachments ?? []).slice(0, 8),
     ...(message.type === "reaction" ? { reaction: message.reaction } : {}),
     where,
     createdAt: message.createdAt,
     ...(message.meta?.removedByModerator ? { removed: true } : {}),
   };
+}
+
+/**
+ * Whether `user` has a report about `messageId` in their moderation queue right now: an open report for any
+ * moderator or admin, an escalated one for an admin (the queue's own rule in `GET /api/moderation/reports`).
+ */
+function reportVisibleTo(ctx: AppContext, user: User, messageId: string): boolean {
+  if (!ctx.canModerate(user)) {
+    return false;
+  }
+  return ctx.store
+    .loadOpenReports()
+    .some(
+      (report) =>
+        report.targetType === "message" &&
+        report.targetId === messageId &&
+        (report.status === "open" || user.isAdmin),
+    );
 }

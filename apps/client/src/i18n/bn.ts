@@ -629,7 +629,6 @@ export const bn: Translation = {
   "report.shared": "আপনি যা রিপোর্ট করবেন, এই নেটওয়ার্কের মডারেটররা তা দেখতে পাবেন।",
   "moderation.reports.inChannel": "#{channel}-এ {author}",
   "moderation.reports.inDm": "{author}, {other}-কে পাঠানো সরাসরি বার্তায়",
-  "moderation.reports.attachments": "সংযুক্তি: {names}",
   "moderation.reports.reaction": "প্রতিক্রিয়া: {emoji}",
   "moderation.reports.gone": "এই বার্তাটি আর পাওয়া যাচ্ছে না।",
   "moderation.reports.alreadyRemoved": "আগেই সরানো হয়েছে",

@@ -702,7 +702,6 @@ export const en = {
   "report.shared": "This network's moderators will see what you report.",
   "moderation.reports.inChannel": "{author} in #{channel}",
   "moderation.reports.inDm": "{author}, in a direct message to {other}",
-  "moderation.reports.attachments": "Attached: {names}",
   "moderation.reports.reaction": "Reaction: {emoji}",
   "moderation.reports.gone": "This message is no longer available.",
   "moderation.reports.alreadyRemoved": "Already removed",
