@@ -38,6 +38,7 @@ vi.mock('@/constants/theme', () => ({
 }));
 vi.mock('@/hooks/use-theme', () => ({ useTheme: () => ({}) }));
 vi.mock('@/lib/on-device-llm', () => ({ registerOnDeviceLlm: () => () => undefined }));
+vi.mock('@/lib/save-file', () => ({ clearSharedFiles: async () => undefined, parseSaveFileMessage: () => undefined, shareReceivedFile: async () => undefined }));
 vi.mock('@/mesh/mesh-courier', () => ({ registerMeshCourier: () => () => undefined }));
 vi.mock('../../modules/loam-hotspot', () => ({
   closeApp: vi.fn(),

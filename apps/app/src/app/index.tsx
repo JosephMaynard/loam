@@ -31,6 +31,7 @@ import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useAppLocale } from '@/hooks/use-app-locale';
 import { useTheme } from '@/hooks/use-theme';
 import { colorSchemeForClientMessage } from '@/lib/client-theme';
+import { clearSharedFiles, parseSaveFileMessage, shareReceivedFile } from '@/lib/save-file';
 import { t } from '@/lib/i18n';
 import { SERVER_PORT, withInviteCode } from '@/lib/join-url';
 import {
@@ -378,6 +379,11 @@ function HostScreen() {
   // strip below the WebView (so its content never draws under the on-screen nav bar) and, when needed,
   // to keep the boot/error screen's content clear of it too.
   const insets = useSafeAreaInsets();
+
+  // A file handed to the share sheet last time (lib/save-file.ts) doesn't stay in the cache past a restart.
+  useEffect(() => {
+    void clearSharedFiles();
+  }, []);
 
   // Wire the Android hardware/gesture Back button to the WebView's in-app history. The LOAM web client
   // routes with preact-iso, which pushes History API entries, so the WebView has a real back stack — but
@@ -975,7 +981,16 @@ function HostScreen() {
         setShareOpen(true);
         return;
       }
+      // A received file the person tapped: hand it to Android's share sheet (lib/save-file.ts), since the
+      // WebView can't download the tunnel's blob: URLs. Malformed or oversized requests are dropped.
+      const saveRequest = parseSaveFileMessage(parsed);
+      if (saveRequest) {
+        void shareReceivedFile(saveRequest).catch((error: unknown) => console.warn('LOAM: could not share the file', error));
+        return;
+      }
       if (parsed && parsed.type === 'loam-wipe') {
+        // A shared file's cached copy must not outlive the reset.
+        void clearSharedFiles();
         // Give the client's own local purge a moment, then rejoin under the node's NEW transport key (see
         // `webViewKey`). Still a native no-op for key material — that stays with the acked protocol below.
         setTimeout(() => {
