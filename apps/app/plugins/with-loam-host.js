@@ -79,6 +79,15 @@ const MESH_PERMISSIONS = [
   "android.permission.CHANGE_NETWORK_STATE",
 ];
 
+// Android 7–11 (API 24–30), which MeshBleController still supports, predates that trio: there the
+// adapter, discovery and advertising calls need the legacy BLUETOOTH + BLUETOOTH_ADMIN pair instead (both
+// normal-level, granted at install), and granting location alone authorises none of them. Declared with
+// `maxSdkVersion="30"` so API 31+ never sees them (Android's prescribed split: developer.android.com/
+// develop/connectivity/bluetooth/bt-permissions). Added as manifest entries with that attribute, not
+// through withPermissions, which can only write plain uncapped names.
+const LEGACY_BLUETOOTH_PERMISSIONS = ["android.permission.BLUETOOTH", "android.permission.BLUETOOTH_ADMIN"];
+const LEGACY_BLUETOOTH_MAX_SDK = "30";
+
 const HOST_SERVICE_NAME = "expo.modules.loamhotspot.LoamHostService";
 
 /** Declare the foreground host service (LoamHostService) in the app manifest. */
@@ -253,18 +262,37 @@ function addOptionalFeatures(manifest) {
   return manifest;
 }
 
+/** Declare each LEGACY_BLUETOOTH_PERMISSIONS entry capped at API 30 on a parsed manifest (pure, tested). An
+ * existing declaration is capped rather than duplicated. */
+function addLegacyBluetoothPermissions(manifest) {
+  manifest["uses-permission"] = manifest["uses-permission"] ?? [];
+  for (const name of LEGACY_BLUETOOTH_PERMISSIONS) {
+    const existing = manifest["uses-permission"].find((permission) => permission.$?.["android:name"] === name);
+    if (existing) {
+      existing.$["android:maxSdkVersion"] = LEGACY_BLUETOOTH_MAX_SDK;
+    } else {
+      manifest["uses-permission"].push({
+        $: { "android:name": name, "android:maxSdkVersion": LEGACY_BLUETOOTH_MAX_SDK },
+      });
+    }
+  }
+  return manifest;
+}
+
 /**
  * Declare the mesh-transport hardware (BLE + Wi-Fi Aware) as OPTIONAL features so Google Play does not
  * filter out devices that lack them (many phones have no Wi-Fi Aware) — the app degrades gracefully
  * (BLE-only, or no mesh at all). Also stamp `usesPermissionFlags="neverForLocation"` on BLUETOOTH_SCAN
  * and NEARBY_WIFI_DEVICES so BLE-beacon scanning + Wi-Fi Aware discovery don't drag in the location-
  * permission story (we never derive location from either) — required for a mesh-only startup on API 33+.
+ * And declare the pre-12 BLUETOOTH + BLUETOOTH_ADMIN pair, capped at API 30.
  */
 function withMeshManifest(config) {
   return withAndroidManifest(config, (cfg) => {
     const manifest = cfg.modResults.manifest;
     manifest["uses-feature"] = manifest["uses-feature"] ?? [];
     addOptionalFeatures(manifest);
+    addLegacyBluetoothPermissions(manifest);
 
     // Stamp `neverForLocation` on BOTH BLUETOOTH_SCAN and NEARBY_WIFI_DEVICES — we never derive physical
     // location from BLE scanning or Wi-Fi Aware. Critically for NEARBY_WIFI_DEVICES (API 33+): without this
@@ -424,8 +452,10 @@ module.exports = function withLoamHost(config) {
 module.exports._internal = {
   BACKUP_DOMAINS,
   FINGERPRINT_FILE,
+  LEGACY_BLUETOOTH_PERMISSIONS,
   OPTIONAL_FEATURES,
   STALE_GUARD_GRADLE,
+  addLegacyBluetoothPermissions,
   addOptionalFeatures,
   applyApplicationAttributes,
   dataExtractionRulesXml,

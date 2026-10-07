@@ -143,9 +143,11 @@ jobs:
       - name: Build APK (and, on a tag, the AAB)
         # `aab` runs the same pipeline as `apk` (the APK lands at the same path) and then adds a
         # `bundleRelease` pass; it refuses to build without the release keystore, which a tag build has
-        # already guaranteed above.
+        # already guaranteed above. LOAM_RELEASE_TAG (tag builds only; empty otherwise) bakes the tag into
+        # the build, so an RC's update check knows the final release of its X.Y.Z is newer.
         env:
           IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+          LOAM_RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: |
           if [ "$IS_TAG" = "true" ]; then
             pnpm --filter app aab

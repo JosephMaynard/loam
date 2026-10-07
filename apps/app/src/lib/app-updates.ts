@@ -38,22 +38,76 @@ export function isNewerVersion(candidate: Version, current: Version): boolean {
   return false;
 }
 
+/** A pre-release suffix: `-beta.N` sorts before `-rc.N`, and both before the final release. */
+export type PreRelease = { readonly channel: 'beta' | 'rc'; readonly number: number };
+
+/** The version of the installed build: X.Y.Z, plus the pre-release a release-candidate build carries. */
+export type InstalledVersion = { readonly version: Version; readonly preRelease: PreRelease | null };
+
+/**
+ * `0.6.0`, `v0.6.0`, `0.6.0-rc.1` or `v0.6.0-beta.2` → its parts. The suffixes are exactly the ones a
+ * release tag may carry (scripts/check-versions.mjs); anything else → null. Pure.
+ */
+export function parseInstalledVersion(text: string): InstalledVersion | null {
+  const match = /^v?(\d{1,6})\.(\d{1,6})\.(\d{1,6})(?:-(rc|beta)\.(\d{1,6}))?$/.exec(text.trim());
+  if (!match) {
+    return null;
+  }
+  const version: Version = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const channel = match[4] as PreRelease['channel'] | undefined;
+  return { version, preRelease: channel ? { channel, number: Number(match[5]) } : null };
+}
+
+/** `{ [0, 6, 0], rc 1 }` → `0.6.0-rc.1`, the way the opening screen shows it. Pure. */
+export function formatInstalledVersion(installed: InstalledVersion): string {
+  const core = installed.version.join('.');
+  return installed.preRelease ? `${core}-${installed.preRelease.channel}.${installed.preRelease.number}` : core;
+}
+
+/**
+ * The installed build's version as text: the release tag baked in at build time when there is a valid one
+ * (it names an RC, which app.json's bare X.Y.Z can't), else app.json's version. Pure.
+ */
+export function installedVersionText(releaseTag: string, appVersion: string): string {
+  const fromTag = parseInstalledVersion(releaseTag);
+  return fromTag ? formatInstalledVersion(fromTag) : appVersion;
+}
+
+/**
+ * Order two installed versions: negative when `a` is older, positive when newer, 0 when equal. X.Y.Z
+ * first, then beta < rc < final, then the pre-release number. Pure.
+ */
+export function compareInstalledVersions(a: InstalledVersion, b: InstalledVersion): number {
+  for (let i = 0; i < 3; i++) {
+    if (a.version[i] !== b.version[i]) {
+      return a.version[i]! - b.version[i]!;
+    }
+  }
+  const rank = (pre: PreRelease | null): number => (pre === null ? 2 : pre.channel === 'rc' ? 1 : 0);
+  if (rank(a.preRelease) !== rank(b.preRelease)) {
+    return rank(a.preRelease) - rank(b.preRelease);
+  }
+  return (a.preRelease?.number ?? 0) - (b.preRelease?.number ?? 0);
+}
+
 export type GitHubCheckResult =
   | { kind: 'available'; version: string }
   | { kind: 'current' }
   | { kind: 'failed' };
 
 /**
- * Ask GitHub for LOAM's latest release and compare it with `currentVersion`. Only the release's tag is
- * read, and only as a strict `vX.Y.Z`; nothing from the reply is shown except that version number. No
- * cookies, no LOAM data in the request. Never throws: offline, a timeout or an odd reply is `failed`.
+ * Ask GitHub for LOAM's latest release and compare it with `currentVersion`, the installed build's version
+ * (installedVersionText: `0.6.0`, or `0.6.0-rc.1` for a release candidate, which the final 0.6.0
+ * replaces). Only the release's tag is read, and only as a strict `vX.Y.Z` (GitHub never calls a
+ * pre-release "latest"); nothing from the reply is shown except that version number. No cookies, no LOAM
+ * data in the request. Never throws: offline, a timeout or an odd reply is `failed`.
  */
 export async function checkGitHubRelease(
   currentVersion: string,
   fetchImpl: typeof fetch = fetch,
   timeoutMs: number = GITHUB_CHECK_TIMEOUT_MS,
 ): Promise<GitHubCheckResult> {
-  const current = parseVersion(currentVersion);
+  const current = parseInstalledVersion(currentVersion);
   if (!current) {
     return { kind: 'failed' };
   }
@@ -75,7 +129,9 @@ export async function checkGitHubRelease(
     if (!latest) {
       return { kind: 'failed' };
     }
-    return isNewerVersion(latest, current) ? { kind: 'available', version: latest.join('.') } : { kind: 'current' };
+    return compareInstalledVersions({ version: latest, preRelease: null }, current) > 0
+      ? { kind: 'available', version: latest.join('.') }
+      : { kind: 'current' };
   } catch {
     return { kind: 'failed' };
   } finally {

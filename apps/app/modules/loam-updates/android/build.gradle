@@ -15,12 +15,22 @@ if (!['github', 'play'].contains(loamDistribution)) {
   throw new GradleException("loamDistribution must be 'github' or 'play', not '${loamDistribution}'")
 }
 
+// The release tag this build was made for (vX.Y.Z, or vX.Y.Z-rc.N / -beta.N for a pre-release), so the
+// GitHub build's update check can tell an RC from the final release of the same X.Y.Z (app.json carries
+// only X.Y.Z). scripts/build-apk.mjs passes -PloamReleaseTag when LOAM_RELEASE_TAG is set (CI tag builds);
+// absent, it is empty and the check falls back to app.json's version. Anything else fails the build.
+def loamReleaseTag = (project.findProperty('loamReleaseTag') ?: '').toString()
+if (!loamReleaseTag.isEmpty() && !(loamReleaseTag ==~ '^v\\d+\\.\\d+\\.\\d+(-(rc|beta)\\.\\d+)?$')) {
+  throw new GradleException("loamReleaseTag must be vX.Y.Z, vX.Y.Z-rc.N or vX.Y.Z-beta.N, not '${loamReleaseTag}'")
+}
+
 android {
   namespace "expo.modules.loamupdates"
   defaultConfig {
     versionCode 1
     versionName "0.1.0"
     buildConfigField "String", "LOAM_DISTRIBUTION", "\"${loamDistribution}\""
+    buildConfigField "String", "LOAM_RELEASE_TAG", "\"${loamReleaseTag}\""
   }
   buildFeatures {
     buildConfig true

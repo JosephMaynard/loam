@@ -1,5 +1,6 @@
 // Unit tests for the pure helpers of plugins/with-loam-host.js (pre-release review 2026-09-25):
-// no-backup + no-device-transfer, optional hardware features, and the stale-prebuild fingerprint.
+// no-backup + no-device-transfer, optional hardware features, the legacy Bluetooth permissions, and the
+// stale-prebuild fingerprint.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -13,8 +14,10 @@ const plugin = require("../../plugins/with-loam-host.js");
 const {
   BACKUP_DOMAINS,
   FINGERPRINT_FILE,
+  LEGACY_BLUETOOTH_PERMISSIONS,
   OPTIONAL_FEATURES,
   STALE_GUARD_GRADLE,
+  addLegacyBluetoothPermissions,
   addOptionalFeatures,
   applyApplicationAttributes,
   dataExtractionRulesXml,
@@ -81,6 +84,42 @@ describe("with-loam-host: optional hardware features", () => {
     if (appJson.expo.orientation === "landscape") {
       expect(OPTIONAL_FEATURES).toContain("android.hardware.screen.landscape");
     }
+  });
+});
+
+describe("with-loam-host: legacy Bluetooth permissions (API 24-30)", () => {
+  it("declares BLUETOOTH and BLUETOOTH_ADMIN capped at API 30, leaving the API 31+ trio uncapped", () => {
+    const manifest = {
+      "uses-permission": [{ $: { "android:name": "android.permission.BLUETOOTH_SCAN" } }],
+    };
+    addLegacyBluetoothPermissions(manifest);
+    const perms = manifest["uses-permission"] as { $: Record<string, string> }[];
+    expect(LEGACY_BLUETOOTH_PERMISSIONS).toEqual(["android.permission.BLUETOOTH", "android.permission.BLUETOOTH_ADMIN"]);
+    for (const name of LEGACY_BLUETOOTH_PERMISSIONS) {
+      const matches = perms.filter((permission) => permission.$["android:name"] === name);
+      expect(matches).toHaveLength(1);
+      expect(matches[0].$["android:maxSdkVersion"]).toBe("30");
+    }
+    const scan = perms.find((permission) => permission.$["android:name"] === "android.permission.BLUETOOTH_SCAN");
+    expect(scan?.$["android:maxSdkVersion"]).toBeUndefined();
+    expect(perms).toHaveLength(3);
+  });
+
+  it("caps an existing declaration instead of duplicating it, and is idempotent", () => {
+    const manifest = {
+      "uses-permission": [{ $: { "android:name": "android.permission.BLUETOOTH" } }],
+    };
+    addLegacyBluetoothPermissions(manifest);
+    addLegacyBluetoothPermissions(manifest);
+    const perms = manifest["uses-permission"] as { $: Record<string, string> }[];
+    expect(perms).toHaveLength(2);
+    expect(perms.every((permission) => permission.$["android:maxSdkVersion"] === "30")).toBe(true);
+  });
+
+  it("creates the permission list on a manifest that has none", () => {
+    const manifest: Record<string, unknown> = {};
+    addLegacyBluetoothPermissions(manifest);
+    expect(manifest["uses-permission"]).toHaveLength(2);
   });
 });
 

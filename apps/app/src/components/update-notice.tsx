@@ -2,13 +2,14 @@ import Constants from 'expo-constants';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Linking, Pressable, StyleSheet, View } from 'react-native';
 
-import { checkStoreUpdate, distribution } from '../../modules/loam-updates';
+import { checkStoreUpdate, distribution, releaseTag } from '../../modules/loam-updates';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import {
   checkGitHubRelease,
   GITHUB_RELEASES_PAGE,
+  installedVersionText,
   PLAY_STORE_URL,
   PLAY_STORE_WEB_URL,
   type GitHubCheckResult,
@@ -69,7 +70,8 @@ function PlayUpdateCard() {
 /** Asks GitHub when tapped, never on its own. */
 function GitHubCheck() {
   const theme = useTheme();
-  const current = Constants.expoConfig?.version ?? '';
+  // The build's release tag when it has one, so a release candidate shows (and compares) as 0.6.0-rc.1.
+  const current = installedVersionText(releaseTag(), Constants.expoConfig?.version ?? '');
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState<GitHubCheckResult>();
 

@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { checkGitHubRelease, GITHUB_LATEST_RELEASE_API, isNewerVersion, parseVersion } from './app-updates';
+import {
+  checkGitHubRelease,
+  compareInstalledVersions,
+  formatInstalledVersion,
+  GITHUB_LATEST_RELEASE_API,
+  installedVersionText,
+  isNewerVersion,
+  parseInstalledVersion,
+  parseVersion,
+} from './app-updates';
 
 /** A fetch that answers once with `body` (as JSON) and `status`, recording what it was asked. */
 function fakeFetch(body: unknown, status = 200) {
@@ -32,7 +41,74 @@ describe('isNewerVersion', () => {
   });
 });
 
+describe('parseInstalledVersion', () => {
+  it('reads a final version and the rc / beta pre-releases a release tag may carry', () => {
+    expect(parseInstalledVersion('0.6.0')).toEqual({ version: [0, 6, 0], preRelease: null });
+    expect(parseInstalledVersion('v0.6.0-rc.1')).toEqual({ version: [0, 6, 0], preRelease: { channel: 'rc', number: 1 } });
+    expect(parseInstalledVersion('0.6.0-beta.12')).toEqual({ version: [0, 6, 0], preRelease: { channel: 'beta', number: 12 } });
+  });
+
+  it('refuses any other suffix and junk', () => {
+    for (const text of ['0.6.0-alpha.1', '0.6.0-rc', '0.6.0-rc.1.2', '0.6.0+build.7', '0.6', '', 'v0.6.0-rc.1<b>']) {
+      expect(parseInstalledVersion(text)).toBeNull();
+    }
+  });
+
+  it('formats back to the text the opening screen shows', () => {
+    expect(formatInstalledVersion(parseInstalledVersion('v0.6.0-rc.1')!)).toBe('0.6.0-rc.1');
+    expect(formatInstalledVersion(parseInstalledVersion('v0.6.0')!)).toBe('0.6.0');
+  });
+});
+
+describe('compareInstalledVersions', () => {
+  /** Shorthand: compare two version texts. */
+  function compare(a: string, b: string): number {
+    return Math.sign(compareInstalledVersions(parseInstalledVersion(a)!, parseInstalledVersion(b)!));
+  }
+
+  it('orders beta < rc < final within one X.Y.Z, then by the pre-release number', () => {
+    expect(compare('0.6.0-beta.9', '0.6.0-rc.1')).toBe(-1);
+    expect(compare('0.6.0-rc.1', '0.6.0')).toBe(-1);
+    expect(compare('0.6.0-beta.1', '0.6.0')).toBe(-1);
+    expect(compare('0.6.0-rc.2', '0.6.0-rc.1')).toBe(1);
+    expect(compare('0.6.0-rc.10', '0.6.0-rc.9')).toBe(1);
+    expect(compare('0.6.0-rc.1', '0.6.0-rc.1')).toBe(0);
+    expect(compare('0.6.0', '0.6.0')).toBe(0);
+  });
+
+  it('puts X.Y.Z ahead of any pre-release', () => {
+    expect(compare('0.6.0-beta.1', '0.5.9')).toBe(1);
+    expect(compare('0.5.9', '0.6.0-rc.1')).toBe(-1);
+  });
+});
+
+describe('installedVersionText', () => {
+  it('prefers a valid release tag, so a release candidate shows as one', () => {
+    expect(installedVersionText('v0.6.0-rc.1', '0.6.0')).toBe('0.6.0-rc.1');
+    expect(installedVersionText('v0.6.0', '0.6.0')).toBe('0.6.0');
+  });
+
+  it("falls back to app.json's version without a tag or with an odd one", () => {
+    expect(installedVersionText('', '0.6.0')).toBe('0.6.0');
+    expect(installedVersionText('nightly', '0.6.0')).toBe('0.6.0');
+  });
+});
+
 describe('checkGitHubRelease', () => {
+  it('offers the final release to someone on its release candidate or beta', async () => {
+    expect(await checkGitHubRelease('0.6.0-rc.1', fakeFetch({ tag_name: 'v0.6.0' }))).toEqual({ kind: 'available', version: '0.6.0' });
+    expect(await checkGitHubRelease('0.6.0-beta.3', fakeFetch({ tag_name: 'v0.6.0' }))).toEqual({ kind: 'available', version: '0.6.0' });
+    expect(await checkGitHubRelease('0.5.0-rc.2', fakeFetch({ tag_name: 'v0.6.0' }))).toEqual({ kind: 'available', version: '0.6.0' });
+  });
+
+  it('treats a release candidate of a newer version as current', async () => {
+    expect(await checkGitHubRelease('0.6.0-rc.1', fakeFetch({ tag_name: 'v0.5.0' }))).toEqual({ kind: 'current' });
+  });
+
+  it('still reads the latest tag strictly: a pre-release tag from GitHub is an odd reply', async () => {
+    expect(await checkGitHubRelease('0.5.0', fakeFetch({ tag_name: 'v0.6.0-rc.1' }))).toEqual({ kind: 'failed' });
+  });
+
   it('reports a newer release by its version number', async () => {
     const fetchImpl = fakeFetch({ tag_name: 'v0.6.0', body: 'release notes are never read' });
     expect(await checkGitHubRelease('0.5.0', fetchImpl)).toEqual({ kind: 'available', version: '0.6.0' });

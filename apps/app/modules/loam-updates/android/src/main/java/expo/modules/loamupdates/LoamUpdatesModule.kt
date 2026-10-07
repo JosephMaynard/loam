@@ -18,6 +18,11 @@ class LoamUpdatesModule : Module() {
       BuildConfig.LOAM_DISTRIBUTION
     }
 
+    /** The release tag this build was made for (`v0.6.0`, `v0.6.0-rc.1`), or `""` for a local build. */
+    Function("releaseTag") {
+      BuildConfig.LOAM_RELEASE_TAG
+    }
+
     /** `{ available }` from the store this build came from. Never rejects: any failure is "no update". */
     AsyncFunction("checkStoreUpdate") { promise: Promise ->
       val context = appContext.reactContext?.applicationContext
