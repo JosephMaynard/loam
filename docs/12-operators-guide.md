@@ -13,7 +13,7 @@ network unless you link it to another LOAM network.
 
 | Host | How | Good for |
 |---|---|---|
-| **Android phone** | the LOAM app ([latest release](https://github.com/JosephMaynard/loam/releases/latest)) | Anywhere: the phone makes its own Wi-Fi, so no router or internet is needed. |
+| **Android phone** | the LOAM app ([latest release](https://github.com/MagicZebraLtd/loam/releases/latest)) | Anywhere: the phone makes its own Wi-Fi, so no router or internet is needed. |
 | **Mac, Linux or Windows computer** | `npx loamnet` | A laptop already on a Wi-Fi network, or one sharing its own hotspot. |
 | **Raspberry Pi** (or any always-on box) | `npx loamnet` | A fixed spot that stays up; a good partner for a phone network to link with. |
 

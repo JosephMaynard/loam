@@ -10,9 +10,9 @@
  */
 
 /** GitHub's "latest release" endpoint for LOAM. Drafts and pre-releases are never "latest". */
-export const GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/JosephMaynard/loam/releases/latest';
+export const GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/MagicZebraLtd/loam/releases/latest';
 /** Where the GitHub build sends people to download a newer APK. */
-export const GITHUB_RELEASES_PAGE = 'https://github.com/JosephMaynard/loam/releases/latest';
+export const GITHUB_RELEASES_PAGE = 'https://github.com/MagicZebraLtd/loam/releases/latest';
 /** LOAM's Play listing: the Play Store app first, the website if no store app handles `market://`. */
 export const PLAY_STORE_URL = 'market://details?id=com.loamnet.host';
 export const PLAY_STORE_WEB_URL = 'https://play.google.com/store/apps/details?id=com.loamnet.host';

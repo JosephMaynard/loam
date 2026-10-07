@@ -11,7 +11,7 @@ export type PolicySection = { heading: string; blocks: PolicyBlock[] };
 export const PRIVACY_POLICY_UPDATED = "6 October 2026";
 
 /** Where people report problems: LOAM has no telemetry, so these are the only way we hear of one. */
-export const ISSUE_TRACKER = "github.com/JosephMaynard/loam/issues";
+export const ISSUE_TRACKER = "github.com/MagicZebraLtd/loam/issues";
 export const CONTACT_EMAIL = "magicaltrailsapp@gmail.com";
 
 export const PRIVACY_POLICY: PolicySection[] = [
@@ -171,7 +171,7 @@ export const PRIVACY_POLICY: PolicySection[] = [
         kind: "p",
         text:
           "Questions about data on this network go to its host, who holds it. Questions about this policy go to " +
-          "Magic Zebra Ltd through the LOAM project's issue tracker (`github.com/JosephMaynard/loam`) or by email " +
+          "Magic Zebra Ltd through the LOAM project's issue tracker (`github.com/MagicZebraLtd/loam`) or by email " +
           `(\`${CONTACT_EMAIL}\`). Changes ` +
           "are published with a new date.",
       },

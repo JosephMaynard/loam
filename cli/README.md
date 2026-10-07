@@ -1,6 +1,6 @@
 # loamnet
 
-Run a local, off-grid [LOAM](https://github.com/JosephMaynard/loam) messaging node from your terminal. One command starts a server and an installable web app (a PWA); anyone on the same network scans the printed QR code to join. No internet, no accounts, no cloud.
+Run a local, off-grid [LOAM](https://github.com/MagicZebraLtd/loam) messaging node from your terminal. One command starts a server and an installable web app (a PWA); anyone on the same network scans the printed QR code to join. No internet, no accounts, no cloud.
 
 LOAM is local communication for places where the internet is missing, overloaded, or simply not the right tool: a festival or conference, a boat or campsite, a community space, or a neighbourhood during an outage. The host runs a node; nearby people join over the LAN and can post to channels, reply in threads, send direct messages, react, and share images. Identities are anonymous and ephemeral, and everything stays on your machine and your local network.
 
@@ -77,11 +77,11 @@ The default database driver is Node's built in `node:sqlite`, so a plain node ne
 
 ## Hosting from a phone
 
-`loamnet` runs the node on a laptop, a Raspberry Pi, or any machine with Node 22.14+ (or 23.6+). To host directly from an Android phone, including its own Wi-Fi hotspot, use the LOAM Android host app in the [project repository](https://github.com/JosephMaynard/loam).
+`loamnet` runs the node on a laptop, a Raspberry Pi, or any machine with Node 22.14+ (or 23.6+). To host directly from an Android phone, including its own Wi-Fi hotspot, use the LOAM Android host app in the [project repository](https://github.com/MagicZebraLtd/loam).
 
 ## Links
 
-- Source, documentation, and issues: https://github.com/JosephMaynard/loam
+- Source, documentation, and issues: https://github.com/MagicZebraLtd/loam
 - License: AGPL-3.0-only
 
 Copyright Magic Zebra Ltd.

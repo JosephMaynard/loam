@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/JosephMaynard/loam/actions/workflows/ci.yml"><img src="https://github.com/JosephMaynard/loam/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
+  <a href="https://github.com/MagicZebraLtd/loam/actions/workflows/ci.yml"><img src="https://github.com/MagicZebraLtd/loam/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0" />
   <a href="https://www.npmjs.com/package/loamnet"><img src="https://img.shields.io/npm/v/loamnet?label=npx%20loamnet" alt="loamnet on npm" /></a>
 </p>
@@ -64,8 +64,8 @@ soil. We picked the word first and worked out the letters afterwards.)*
 
 ### On an Android phone
 
-1. **Download [`loam-host.apk`](https://github.com/JosephMaynard/loam/releases/latest/download/loam-host.apk)**
-   from the [latest release](https://github.com/JosephMaynard/loam/releases/latest) and open it to
+1. **Download [`loam-host.apk`](https://github.com/MagicZebraLtd/loam/releases/latest/download/loam-host.apk)**
+   from the [latest release](https://github.com/MagicZebraLtd/loam/releases/latest) and open it to
    install. Your phone may ask you to allow installs from your browser.
 2. **Answer four questions:** your language, the kind of network (see [below](#kinds-of-network)),
    its name, and how people connect: **Hotspot** (the phone makes its own Wi-Fi, no router needed) or
@@ -167,7 +167,7 @@ computer, the same settings live in the admin area as **security profiles**
 - **Nothing to collect.** No accounts, no analytics, no advertising, no crash reporting. Messages stay
   on the host and on the phones that received them. That also means LOAM never tells us when something
   goes wrong, so if you find a problem, please
-  [open an issue](https://github.com/JosephMaynard/loam/issues) or email Magic Zebra Ltd at
+  [open an issue](https://github.com/MagicZebraLtd/loam/issues) or email Magic Zebra Ltd at
   magicaltrailsapp@gmail.com.
 - **Encrypted connections.** Joining by the code sets up an encrypted connection to the host (an X25519
   handshake and XChaCha20-Poly1305), so nobody else on the Wi-Fi can read the messages. By default,

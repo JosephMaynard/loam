@@ -18,7 +18,7 @@ export function GettingStartedPanel() {
       </ol>
       <p className="form-note">
         {t("admin.gettingStartedNoteBefore")}{" "}
-        <a href="https://github.com/JosephMaynard/loam/blob/master/docs/12-operators-guide.md" rel="noreferrer" target="_blank">
+        <a href="https://github.com/MagicZebraLtd/loam/blob/master/docs/12-operators-guide.md" rel="noreferrer" target="_blank">
           {t("admin.gettingStartedGuideLink")}
         </a>{" "}
         {t("admin.gettingStartedNoteAfter")}
