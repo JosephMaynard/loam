@@ -22,6 +22,8 @@ pins the build command, output directory, and a few security headers. Set the pr
 - `index.html`: the landing page (semantic sections, accessible).
 - `privacy.html`: the privacy policy at `/privacy` (a second Vite entry; Vercel `cleanUrls` drops the
   `.html`). Play requires a public policy URL; keep it in step with what the app actually does.
+- `child-safety.html`: the child safety (CSAE) standards at `/child-safety`, a third Vite entry. Play's
+  Child Safety Standards policy requires a public page with a named point of contact.
 - `src/styles.css`: the design system. Warm paper and deep moss with an ember accent, light and dark,
   Bricolage Grotesque for headings, Inter for text and JetBrains Mono for code. The fonts are
   self-hosted from `@fontsource-variable` packages (the CSP allows no font host), split by script, so a

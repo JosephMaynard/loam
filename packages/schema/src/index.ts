@@ -121,10 +121,27 @@ export const UserSchema = z.object({
       kxSig: z.string().min(1).max(128),
     })
     .optional(),
+  /**
+   * The version of LOAM's member rules this person agreed to on the Welcome screen (`MEMBER_RULES_VERSION`).
+   * Absent = not yet: a human can't post, upload or create a channel until it's current. Bots never need it.
+   */
+  rulesVersion: z.number().int().min(1).max(1_000_000).optional(),
   createdAt: TimestampSchema,
   ephemeral: z.boolean(),
 });
 export type User = z.infer<typeof UserSchema>;
+
+/**
+ * The current version of LOAM's member rules (the client's `/rules` page and Welcome screen). Bump it when
+ * the rules change in substance: everyone then agrees again before their next post.
+ */
+export const MEMBER_RULES_VERSION = 1;
+
+/** `POST /api/users/me/rules`: agree to the rules at this version (must be the current one). */
+export const RulesAcceptRequestSchema = z.object({
+  version: z.number().int().min(1).max(1_000_000),
+});
+export type RulesAcceptRequest = z.infer<typeof RulesAcceptRequestSchema>;
 
 /** How new people join: "open" (anyone participates immediately) or "approval" (a greeter/admin lets them in). */
 export const JoinPolicySchema = z.enum(["open", "approval"]);
@@ -738,7 +755,8 @@ export type ReportReason = z.infer<typeof ReportReasonSchema>;
 export const ReportTargetTypeSchema = z.enum(["message", "user"]);
 export type ReportTargetType = z.infer<typeof ReportTargetTypeSchema>;
 
-export const ReportStatusSchema = z.enum(["open", "resolved"]);
+/** `escalated` = a moderator handed it to the admins: it stays in the admins' queue until one resolves it. */
+export const ReportStatusSchema = z.enum(["open", "escalated", "resolved"]);
 export type ReportStatus = z.infer<typeof ReportStatusSchema>;
 
 /** The action a moderator recorded when resolving a report (for the audit trail shown in the queue). */
@@ -775,8 +793,43 @@ export const ReportSchema = z.object({
   resolutionNote: z.string().max(1000).optional(),
   resolvedByUserId: IdSchema.optional(),
   resolvedAt: TimestampSchema.optional(),
+  /** Who handed it to the admins, and when (status `escalated`, kept after it's resolved). */
+  escalatedByUserId: IdSchema.optional(),
+  escalatedAt: TimestampSchema.optional(),
 });
 export type Report = z.infer<typeof ReportSchema>;
+
+/**
+ * The reported message as the moderation queue shows it, read live when the queue loads (never stored with
+ * the report): a moderator sees exactly the message that was reported, and nothing else from that
+ * conversation. Once the message is deleted or expires, the queue shows that it's gone.
+ */
+export const ReportedMessageSchema = z.object({
+  authorId: IdSchema,
+  /** The text, empty for a reaction or an attachment-only message. */
+  body: z.string().max(20_000),
+  /** The names of any attached files or pictures (the files themselves aren't shown in the queue). */
+  attachmentNames: z.array(z.string().max(255)).max(8),
+  /** A reaction's emoji, when the reported item is a reaction. */
+  reaction: z.string().max(64).optional(),
+  /** Where it was posted: a channel (by id and name) or a direct message between two people. */
+  where: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("channel"), channelId: IdSchema, channelName: z.string().max(200) }),
+    z.object({ kind: z.literal("dm"), userIds: z.array(IdSchema).length(2) }),
+  ]),
+  createdAt: TimestampSchema,
+  /** Already removed by a moderator. */
+  removed: z.boolean().optional(),
+});
+export type ReportedMessage = z.infer<typeof ReportedMessageSchema>;
+
+/** A report in the moderation queue: the stored report plus, for a message, what was reported. */
+export const ModerationReportSchema = ReportSchema.extend({
+  message: ReportedMessageSchema.optional(),
+  /** A message report whose message no longer exists (deleted, or expired under the retention setting). */
+  messageGone: z.boolean().optional(),
+});
+export type ModerationReport = z.infer<typeof ModerationReportSchema>;
 
 /** How a moderator resolves a report: record the action taken (and an optional private note). */
 export const ReportResolveRequestSchema = z.object({
@@ -1411,6 +1464,9 @@ export const SERVER_ERROR_CODES = [
   "block_not_allowed",
   "channel_member_unavailable",
   "reaction_invalid",
+  "rules_not_accepted",
+  "rules_version_mismatch",
+  "reroll_not_allowed",
 ] as const;
 export type ServerErrorCode = (typeof SERVER_ERROR_CODES)[number];
 

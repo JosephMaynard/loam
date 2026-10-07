@@ -12,7 +12,8 @@ import { resetTransportStateForTests } from "./lib/transport";
 // App-level boot tests (pre-release review 2026-09-25): mount the real `App` against a stubbed node (fetch +
 // WebSocket) and a fresh fake IndexedDB, to check what the boot does with the cache it hydrates.
 
-const me: User = { id: "user.me", displayName: "Me", type: "human", isAdmin: false, createdAt: 1, ephemeral: true };
+// Agreed to the member rules, so the app opens on its content rather than the Welcome screen.
+const me: User = { id: "user.me", displayName: "Me", type: "human", isAdmin: false, createdAt: 1, ephemeral: true, rulesVersion: 1 };
 const troll: User = { id: "user.troll", displayName: "Troll", type: "human", isAdmin: false, createdAt: 1, ephemeral: true };
 const general = { id: "general", name: "general", visibility: "public", createdAt: 1 } as Channel;
 
@@ -307,5 +308,20 @@ describe("the host terminal's one-time admin link", () => {
     const root = await boot("/channels");
     expect(claims(fetchMock)).toHaveLength(1);
     expect(root.textContent).toContain("Admin");
+  });
+});
+
+describe("the Welcome screen (member rules)", () => {
+  it("greets someone who hasn't agreed yet instead of opening the network", async () => {
+    stubNode({ currentUser: { ...me, rulesVersion: undefined } });
+    const root = await boot("/channels");
+    expect(root.querySelector(".welcome-screen")).not.toBeNull();
+    expect(root.querySelector(".welcome-agree")?.textContent).toContain("18");
+  });
+
+  it("opens straight onto the network for someone who has agreed", async () => {
+    stubNode();
+    const root = await boot("/channels");
+    expect(root.querySelector(".welcome-screen")).toBeNull();
   });
 });

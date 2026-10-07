@@ -20,7 +20,7 @@ afterEach(async () => {
 
 async function makeApp(): Promise<LoamApp> {
   const dataDir = mkdtempSync(join(tmpdir(), "loam-dm-inbox-"));
-  const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000 });
+  const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000 });
   cleanups.push(async () => {
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });

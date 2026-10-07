@@ -461,6 +461,17 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   admitted socket gets a content-free `{"type":"ping"}` immediately and every 25 s
   (`WS_HEARTBEAT_INTERVAL_MS`) via `wsSend` — sealed + sequenced when encrypted, never before key
   confirmation.
+- **Member rules + Welcome** (docs/30): `user.rulesVersion` vs `MEMBER_RULES_VERSION` (@loam/schema). `rulesError()`
+  refuses a human's posts/reactions (`createMessage`), uploads, avatar images, typed names and channel creation
+  until they agree (`POST /api/users/me/rules`); `POST /api/users/me/reroll` gives a new generated name + avatar
+  seed, only before the first agreement. `AppOptions.requireRulesAcceptance` (default true; existing tests pass
+  `false`, `member-rules.test.ts` covers it). Client: `WelcomeScreen` gates the shell once `config` is set,
+  `/rules` = `views/RulesView.tsx`. Hosts get a one-time "You run this network" note (`apps/app/src/lib/host-ack.ts`
+  in setup; `hostAck` in the TUI's cli.json; printed on every plain-mode start).
+- **Report queue**: `GET /api/moderation/reports` returns `ModerationReport`s: open ones, plus `escalated` ones for
+  admins; a message report carries the reported message read live (`reportedMessage`), or `messageGone`.
+  "Escalate" sets `status: "escalated"` (admins only can then resolve). Moderators/admins get a content-free
+  `reportsChanged` socket event (never broadcast) that drives the People badge.
 - **User blocking** (docs/30 B3): a member's private block list in the `user_blocks` DAL table (write-
   through, read straight from the DB; `deleteUser` drops rows on both sides, `wipeAll`/kill switch clears
   it; never synced, broadcast or put on a user record; `UserBlockListSchema { blockedUserIds }`). Only a

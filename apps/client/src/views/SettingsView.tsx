@@ -294,6 +294,8 @@ export function SettingsView({
           {/* The privacy policy is served by this node (/privacy, lib/privacy-policy.ts): it reads with no
               internet and never sends anyone to another website. */}
           <p className="screen-footnote privacy-policy-link">
+            <a href="/rules">{t("settings.rules")}</a>
+            {" · "}
             <a href="/privacy">{t("settings.privacyPolicy")}</a>
           </p>
           {/* No telemetry, so a report is the only way a problem reaches us. Plain text, not links: the

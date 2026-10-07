@@ -57,7 +57,7 @@ describe("serving the client build (buildApp)", () => {
     writeFileSync(join(dist, "manifest.webmanifest"), "{}");
     writeFileSync(join(dist, ".env"), "SECRET=dotfile");
     writeFileSync(join(base, "secret.txt"), "outside the root");
-    app = await buildApp({ dataDir: join(base, "data"), clientDistDir: dist, logStream: { write() {} } });
+    app = await buildApp({ requireRulesAcceptance: false, dataDir: join(base, "data"), clientDistDir: dist, logStream: { write() {} } });
   });
 
   afterAll(async () => {

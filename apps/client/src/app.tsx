@@ -1,6 +1,7 @@
 import {
   ChannelSchema,
   DmInboxSchema,
+  MEMBER_RULES_VERSION,
   MessageAttachmentSchema,
   MessageSchema,
   UserSchema,
@@ -24,14 +25,17 @@ import { ConversationView } from "./components/ConversationView";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PinChangePrompt } from "./components/PinChangePrompt";
+import { WelcomeScreen } from "./components/WelcomeScreen";
 import { Sidebar } from "./components/Sidebar";
 import { ToastStack, type ToastItem } from "./components/ToastStack";
 import { MeshView } from "./views/MeshView";
 import { PeopleView } from "./views/PeopleView";
 import { PrivacyView } from "./views/PrivacyView";
+import { RulesView } from "./views/RulesView";
 import { SearchView } from "./views/SearchView";
 import { SettingsView } from "./views/SettingsView";
 import { ApiError, fetchJson, requestJson, REQUEST_TIMEOUT_MS } from "./lib/api";
+import { canModerate } from "./lib/capabilities";
 import { bytesToBase64, exceededAttachmentLimit, formatByteLimit, prepareImageAttachment } from "./lib/attachments";
 import { cachedBlockListFor, fetchBlockList, persistBlockList, setUserBlocked, withoutBlockedAuthors } from "./lib/blocks";
 import { confirmIdentity, forgetConfirmedIdentity, listenForIdentityChange, readConfirmedIdentity } from "./lib/identity";
@@ -413,7 +417,8 @@ function LoamApp() {
     routeState.screen === "admin" ||
     routeState.screen === "search" ||
     routeState.screen === "mesh" ||
-    routeState.screen === "privacy"
+    routeState.screen === "privacy" ||
+    routeState.screen === "rules"
       ? "settings-open"
       : undefined,
   ]
@@ -486,6 +491,9 @@ function LoamApp() {
   // True until the node confirmed this browser's identity (or couldn't be reached, or IDENTITY_GATE_MAX_MS
   // passed): the shell renders a splash instead of hydrated content that might belong to a previous identity.
   const [identityGate, setIdentityGate] = useState(true);
+  // Moderators and admins: bumped on every `reportsChanged`, which reloads the queue and its sidebar count.
+  const [reportsVersion, setReportsVersion] = useState(0);
+  const [openReports, setOpenReports] = useState(0);
   // Guards the Android host's one-at-a-time admin claim (see the boot effect).
   const hostClaimInFlightRef = useRef(false);
   // Bumped to force a full server re-sync: on WebSocket reconnect (missed events don't replay) and
@@ -1210,6 +1218,34 @@ function LoamApp() {
     [upsertUsers],
   );
 
+  /**
+   * Post to one of the user's own endpoints (the Welcome screen's agree and "Try another"), adopting the user
+   * record the node hands back. Throws with the node's message on a refusal or a dead connection.
+   */
+  const updateOwnUser = useCallback(
+    async (path: string, body: unknown): Promise<void> => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+      try {
+        const response = await encryptedFetch("POST", path, body, { signal: controller.signal });
+        const payload: unknown = await response.json().catch(() => undefined);
+
+        if (!response.ok) {
+          throw new Error(errorText(payload, `Request failed: ${response.status}`));
+        }
+
+        const user = UserSchema.parse(payload);
+        setCurrentUser(user);
+        upsertUsers([user]);
+        setConfig((previous) => (previous ? { ...previous, currentUser: user } : previous));
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    },
+    [upsertUsers],
+  );
+
   const claimAdmin = useCallback(
     async (secret: string) => {
       const controller = new AbortController();
@@ -1427,6 +1463,27 @@ function LoamApp() {
     const timer = window.setTimeout(() => setIdentityGate(false), IDENTITY_GATE_MAX_MS);
     return () => window.clearTimeout(timer);
   }, []);
+
+  // The sidebar's report count for moderators and admins: loaded once the node has confirmed who this is,
+  // and again whenever it says the queue changed. Everyone else never asks.
+  const moderates = !!config && canModerate(currentUser);
+  useEffect(() => {
+    if (!moderates) {
+      setOpenReports(0);
+      return;
+    }
+    let active = true;
+    fetchJson<unknown>("/api/moderation/reports")
+      .then((payload) => {
+        if (active) {
+          setOpenReports(Array.isArray(payload) ? payload.length : 0);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [moderates, reportsVersion, connection === "live"]);
 
   useEffect(() => {
     // BOOT GATE (docs/20 round-4 H2): an outstanding wipe tombstone (shown via `wiped`) must block the
@@ -2063,6 +2120,11 @@ function LoamApp() {
           return;
         }
 
+        if (payload.type === "reportsChanged") {
+          setReportsVersion((version) => version + 1);
+          return;
+        }
+
         applyUserUpsert(payload.user);
       };
     }
@@ -2306,6 +2368,29 @@ function LoamApp() {
     );
   }
 
+  // The Welcome screen: once the node has confirmed who this is (`config` is only ever set from the node), a
+  // person who hasn't agreed to the current member rules sees it before anything else. One tap gets them in;
+  // `/rules` stays readable from it. Never shown from the offline cache: there's nothing to post to anyway.
+  if (config && currentUser.type === "human" && (currentUser.rulesVersion ?? 0) < MEMBER_RULES_VERSION) {
+    if (routeState.screen === "rules") {
+      return (
+        <div className="app-frame">
+          <main className="app-shell settings-open app-shell-solo">
+            <RulesView backHref="/" standalone />
+          </main>
+        </div>
+      );
+    }
+    return (
+      <WelcomeScreen
+        currentUser={currentUser}
+        nodeName={config.networkConfig.nodeName}
+        onAgree={() => updateOwnUser("/api/users/me/rules", { version: MEMBER_RULES_VERSION })}
+        onReroll={() => updateOwnUser("/api/users/me/reroll", {})}
+      />
+    );
+  }
+
   return (
     <>
     {/* The frame is fixed to the visible viewport (--vvh, see lib/viewport.ts): the document never
@@ -2332,6 +2417,7 @@ function LoamApp() {
         nodeName={config?.networkConfig.nodeName}
         onCreateChannel={createChannel}
         onlineUserIds={onlineUserIds}
+        openReports={openReports}
         showMesh={!!config?.networkConfig.enableMesh}
         unreadByConversation={unreadByConversation}
         users={users}
@@ -2345,13 +2431,15 @@ function LoamApp() {
           onWiped={purgeLocalData}
         />
       ) : routeState.screen === "people" ? (
-        <PeopleView currentUser={currentUser} onUsersChanged={upsertUsers} />
+        <PeopleView currentUser={currentUser} onUsersChanged={upsertUsers} reportsVersion={reportsVersion} />
       ) : routeState.screen === "search" ? (
         <SearchView blockedUserIds={blockedUserIds} channels={channels} currentUser={currentUser} usersById={usersById} />
       ) : routeState.screen === "mesh" && config?.networkConfig.enableMesh ? (
         <MeshView />
       ) : routeState.screen === "privacy" ? (
         <PrivacyView />
+      ) : routeState.screen === "rules" ? (
+        <RulesView />
       ) : routeState.screen === "settings" ? (
         <SettingsView
           blockedUserIds={blockedUserIds}

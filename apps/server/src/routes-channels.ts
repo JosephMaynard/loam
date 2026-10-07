@@ -445,6 +445,13 @@ export function registerChannelRoutes(ctx: AppContext): void {
       return reply.code(403).send(errorBody(channelTimeoutError));
     }
 
+    // A channel's name is published content: not before the member rules are agreed.
+    const channelRulesError = ctx.rulesError(currentUser);
+
+    if (channelRulesError) {
+      return reply.code(403).send(errorBody(channelRulesError));
+    }
+
     if (!currentUser.isAdmin && !ctx.appConfig.features.enableUserChannels) {
       return reply.code(403).send(errorBody("Creating channels is disabled on this LOAM node"));
     }

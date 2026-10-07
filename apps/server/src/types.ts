@@ -70,6 +70,10 @@ export type ClientEvent =
       channelId: string;
     }
   | {
+      /** Content-free nudge to moderators and admins only: the report queue changed, so refresh its count. */
+      type: "reportsChanged";
+    }
+  | {
       type: "presence";
       onlineUserIds: string[];
     }
@@ -184,6 +188,11 @@ export type AppOptions = {
    * a LAN each device has its own IP, so this is effectively per-device. Defaults to 60.
    */
   maxNewIdentitiesPerWindow?: number;
+  /**
+   * Whether a person must agree to LOAM's member rules (the Welcome screen, `MEMBER_RULES_VERSION`) before
+   * they can post, upload or create a channel. On by default; tests that aren't about the rules turn it off.
+   */
+  requireRulesAcceptance?: boolean;
   /** Sliding window (ms) for `maxNewIdentitiesPerWindow`. Defaults to 10 minutes. */
   identityWindowMs?: number;
   /**

@@ -133,6 +133,9 @@ export const en = {
   "update.download": "Download from GitHub",
   "update.failed": "Couldn't reach GitHub. Check this phone's internet connection and try again.",
   "update.githubNote": "This asks GitHub for LOAM's latest version number. GitHub sees this phone's internet address; nothing else is sent.",
+  "setup.hostAck": "You run this network. What people post is stored on this phone, and you're responsible for it. Check reports, remove anything that breaks LOAM's rules, and if you find sexual content involving a child, remove it and report it to the police.",
+  "setup.agreeStart": "I understand. Start the network",
+  "setup.agreeContinue": "I understand. Continue",
 } as const;
 
 export type AppCatalog = { [K in keyof typeof en]: string };

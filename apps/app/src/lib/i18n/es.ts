@@ -128,4 +128,7 @@ export const es: Partial<AppCatalog> = {
   "update.download": "Descargar de GitHub",
   "update.failed": "No se pudo conectar con GitHub. Comprueba la conexión a internet de este teléfono e inténtalo de nuevo.",
   "update.githubNote": "Esto pregunta a GitHub cuál es la última versión de LOAM. GitHub ve la dirección de internet de este teléfono; no se envía nada más.",
+  "setup.hostAck": "Tú gestionas esta red. Lo que la gente publica se guarda en este teléfono y tú eres responsable de ello. Revisa los informes, elimina lo que incumpla las normas de LOAM y, si encuentras contenido sexual que involucre a un menor, elimínalo y denúncialo a la policía.",
+  "setup.agreeStart": "Entendido. Iniciar la red",
+  "setup.agreeContinue": "Entendido. Continuar",
 };

@@ -118,6 +118,11 @@ export function createRealtime(ctx: AppContext) {
       return false;
     }
 
+    if (event.type === "reportsChanged") {
+      // Moderator-only nudge — delivered via sendEventToUsers to moderators and admins, never broadcast.
+      return false;
+    }
+
     if (event.type === "presence") {
       // Contains only visible users' ids; the banned/pending recipient gates above already ran.
       return true;

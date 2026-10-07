@@ -128,4 +128,7 @@ export const sw: Partial<AppCatalog> = {
   "update.download": "Pakua kutoka GitHub",
   "update.failed": "Imeshindwa kufikia GitHub. Angalia muunganisho wa intaneti wa simu hii kisha ujaribu tena.",
   "update.githubNote": "Hii inauliza GitHub nambari ya toleo la karibuni la LOAM. GitHub inaona anwani ya intaneti ya simu hii; hakuna kingine kinachotumwa.",
+  "setup.hostAck": "Wewe ndiye unayeendesha mtandao huu. Kile watu wanachochapisha kinahifadhiwa kwenye simu hii, na wewe unawajibika kwacho. Angalia ripoti, ondoa chochote kinachovunja sheria za LOAM, na ukikuta maudhui ya ngono yanayomhusu mtoto, yaondoe na uripoti kwa polisi.",
+  "setup.agreeStart": "Nimeelewa. Anzisha mtandao",
+  "setup.agreeContinue": "Nimeelewa. Endelea",
 };

@@ -128,4 +128,7 @@ export const tr: Partial<AppCatalog> = {
   "update.download": "GitHub'dan indir",
   "update.failed": "GitHub'a ulaşılamadı. Bu telefonun internet bağlantısını kontrol edip yeniden deneyin.",
   "update.githubNote": "Bu, GitHub'a LOAM'ın en son sürüm numarasını sorar. GitHub bu telefonun internet adresini görür; başka hiçbir şey gönderilmez.",
+  "setup.hostAck": "Bu ağı siz yönetiyorsunuz. İnsanların paylaştıkları bu telefonda saklanır ve bundan siz sorumlusunuz. Şikâyetleri kontrol edin, LOAM kurallarını çiğneyen her şeyi kaldırın ve bir çocuğu içeren cinsel içerik bulursanız kaldırıp polise bildirin.",
+  "setup.agreeStart": "Anladım. Ağı başlat",
+  "setup.agreeContinue": "Anladım. Devam et",
 };

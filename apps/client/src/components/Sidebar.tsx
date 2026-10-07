@@ -36,6 +36,8 @@ interface SidebarProps {
   /** DM partners with something new that isn't loaded yet: a dot instead of a count. */
   dmUnreadHints: ReadonlySet<string>;
   onlineUserIds: ReadonlySet<string>;
+  /** Reports waiting in this moderator's or admin's queue (0 for everyone else): a badge on People. */
+  openReports?: number;
   showMesh: boolean;
   unreadByConversation: Map<string, number>;
   users: User[];
@@ -86,6 +88,7 @@ export function Sidebar({
   nodeName,
   onCreateChannel,
   onlineUserIds,
+  openReports = 0,
   showMesh,
   unreadByConversation,
   users,
@@ -219,6 +222,7 @@ export function Sidebar({
                   <IconUsers size={18} />
                 </span>
                 <span className="nav-label">{t("people.title")}</span>
+                {openReports ? <UnreadBadge count={openReports} /> : null}
               </NavLink>
             ) : null}
             {showMesh ? (

@@ -192,6 +192,10 @@ export const ERROR_CODES: Record<string, ServerErrorCode> = {
   // An invite or ownership transfer across a block (either direction). Generic like `dm_unavailable`: it
   // doesn't state the reason.
   "This person isn't available for this channel": "channel_member_unavailable",
+  // The member rules (the Welcome screen): not agreed yet, an outdated version, and "Try another" after agreeing.
+  "Agree to the network's rules before posting": "rules_not_accepted",
+  "These rules have changed. Reload to read the current ones": "rules_version_mismatch",
+  "A new name is only available before you first join in": "reroll_not_allowed",
   // The generic 5xx body (see the app's error handler) — internal detail is logged, never returned.
   "Internal server error": "internal_error",
 };

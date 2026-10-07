@@ -13,6 +13,7 @@ import {
   isReactionEmoji,
   LoamConfigUpdateSchema,
   MessageSchema,
+  MEMBER_RULES_VERSION,
   UserSchema,
   type AdminBootstrapStrategy,
   type AvatarImageMimeType,
@@ -30,6 +31,7 @@ import {
   type User,
   type UserUpdateRequest,
 } from "@loam/schema";
+import { generateDisplayName } from "@loam/display-name";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 
 import { importLegacyJsonData, type StoredRowReport } from "./db.js";
@@ -172,6 +174,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // the reaper timer. On a LAN each device gets its own IP, so this reads as per-device.
   const identityMintCounters = new Map<string, { count: number; resetAt: number }>();
   const maxNewIdentitiesPerWindow = options.maxNewIdentitiesPerWindow ?? 60;
+  const requireRulesAcceptance = options.requireRulesAcceptance ?? true;
   const identityWindowMs = options.identityWindowMs ?? 10 * 60_000;
   const tombstoneHorizonMs = options.tombstoneHorizonMs ?? defaultTombstoneHorizonMs;
   // Uploaded-but-unattached attachment ids → uploader + upload time. A message may only reference
@@ -456,6 +459,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     isLocallyAuthoritative,
     participationError,
     timeoutError,
+    rulesError,
+    acceptRules,
+    rerollIdentity,
     dmBlockError,
     applyUserModeration,
     invalidateUserSessions,
@@ -956,6 +962,48 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       return "You are timed out by a moderator and cannot post right now";
     }
     return undefined;
+  }
+
+  /**
+   * Why a person may not publish anything yet: they haven't agreed to the current member rules (the Welcome
+   * screen). Covers posting, reacting, uploading, renaming and creating a channel; reading, reporting and
+   * blocking stay open. Only people: bots and system users never agree to anything.
+   */
+  function rulesError(user: User): string | undefined {
+    if (!requireRulesAcceptance || user.type !== "human") {
+      return undefined;
+    }
+    if ((user.rulesVersion ?? 0) < MEMBER_RULES_VERSION) {
+      return "Agree to the network's rules before posting";
+    }
+    return undefined;
+  }
+
+  /** Record that `user` agreed to the member rules at `version`, persist it, and tell everyone. */
+  function acceptRules(user: User, version: number): User {
+    const next = UserSchema.parse({ ...user, rulesVersion: version });
+    store.upsertUser(next);
+    Object.assign(user, next);
+    broadcast({ type: "userUpserted", user });
+    return user;
+  }
+
+  /**
+   * Give `user` a new random generated name and avatar, keeping their id (the Welcome screen's "Try
+   * another"). Still only ever a generated name, so it's allowed even where names are locked. The caller
+   * checks they haven't agreed to the rules yet, so nobody can rename themselves away from what they posted.
+   */
+  function rerollIdentity(user: User): User {
+    const seed = `reroll.${randomBytes(8).toString("hex")}`;
+    const next = UserSchema.parse({
+      ...user,
+      displayName: generateDisplayName(seed),
+      avatar: { kind: "generated", seed, ...(user.avatar?.mode ? { mode: user.avatar.mode } : {}) },
+    });
+    store.upsertUser(next);
+    Object.assign(user, next);
+    broadcast({ type: "userUpserted", user });
+    return user;
   }
 
   /**
@@ -1547,6 +1595,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (authorTimeoutError) {
       return { error: authorTimeoutError, forbidden: true };
+    }
+
+    // Nobody posts before agreeing to the member rules (Google Play's UGC policy; the Welcome screen).
+    const authorRulesError = rulesError(author);
+
+    if (authorRulesError) {
+      return { error: authorRulesError, forbidden: true };
     }
 
     if (

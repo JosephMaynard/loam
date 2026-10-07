@@ -28,6 +28,11 @@ export const MIN_COLUMNS = 40;
 export const MIN_ROWS = 12;
 
 const TOAST_MS = 4_000;
+/**
+ * The host's "You run this network" note (the Android app shows the same one): shown once when the terminal
+ * UI first starts, until acknowledged, then recorded in cli.json. Bump it when the text changes in substance.
+ */
+export const HOST_ACK_VERSION = 1;
 /** How long a lone Escape waits for the rest of a key sequence before it counts as Escape. */
 const ESCAPE_WAIT_MS = 40;
 const REFRESH_MS = 1_000;
@@ -407,6 +412,28 @@ export function createTui(options: TuiOptions): Tui {
     });
   }
 
+  /** "You run this network": what hosting means. Closing it (Enter or Escape) counts as acknowledging it. */
+  function hostNotice(): Modal {
+    return {
+      kind: "panel",
+      title: "You run this network",
+      lines: [
+        text("What people post is stored on this computer, and you're responsible for it."),
+        [],
+        text("Check reports in the web app, and remove anything that breaks LOAM's rules."),
+        text("If you find sexual content involving a child, remove it and report it to the police."),
+        [],
+        text("More: loamnet.com/child-safety", { dim: true }),
+      ],
+      footer: "Enter: I understand",
+      onClose: () => {
+        if ((settings.hostAck ?? 0) < HOST_ACK_VERSION) {
+          view.saveSettings({ ...settings, hostAck: HOST_ACK_VERSION });
+        }
+      },
+    };
+  }
+
   // ---- Keys ---------------------------------------------------------------------------------------------
 
   function help(): Modal {
@@ -565,6 +592,8 @@ export function createTui(options: TuiOptions): Tui {
       }
       if (options.startLocked) {
         lockKiosk(true);
+      } else if ((settings.hostAck ?? 0) < HOST_ACK_VERSION) {
+        setModal(hostNotice());
       }
       painter.invalidate();
       redraw();

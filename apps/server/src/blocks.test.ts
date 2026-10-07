@@ -30,7 +30,7 @@ async function makeApp(config?: unknown, opts?: Partial<AppOptions>): Promise<Lo
   if (config !== undefined) {
     writeFileSync(join(dataDir, "config.json"), JSON.stringify(config));
   }
-  const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...opts });
+  const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...opts });
   cleanups.push(async () => {
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });

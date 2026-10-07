@@ -25,7 +25,7 @@ async function makeApp(config?: unknown, opts: Partial<AppOptions> = {}): Promis
   if (config !== undefined) {
     writeFileSync(join(dataDir, "config.json"), JSON.stringify(config));
   }
-  const app = await buildApp({
+  const app = await buildApp({ requireRulesAcceptance: false,
     dataDir,
     logger: false,
     maxNewIdentitiesPerWindow: 1_000_000,
@@ -177,7 +177,7 @@ describe("LoamApp.host", () => {
 
   it("counts Emergency Resets and deletes the diagnostics files the screen wrote", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-host-api-test-"));
-    const app = await buildApp({ dataDir, logger: false, hostToken: HOST_TOKEN, maxNewIdentitiesPerWindow: 1_000_000 });
+    const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, hostToken: HOST_TOKEN, maxNewIdentitiesPerWindow: 1_000_000 });
     cleanups.push(async () => {
       await app.close();
       rmSync(dataDir, { recursive: true, force: true });

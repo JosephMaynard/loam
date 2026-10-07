@@ -906,7 +906,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   );
   const getReportStmt = db.prepare("SELECT data FROM reports WHERE id = ?");
   const loadOpenReportsStmt = db.prepare(
-    "SELECT id, data FROM reports WHERE status = 'open' ORDER BY created_at DESC, rowid DESC",
+    "SELECT id, data FROM reports WHERE status IN ('open', 'escalated') ORDER BY created_at DESC, rowid DESC",
   );
   const markChannelSyncedStmt = db.prepare(
     "INSERT INTO synced_channels (channel_id) VALUES (?) ON CONFLICT(channel_id) DO NOTHING",

@@ -270,7 +270,7 @@ async function makeApp(
 
   // A high identity cap so the per-IP new-identity limiter (all inject requests share 127.0.0.1)
   // never trips across a suite that mints many sessions; a dedicated test drives it low on purpose.
-  const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...opts });
+  const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...opts });
   cleanups.push(async () => {
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });
@@ -281,7 +281,7 @@ async function makeApp(
 /** Reopen an app on an existing data dir (restart simulation). */
 async function reopenApp(app: LoamApp, dataDir: string): Promise<LoamApp> {
   await app.close();
-  const next = await buildApp({ dataDir, logger: false });
+  const next = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
   cleanups.push(() => next.close());
   return next;
 }
@@ -548,7 +548,7 @@ describe("admin bootstrap", () => {
       ]),
     );
 
-    const app = await buildApp({ dataDir, logger: false });
+    const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     cleanups.push(async () => {
       await app.close();
       rmSync(dataDir, { recursive: true, force: true });
@@ -759,7 +759,7 @@ describe("admin config API", () => {
   it("applies, enforces, broadcasts shape, and persists feature flag changes", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
     cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
-    const initialApp = await buildApp({ dataDir, logger: false });
+    const initialApp = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     let app: LoamApp = initialApp;
     cleanups.push(() => initialApp.close());
 
@@ -1427,7 +1427,7 @@ describe("message authorization", () => {
         { id: "old", name: "Old", ...base, archived: true },
       ]),
     );
-    const app = await buildApp({ dataDir, logger: false });
+    const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     cleanups.push(async () => {
       await app.close();
       rmSync(dataDir, { recursive: true, force: true });
@@ -1457,27 +1457,27 @@ describe("config robustness", () => {
     writeFileSync(join(dataDir, "config.json"), "{ this is not json");
     // A present-but-invalid config must fail closed: silently starting from defaults could downgrade an
     // intended `required` posture to `off` (docs/08). The operator must fix or remove the file.
-    await expect(buildApp({ dataDir, logger: false })).rejects.toThrow(/Invalid configuration/);
+    await expect(buildApp({ requireRulesAcceptance: false, dataDir, logger: false })).rejects.toThrow(/Invalid configuration/);
   });
 
   it("ABORTS startup when the persisted config row is malformed", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
     cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
-    const initialApp = await buildApp({ dataDir, logger: false });
+    const initialApp = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     initialApp.store.setConfigValue("config", "{ broken");
     await initialApp.close();
 
-    await expect(buildApp({ dataDir, logger: false })).rejects.toThrow(/Invalid configuration/);
+    await expect(buildApp({ requireRulesAcceptance: false, dataDir, logger: false })).rejects.toThrow(/Invalid configuration/);
   });
 
   it("ABORTS startup when the persisted config row is present but EMPTY (not silently skipped)", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
     cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
-    const initialApp = await buildApp({ dataDir, logger: false });
+    const initialApp = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     initialApp.store.setConfigValue("config", ""); // a corrupt/empty row is present, not absent
     await initialApp.close();
 
-    await expect(buildApp({ dataDir, logger: false })).rejects.toThrow(/Invalid configuration/);
+    await expect(buildApp({ requireRulesAcceptance: false, dataDir, logger: false })).rejects.toThrow(/Invalid configuration/);
   });
 
   it("ABORTS rather than silently serving `off` when a required-mode config has an invalid field", async () => {
@@ -1489,7 +1489,7 @@ describe("config robustness", () => {
       join(dataDir, "config.json"),
       JSON.stringify({ security: { transportEncryption: "required" }, sync: { enabled: true, token: "short" } }),
     );
-    await expect(buildApp({ dataDir, logger: false })).rejects.toThrow(/Invalid configuration/);
+    await expect(buildApp({ requireRulesAcceptance: false, dataDir, logger: false })).rejects.toThrow(/Invalid configuration/);
   });
 
   it("rejects update secrets shorter than their configured minimums", async () => {
@@ -1654,7 +1654,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     if (config !== undefined) {
       writeFileSync(join(dataDir, "config.json"), JSON.stringify(config));
     }
-    const app = await buildApp({ dataDir, logger: false, ...opts });
+    const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, ...opts });
     cleanups.push(async () => {
       await app.close();
       rmSync(dataDir, { recursive: true, force: true });
@@ -2064,7 +2064,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     // Simulate the launcher's verified restart with a rotated key: the fresh DB's config table is empty, so
     // config.json is the ONLY carrier of the DB-only sync change into the new boot.
     rmSync(join(dataDir, ".loam-wipe-phase"), { force: true });
-    const restarted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    const restarted = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
     cleanups.push(() => restarted.close());
     const restartedAdmin = await session(restarted);
     const config = (
@@ -2116,7 +2116,7 @@ describe("encryption at rest + key-discard kill switch", () => {
 
     // Restart under the same key (no-hook can't rotate): the re-persisted DB row is the source — the retention
     // change AND the sync token survive.
-    const restarted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    const restarted = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
     cleanups.push(() => restarted.close());
     const restartedAdmin = await session(restarted);
     const config = (
@@ -2158,7 +2158,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     configWriteFailures.remaining = 0;
     const hook2 = installFakeWipeRestartHook();
     await expect(
-      buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
+      buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
     ).rejects.toThrow();
     const recovered = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")) as {
       killSwitch: { enabled: boolean };
@@ -2182,7 +2182,7 @@ describe("encryption at rest + key-discard kill switch", () => {
 
     // The resume refuses to proceed (which would clear the journal and lose the config bytes) — it locks.
     await expect(
-      buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
+      buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
     ).rejects.toThrow();
     // The journal is RETAINED (not cleared), so the config bytes survive for inspection/repair.
     expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
@@ -2303,7 +2303,7 @@ describe("encryption at rest + key-discard kill switch", () => {
 
     // Boot round-8 (no launcher hook = desktop path): it must recognise the legacy marker as an unfinished
     // wipe, re-run deletion, clear BOTH marker names, and open a FRESH DB — never serve the surviving data.
-    const rebooted = await buildApp({
+    const rebooted = await buildApp({ requireRulesAcceptance: false,
       dataDir,
       logger: false,
       dbEncryptionKey: "a fixed persistent key",
@@ -2353,7 +2353,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     // Boot 2 with the fault CLEARED: the boot-time resume re-runs deletion (now succeeds), clears the phase,
     // and opens a fresh DB. The old rows are never served.
     premigrationDeleteFailure.armed = false;
-    const boot2 = await buildApp({
+    const boot2 = await buildApp({ requireRulesAcceptance: false,
       dataDir,
       logger: false,
       dbEncryptionKey: "a fixed persistent key",
@@ -2384,7 +2384,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     // is not durable — it throws (stays locked) rather than risk a resurrected `key-clear-ready` re-wiping the
     // freshly minted key on the next boot.
     await expect(
-      buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
+      buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
     ).rejects.toThrow();
     openSyncFailure.path = undefined;
   });
@@ -2398,7 +2398,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     // The operator confirmed "Delete & start fresh" for a deliberate mode change → the marker carries
     // `delete`. Boot with a DIFFERENT key (the new mode's key can't open the old ciphertext).
     writeFileSync(join(dataDir, ".loam-db-start-fresh"), "delete");
-    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    const boot2 = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
     cleanups.push(() => boot2.close());
 
     // DELETED, not renamed aside: no `.unreadable-*` recovery copies remain, and the fresh DB serves no old data.
@@ -2419,7 +2419,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     // Accidental wrong/lost-key lockout: the operator preserves the old DB while starting fresh. Boot with a
     // different key so the old ciphertext can't open, and the `preserve` marker keeps it on disk.
     writeFileSync(join(dataDir, ".loam-db-start-fresh"), "preserve");
-    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    const boot2 = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
     cleanups.push(() => boot2.close());
     expect(recoverySnapshots(dataDir).length).toBeGreaterThan(0);
   });
@@ -2439,7 +2439,7 @@ describe("encryption at rest + key-discard kill switch", () => {
 
     // Deliberate delete-and-start-fresh (the new key can't open the old ciphertext).
     writeFileSync(join(dataDir, ".loam-db-start-fresh"), "delete");
-    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    const boot2 = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
     cleanups.push(() => boot2.close());
 
     // The DB was deleted (no `.unreadable-*` copy) AND the media directories are gone.
@@ -2458,7 +2458,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     // An encrypted mode is now configured, but the marker intent is `preserve` (e.g. a legacy/mis-routed
     // marker). The plaintext DB must NOT be deleted — it is renamed aside, honoring the intent.
     writeFileSync(join(dataDir, ".loam-db-start-fresh"), "preserve");
-    const encrypted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a key", dbEncryptionMode: "persistent" });
+    const encrypted = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "a key", dbEncryptionMode: "persistent" });
     cleanups.push(() => encrypted.close());
     expect(recoverySnapshots(dataDir).length).toBeGreaterThan(0);
   });
@@ -2524,7 +2524,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     openSyncFailure.path = undefined;
     openSyncFailure.failOnCall = undefined;
     openSyncFailure.count = 0;
-    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+    const boot2 = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
     cleanups.push(() => boot2.close());
     expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
     const search = await boot2.server.inject({
@@ -2549,7 +2549,7 @@ describe("encryption at rest + key-discard kill switch", () => {
 
     // Accidental wrong/lost-key lockout recovery: preserve. Boot with a different key + a preserve marker.
     writeFileSync(join(dataDir, ".loam-db-start-fresh"), "preserve");
-    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    const boot2 = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
     // Let the boot-time orphan reaper (which runs on start) complete — the fresh DB references no attachments,
     // so if the old attachment were still in the ACTIVE `attachments/` it would be reaped here.
     await new Promise((r) => setTimeout(r, 50));
@@ -2563,7 +2563,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     expect(readFileSync(join(snap, "avatars", "avt_cafecafecafecafe.webp"), "utf8")).toBe("AVATAR_BYTES");
 
     // A further restart must not disturb the snapshot either.
-    const boot3 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    const boot3 = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
     cleanups.push(() => boot3.close());
     await new Promise((r) => setTimeout(r, 50));
     expect(readFileSync(join(snap, "attachments", "att_00000000000000aa.png"), "utf8")).toBe("ATTACHMENT_BYTES");
@@ -2592,7 +2592,7 @@ describe("encryption at rest + key-discard kill switch", () => {
 
     // Boot under a DIFFERENT key (realistic wrong-key lockout). resumePreserveRecovery runs FIRST, finishes
     // the move, clears the anchor; then a fresh DB opens under the new key.
-    const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
+    const boot2 = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" });
     cleanups.push(() => boot2.close());
 
     // The anchor is cleared and the snapshot is COHERENT — every piece is together in ONE recovery dir.
@@ -2622,7 +2622,7 @@ describe("encryption at rest + key-discard kill switch", () => {
     lstatFailure.path = attachmentsDir;
     const reports = installFakeBootBridge();
     await expect(
-      buildApp({ dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" }),
+      buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key B", dbEncryptionMode: "persistent" }),
     ).rejects.toThrow();
     lstatFailure.path = undefined;
     expect(reports.some((r) => r.code === "db_encryption_unreadable")).toBe(true);
@@ -2639,7 +2639,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       }
       const reports = installFakeBootBridge();
       await expect(
-        buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
+        buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" }),
       ).rejects.toThrow();
       readFileSyncFailure.path = undefined;
       // The journal is RETAINED (not cleared/rewritten) so any config bytes survive; a distinct notice fires.
@@ -2667,7 +2667,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       await app.close();
 
       writeFileSync(join(dataDir, ".loam-wipe-phase"), legacyPhase); // EXACT legacy plain string (no config)
-      const boot2 = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
+      const boot2 = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key A", dbEncryptionMode: "persistent" });
       cleanups.push(() => boot2.close());
       // Proceeded (not a corrupt lock): the no-hook resume deleted + cleared the journal + opened fresh.
       expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
@@ -2765,7 +2765,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       // Simulate the launcher's actual restart: a fresh boot, same dataDir, a NEW (rotated) key — the
       // whole point of the P1-2 handoff. The fresh DB's config table starts empty, so config.json is
       // the ONLY thing carrying the admin's settings forward into the new boot.
-      const restarted = await buildApp({
+      const restarted = await buildApp({ requireRulesAcceptance: false,
         dataDir,
         logger: false,
         dbEncryptionKey: `key B (${dbEncryptionMode}, rotated)`,
@@ -3005,7 +3005,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
 
       // An "existing" passphrase DB, encrypted under the pre-round-4 legacy derivation.
-      const original = await buildApp({
+      const original = await buildApp({ requireRulesAcceptance: false,
         dataDir,
         logger: false,
         dbEncryptionKey: legacyKey,
@@ -3023,7 +3023,7 @@ describe("encryption at rest + key-discard kill switch", () => {
 
       // Boot with the CURRENT key plus the legacy key as a migration fallback — mirrors main.js offering
       // both because it hasn't recorded a confirmed migration yet.
-      const migratedApp = await buildApp({
+      const migratedApp = await buildApp({ requireRulesAcceptance: false,
         dataDir,
         logger: false,
         dbEncryptionKey: currentKey,
@@ -3044,7 +3044,7 @@ describe("encryption at rest + key-discard kill switch", () => {
 
       // Rekeyed in place: a LATER boot with only the current key (no legacy key offered at all) opens
       // the same file directly.
-      const reopened = await buildApp({
+      const reopened = await buildApp({ requireRulesAcceptance: false,
         dataDir,
         logger: false,
         dbEncryptionKey: currentKey,
@@ -3055,7 +3055,7 @@ describe("encryption at rest + key-discard kill switch", () => {
 
       // The OLD legacy key can no longer open the file at all.
       await expect(
-        buildApp({ dataDir, logger: false, dbEncryptionKey: legacyKey, dbEncryptionMode: "passphrase" }),
+        buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: legacyKey, dbEncryptionMode: "passphrase" }),
       ).rejects.toThrow();
     });
 
@@ -3068,7 +3068,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
 
       // A real legacy-encrypted passphrase DB with a row we must not lose.
-      const original = await buildApp({
+      const original = await buildApp({ requireRulesAcceptance: false,
         dataDir,
         logger: false,
         dbEncryptionKey: legacyKey,
@@ -3092,7 +3092,7 @@ describe("encryption at rest + key-discard kill switch", () => {
 
       // Boot: Step 0b must restore the intact legacy DB from the sidecars, then the migration branch
       // rekeys it to the current key. The row survives and the launcher is told it migrated.
-      const recovered = await buildApp({
+      const recovered = await buildApp({ requireRulesAcceptance: false,
         dataDir,
         logger: false,
         dbEncryptionKey: currentKey,
@@ -3108,7 +3108,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       await recovered.close();
 
       // And the rekey actually took: a later boot with only the current key opens it directly.
-      const reopened = await buildApp({
+      const reopened = await buildApp({ requireRulesAcceptance: false,
         dataDir,
         logger: false,
         dbEncryptionKey: currentKey,
@@ -3128,7 +3128,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       const dataDir = mkdtempSync(join(tmpdir(), "loam-p22-cleanup-fail-"));
       cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
 
-      const original = await buildApp({
+      const original = await buildApp({ requireRulesAcceptance: false,
         dataDir,
         logger: false,
         dbEncryptionKey: legacyKey,
@@ -3145,7 +3145,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       // key. The fix treats the rekey as the commit point, so the cleanup failure is swallowed best-effort.
       postRekeyCleanupFailure.armed = true;
 
-      const migratedApp = await buildApp({
+      const migratedApp = await buildApp({ requireRulesAcceptance: false,
         dataDir,
         logger: false,
         dbEncryptionKey: currentKey,
@@ -3167,7 +3167,7 @@ describe("encryption at rest + key-discard kill switch", () => {
 
       // A later boot with ONLY the current key opens directly (the rekey took) AND Step-0b discards the
       // stale backup the failed cleanup left — proving the cleanup failure never corrupted the migration.
-      const reopened = await buildApp({
+      const reopened = await buildApp({ requireRulesAcceptance: false,
         dataDir,
         logger: false,
         dbEncryptionKey: currentKey,
@@ -3189,7 +3189,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       async function makeLegacyDb(body: string): Promise<string> {
         const dataDir = mkdtempSync(join(tmpdir(), "loam-p1a-test-"));
         cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
-        const app = await buildApp({ dataDir, logger: false, dbEncryptionKey: legacyKey, dbEncryptionMode: "passphrase" });
+        const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: legacyKey, dbEncryptionMode: "passphrase" });
         const admin = await session(app);
         expect((await post(app, admin.cookie, body)).statusCode).toBe(201);
         await app.close();
@@ -3200,7 +3200,7 @@ describe("encryption at rest + key-discard kill switch", () => {
        *  artifacts (neither a committed `.premigration` nor a stray `.premigration.tmp`). */
       async function expectCleanMigration(dataDir: string, body: string): Promise<void> {
         const migrated = installFakeMigratedHook();
-        const app = await buildApp({
+        const app = await buildApp({ requireRulesAcceptance: false,
           dataDir,
           logger: false,
           dbEncryptionKey: currentKey,
@@ -3258,7 +3258,7 @@ describe("encryption at rest + key-discard kill switch", () => {
         // 1. Build a legacy DB whose committed row lives ONLY in the WAL, not in loam.db's main file.
         const dataDir = mkdtempSync(join(tmpdir(), "loam-p1a-wal-test-"));
         cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
-        const producer = await buildApp({
+        const producer = await buildApp({ requireRulesAcceptance: false,
           dataDir,
           logger: false,
           dbEncryptionKey: legacyKey,
@@ -3295,7 +3295,7 @@ describe("encryption at rest + key-discard kill switch", () => {
         cleanups.push(() => rmSync(captureDir, { recursive: true, force: true }));
         backupCapture.dir = captureDir;
         const migrated = installFakeMigratedHook();
-        const migratedApp = await buildApp({
+        const migratedApp = await buildApp({ requireRulesAcceptance: false,
           dataDir,
           logger: false,
           dbEncryptionKey: currentKey,
@@ -3322,7 +3322,7 @@ describe("encryption at rest + key-discard kill switch", () => {
         rmSync(join(dataDir, "loam.db-wal"), { force: true });
         rmSync(join(dataDir, "loam.db-shm"), { force: true });
         const migrated2 = installFakeMigratedHook();
-        const restored = await buildApp({
+        const restored = await buildApp({ requireRulesAcceptance: false,
           dataDir,
           logger: false,
           dbEncryptionKey: currentKey,
@@ -3372,7 +3372,7 @@ describe("encryption at rest + key-discard kill switch", () => {
         // 2. Migrate cleanly to the current key, then write a NEW row during that serving session — the
         // data a full session accrues AFTER a migration that already succeeded.
         const migrated = installFakeMigratedHook();
-        const migratedApp = await buildApp({
+        const migratedApp = await buildApp({ requireRulesAcceptance: false,
           dataDir,
           logger: false,
           dbEncryptionKey: currentKey,
@@ -3394,7 +3394,7 @@ describe("encryption at rest + key-discard kill switch", () => {
         // 4. Boot again under the current key. Step 0b PROBES the live DB (it opens under the current key →
         // the migration already succeeded) and DISCARDS the stale backup rather than restoring it. A blind
         // restore would revert to the pre-migration snapshot and LOSE the session row.
-        const reopened = await buildApp({
+        const reopened = await buildApp({ requireRulesAcceptance: false,
           dataDir,
           logger: false,
           dbEncryptionKey: currentKey,
@@ -3415,7 +3415,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       const dataDir = mkdtempSync(join(tmpdir(), "loam-migrate-fresh-test-"));
       cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
 
-      const app = await buildApp({
+      const app = await buildApp({ requireRulesAcceptance: false,
         dataDir,
         logger: false,
         dbEncryptionKey: "current SHA256(passphrase + deviceSecret) key",
@@ -3436,7 +3436,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       await original.close();
 
       await expect(
-        buildApp({
+        buildApp({ requireRulesAcceptance: false,
           dataDir,
           logger: false,
           dbEncryptionKey: "a totally wrong current key",
@@ -3456,7 +3456,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       // into an encrypted mode without a rekey of the existing data.
       const dataDir = mkdtempSync(join(tmpdir(), "loam-enc-plaintext-unconverted-test-"));
       cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
-      const plain = await buildApp({ dataDir, logger: false });
+      const plain = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
       const plainAdmin = await session(plain);
       expect((await post(plain, plainAdmin.cookie, "PLAINTEXT_ALREADY_ON_DISK")).statusCode).toBe(201);
       await plain.close();
@@ -3465,7 +3465,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       // plaintext file, and a plaintext probe SUCCEEDS — the old code silently served that plaintext file
       // (a confidentiality downgrade). Now it must LOCK with the distinct code, NOT serve.
       await expect(
-        buildApp({ dataDir, logger: false, dbEncryptionKey: "a newly configured key" }),
+        buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "a newly configured key" }),
       ).rejects.toThrow(/refusing to serve it unencrypted/);
       expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_plaintext_unconverted" })]);
       // The key itself must never appear in the reported message.
@@ -3478,7 +3478,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       reports.length = 0;
       writeFileSync(join(dataDir, ".loam-db-start-fresh"), "delete");
 
-      const encrypted = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a newly configured key" });
+      const encrypted = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "a newly configured key" });
       cleanups.push(() => encrypted.close());
 
       // The plaintext DB was DELETED (not preserved as a readable `.unreadable-` rename) and a FRESH
@@ -3522,7 +3522,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       // open) also fails because the file is genuinely SQLCipher ciphertext, not a valid plain SQLite
       // header. Design#1: with no marker present, this must THROW rather than auto-replace the DB.
       await expect(
-        buildApp({ dataDir, logger: false, dbEncryptionKey: "a completely different key" }),
+        buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "a completely different key" }),
       ).rejects.toThrow(/could not be opened/);
 
       expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_unreadable" })]);
@@ -3547,7 +3547,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       // file on disk is genuine SQLCipher ciphertext. Before the fix this bypassed recovery entirely
       // (encryptionEnabled gated it) and buildApp rejected with a raw "file is not a database" error;
       // now it must reach the same marker-gated non-destructive path as the keyed case.
-      await expect(buildApp({ dataDir, logger: false })).rejects.toThrow(/could not be opened/);
+      await expect(buildApp({ requireRulesAcceptance: false, dataDir, logger: false })).rejects.toThrow(/could not be opened/);
 
       expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_unreadable" })]);
       expect(dbFileNames(dataDir).sort()).toEqual(filesBefore); // untouched
@@ -3564,7 +3564,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       // The RN host's explicit start-fresh confirmation UI writes this marker before restarting.
       writeFileSync(startFreshMarkerPath(dataDir), "");
 
-      const recovered = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a completely different key" });
+      const recovered = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "a completely different key" });
       cleanups.push(() => recovered.close());
 
       expect(reports).toEqual([expect.objectContaining({ code: "db_encryption_recovered_fresh" })]);
@@ -3605,7 +3605,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       // path calls it first) and immediately self-disarms.
       renameFailure.armed = true;
 
-      await expect(buildApp({ dataDir, logger: false, dbEncryptionKey: "key B" })).rejects.toThrow(
+      await expect(buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key B" })).rejects.toThrow(
         /Start-fresh recovery failed/,
       );
 
@@ -3621,7 +3621,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       // A fresh confirmation lets the operator retry immediately and actually succeed this time — the
       // fault injection was single-shot, so this second attempt hits the real (un-mocked) renameSync.
       writeFileSync(startFreshMarkerPath(dataDir), "");
-      const recovered = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B" });
+      const recovered = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key B" });
       cleanups.push(() => recovered.close());
       expect(recovered.store.loadMessages()).toEqual([]);
       const recoveredAdmin = await session(recovered);
@@ -3638,7 +3638,7 @@ describe("encryption at rest + key-discard kill switch", () => {
 
       // First recovery: wrong key + marker present.
       writeFileSync(startFreshMarkerPath(dataDir), "");
-      const first = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key B" });
+      const first = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key B" });
       const admin1 = await session(first);
       expect((await post(first, admin1.cookie, "after first recovery")).statusCode).toBe(201);
       await first.close();
@@ -3648,7 +3648,7 @@ describe("encryption at rest + key-discard kill switch", () => {
 
       // Second recovery: open under yet ANOTHER wrong key, with a fresh marker again.
       writeFileSync(startFreshMarkerPath(dataDir), "");
-      const second = await buildApp({ dataDir, logger: false, dbEncryptionKey: "key C" });
+      const second = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "key C" });
       cleanups.push(() => second.close());
 
       const preservedAfterSecond = recoverySnapshots(dataDir);
@@ -3672,7 +3672,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       // branch at all.
       writeFileSync(startFreshMarkerPath(dataDir), "");
 
-      const reopened = await buildApp({ dataDir, logger: false, dbEncryptionKey: "the correct key" });
+      const reopened = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "the correct key" });
       cleanups.push(() => reopened.close());
 
       // No boot-bridge report at all — this was a perfectly normal open, not a degrade or a recovery.
@@ -3704,7 +3704,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       writeFileSync(join(markerPath, "not-empty"), "");
 
       // Wrong key too — case 1 and case 2 both fail, so this reaches the marker-gated recovery check.
-      await expect(buildApp({ dataDir, logger: false, dbEncryptionKey: "a completely different key" })).rejects.toThrow(
+      await expect(buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "a completely different key" })).rejects.toThrow(
         /could not be opened/,
       );
 
@@ -3774,7 +3774,7 @@ describe("encryption at rest + key-discard kill switch", () => {
       premigrationDeleteFailure.armed = false;
       reports.length = 0;
       await expect(
-        buildApp({
+        buildApp({ requireRulesAcceptance: false,
           dataDir,
           logger: false,
           dbEncryptionKey: "a fixed persistent key",
@@ -4066,7 +4066,7 @@ describe("channels API", () => {
     // reopenApp closes this instance itself and registers the reopened one for teardown. The
     // try/finally closes the initial instance only if an assertion throws before reopen — so it
     // never leaks a handle, and is never double-closed on the happy path.
-    let app: LoamApp = await buildApp({ dataDir, logger: false });
+    let app: LoamApp = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     let reopened = false;
 
     try {
@@ -5874,7 +5874,7 @@ describe("review hardening fixes", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-enc-config-test-"));
     cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
     const key = "a fixed host passphrase";
-    const first = await buildApp({ dataDir, logger: false, dbEncryptionKey: key });
+    const first = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: key });
     cleanups.push(() => first.close());
 
     const admin = await newSession(first);
@@ -5897,7 +5897,7 @@ describe("review hardening fixes", () => {
 
     // Restart on the same data dir + key: the admin edits must survive the wipe.
     await first.close();
-    const second = await buildApp({ dataDir, logger: false, dbEncryptionKey: key });
+    const second = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: key });
     cleanups.push(() => second.close());
 
     const nextAdmin = await newSession(second);
@@ -7331,7 +7331,7 @@ describe("ready-for-use features (node name, promotion, presence)", () => {
 
     // An explicit version (as server.ts / the npm CLI inject) is echoed back verbatim.
     const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
-    const versioned = await buildApp({ dataDir, logger: false, version: "9.9.9" });
+    const versioned = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, version: "9.9.9" });
     cleanups.push(async () => {
       await versioned.close();
       rmSync(dataDir, { recursive: true, force: true });
@@ -8633,7 +8633,7 @@ describe("transport encryption foundation (docs/08)", () => {
       join(dataDir, "config.json"),
       JSON.stringify({ security: { profile: "custom", transportEncryption: "optional" } }),
     );
-    const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, transportSessionCap: 3 });
+    const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, transportSessionCap: 3 });
     cleanups.push(async () => {
       await app.close();
       rmSync(dataDir, { recursive: true, force: true });
@@ -10434,7 +10434,7 @@ describe("content-mutation lifecycle — review round 2 (sub-agent findings)", (
   it("a deleted default channel stays deleted across a restart (no reseed resurrection)", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
     cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
-    let app: LoamApp = await buildApp({ dataDir, logger: false });
+    let app: LoamApp = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
 
     try {
       const admin = await newSession(app);
@@ -10445,7 +10445,7 @@ describe("content-mutation lifecycle — review round 2 (sub-agent findings)", (
       // Delete only ONE default: the reseed must not run (channels aren't empty) and, even if all
       // were gone, the tombstone filter must keep `general` out.
       await app.close();
-      app = await buildApp({ dataDir, logger: false });
+      app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
       const session = await newSession(app);
       const channels = (
         await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: session.cookie } })
@@ -10980,7 +10980,7 @@ describe("review fixes 2026-09-04 (server)", () => {
       rmSync(join(dataDir, name), { force: true });
     }
     utimesSync(join(dataDir, "avatars", `${imageId}.webp`), old, old);
-    const reopened = await buildApp({ dataDir, logger: false });
+    const reopened = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     cleanups.push(() => reopened.close());
     expect(await waitFor(() => !existsSync(join(dataDir, "avatars", `${imageId}.webp`)))).toBe(true);
   });
@@ -11094,7 +11094,7 @@ describe("review fixes 2026-09-04 (server) — round 2", () => {
     });
     const dataDir = mkdtempSync(join(tmpdir(), "loam-ack-test-"));
     cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
-    const app = await buildApp({
+    const app = await buildApp({ requireRulesAcceptance: false,
       dataDir,
       logger: false,
       dbEncryptionKey: "a passphrase-derived key",
@@ -11109,7 +11109,7 @@ describe("review fixes 2026-09-04 (server) — round 2", () => {
     // A persistent-mode open (no passphrase) still acks nothing.
     const other = mkdtempSync(join(tmpdir(), "loam-ack-test-"));
     cleanups.push(() => rmSync(other, { recursive: true, force: true }));
-    const persistent = await buildApp({ dataDir: other, logger: false, dbEncryptionKey: "device secret", dbEncryptionMode: "persistent" });
+    const persistent = await buildApp({ requireRulesAcceptance: false, dataDir: other, logger: false, dbEncryptionKey: "device secret", dbEncryptionMode: "persistent" });
     cleanups.push(() => persistent.close());
     expect(calls).toEqual(["dbkey-42"]);
   });
@@ -11331,7 +11331,7 @@ describe("pre-release review 2026-09-25", () => {
       sqlite.prepare("UPDATE users SET data = ? WHERE id = ?").run(JSON.stringify(raw), user.userId);
       sqlite.close();
 
-      const reopened = await buildApp({ dataDir, logger: false });
+      const reopened = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
       cleanups.push(() => reopened.close());
       const loaded = reopened.store.loadUsers().find((candidate) => candidate.id === user.userId);
       expect(loaded?.displayName).toBe("Legacy");
@@ -11472,7 +11472,7 @@ describe("pre-release review 2026-09-25", () => {
       const { app, dataDir } = await seedHumanAdmin("llm.victim");
       await app.close();
       writeFileSync(join(dataDir, "config.json"), JSON.stringify({ llm: { ollama: { enabled: true, botId: "llm.victim" } } }));
-      const reopened = await buildApp({ dataDir, logger: false });
+      const reopened = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
       cleanups.push(() => reopened.close());
       expect(reopened.store.loadUsers().find((user) => user.id === "llm.victim")).toMatchObject({ type: "human", isAdmin: true });
     });

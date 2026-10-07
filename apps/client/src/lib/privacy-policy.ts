@@ -8,7 +8,7 @@
 export type PolicyBlock = { kind: "p"; text: string } | { kind: "list"; items: string[] };
 export type PolicySection = { heading: string; blocks: PolicyBlock[] };
 
-export const PRIVACY_POLICY_UPDATED = "6 October 2026";
+export const PRIVACY_POLICY_UPDATED = "7 October 2026";
 
 /** Where people report problems: LOAM has no telemetry, so these are the only way we hear of one. */
 export const ISSUE_TRACKER = "github.com/MagicZebraLtd/loam/issues";
@@ -70,8 +70,10 @@ export const PRIVACY_POLICY: PolicySection[] = [
             "your browser to that id.",
           "**What you post:** channel messages, replies, direct messages, reactions, and any pictures or files " +
             "you attach. A location appears only if you add it to a message yourself.",
+          "**That you agreed to the network rules**, and which version of them.",
           "**Moderation records:** reports you make, and actions the host or moderators take (bans, timeouts, " +
-            "removed messages, join approvals).",
+            "removed messages, join approvals). When you report a message, the network's moderators can read " +
+            "that message, even in a direct message, while your report is open.",
           "**Your block list:** the people you have blocked. Only you see it; it isn't shared with them, with " +
             "moderators, or with other networks.",
           "**Network settings** chosen by the host.",
@@ -160,7 +162,9 @@ export const PRIVACY_POLICY: PolicySection[] = [
     blocks: [
       {
         kind: "p",
-        text: "LOAM is not directed at children under 13 and collects no information that would identify a child.",
+        text:
+          "LOAM is for adults: everyone confirms they are 18 or over before they post. Its rules prohibit any sexual " +
+          "content involving anyone under 18, and LOAM collects no information that would identify a child.",
       },
     ],
   },

@@ -23,6 +23,26 @@ device checks below, and size headroom before a production track.
   version exists; "Update" opens the Play listing. The APK on GitHub Releases (`github`) contains no Play code
   and has a tap-only "Check for updates" (GitHub's latest-release API, version tag only; "Download" opens the
   releases page). Neither downloads or installs anything, so Play's rule against updating outside Play holds.
+- **Member rules (UGC policy: "accept the terms before creating content").** A person's first view of a
+  network is the client's Welcome screen (`components/WelcomeScreen.tsx`): their random name and avatar ("Try
+  another name" until they first agree), the rules in one sentence, a link to `/rules` (served by the node,
+  offline, in the network's language) and one button, "I'm 18 or over, and I agree". The server records
+  `user.rulesVersion` (`POST /api/users/me/rules`, `MEMBER_RULES_VERSION`) and refuses posts, reactions,
+  uploads, typed names and new channels without it (`rules_not_accepted`); reading, reporting and blocking stay
+  open. The rules name the prohibited content (harassment, threats, hate, sexual content involving anyone
+  under 18, non-consensual intimate images, private details, scams, malware, spam) without a blanket "obey
+  local law".
+- **Moderation that works.** A message report shows moderators the reported message (text, attachment names,
+  author, where), read live so it never outlives the network's own deletion/retention; the report dialog says
+  moderators will see it. "Escalate" keeps the report open for admins (`status: "escalated"`). Moderators and
+  admins get a live count on People (`reportsChanged`).
+- **Adults only + child safety standards.** LOAM targets 18+: block minors with the Play Console tools (the
+  Anonymous/Random Chat policy), and members confirm 18+ on the Welcome screen (browser joiners never pass
+  Play). Child Safety Standards (they apply regardless of age gating): published at
+  `loamnet.com/child-safety` (`apps/site/child-safety.html`); in-app concern route = the Settings email line;
+  point of contact = Joseph Maynard, opensource@magiczebra.co.uk; hosts are told once (Android setup, the
+  `loamnet` terminal UI, every plain-mode start) that they're responsible for their network and must remove
+  and report child abuse material. **Owner:** complete the Console declarations.
 - **No dynamic code.** expo-updates absent; the server bundle is built at build time; no `eval`. The on-device
   model download is *data* (GGUF), which policy allows.
 - **No telemetry** in the app or server (PostHog is marketing-site only). For Data safety, "No data

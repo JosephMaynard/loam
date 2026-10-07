@@ -114,6 +114,9 @@ export type AppContext = {
   isLocallyAuthoritative(userId: string): boolean;
   participationError(user: User): string | undefined;
   timeoutError(user: User): string | undefined;
+  rulesError(user: User): string | undefined;
+  acceptRules(user: User, version: number): User;
+  rerollIdentity(user: User): User;
   dmBlockError(senderId: string, recipientId: string): string | undefined;
   applyUserModeration(
   user: User,

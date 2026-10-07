@@ -44,7 +44,7 @@ function writeConfig(dataDir: string, config: unknown): void {
 /** Build an app on a data dir (with a generous identity budget so shared-127.0.0.1 sessions never trip
  * the per-IP limiter), registering it for cleanup. */
 async function buildOn(dataDir: string): Promise<LoamApp> {
-  const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000 });
+  const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000 });
   cleanups.push(() => app.close());
   return app;
 }
@@ -68,7 +68,7 @@ function sessionCookie(setCookie: string | string[] | undefined): string {
  * the message persists in SQLite for a later required-mode reopen. */
 async function seedPublicMessage(dataDir: string, body: string): Promise<string> {
   writeConfig(dataDir, {});
-  const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000 });
+  const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000 });
   try {
     const cfg = await app.server.inject({ method: "GET", url: "/api/config" });
     const cookie = sessionCookie(cfg.headers["set-cookie"]);
@@ -92,7 +92,7 @@ async function seedPublicMessage(dataDir: string, body: string): Promise<string>
 async function seedPublicMessageWithAttachment(dataDir: string): Promise<{ messageId: string; attachmentUrl: string }> {
   const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
   writeConfig(dataDir, {});
-  const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000 });
+  const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000 });
   try {
     const cfg = await app.server.inject({ method: "GET", url: "/api/config" });
     const cookie = sessionCookie(cfg.headers["set-cookie"]);
@@ -637,7 +637,7 @@ describe("sync transport encryption — OFF peer", () => {
     // Off transport, but sync enabled so it serves the digest/messages endpoints. `off` is not a
     // configurable posture — Developer Mode (the test-only `devMode` option) is the only plaintext path.
     writeConfig(peerDir, { sync: { enabled: true, peers: [] } });
-    const peer = await buildApp({ dataDir: peerDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, devMode: true });
+    const peer = await buildApp({ requireRulesAcceptance: false, dataDir: peerDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, devMode: true });
     cleanups.push(() => peer.close());
     const peerUrl = await listen(peer);
 

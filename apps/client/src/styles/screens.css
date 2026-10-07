@@ -649,6 +649,26 @@
   white-space: pre-wrap;
 }
 
+.report-escalated {
+  justify-self: start;
+  margin-top: var(--space-1);
+}
+
+/* The reported message itself, set apart like a quote. */
+.reported-message {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+  border-inline-start: 3px solid var(--border-strong);
+  padding-inline-start: 10px;
+}
+
+.reported-message-body {
+  font-size: var(--text-md);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ---------- Search ---------- */
 
 .search-form {
@@ -1076,6 +1096,31 @@
   .search-form .btn {
     padding-inline: var(--space-3);
   }
+}
+
+/* ---------- Network rules (views/RulesView.tsx) ---------- */
+
+.member-rules {
+  max-width: 680px;
+  line-height: 1.6;
+}
+
+.member-rules .rules-intro {
+  color: var(--fg-muted);
+}
+
+.member-rules h2 {
+  margin: var(--space-6) 0 var(--space-2);
+  font-size: var(--text-xl);
+}
+
+.member-rules section p {
+  color: var(--fg-muted);
+  font-size: var(--text-base);
+}
+
+.member-rules .rules-back {
+  margin-top: var(--space-6);
 }
 
 /* ---------- Privacy policy (views/PrivacyView.tsx) ---------- */
