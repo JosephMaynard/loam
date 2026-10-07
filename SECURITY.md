@@ -17,7 +17,7 @@ Please do not open a public GitHub issue for suspected security vulnerabilities.
 
 If you believe you have found a security issue in LOAM, please report it privately by emailing:
 
-**magicaltrailsapp@gmail.com**
+**opensource@magiczebra.co.uk**
 
 Please include as much detail as you can, for example:
 

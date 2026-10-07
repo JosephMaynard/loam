@@ -12,7 +12,7 @@ export const PRIVACY_POLICY_UPDATED = "6 October 2026";
 
 /** Where people report problems: LOAM has no telemetry, so these are the only way we hear of one. */
 export const ISSUE_TRACKER = "github.com/MagicZebraLtd/loam/issues";
-export const CONTACT_EMAIL = "magicaltrailsapp@gmail.com";
+export const CONTACT_EMAIL = "opensource@magiczebra.co.uk";
 
 export const PRIVACY_POLICY: PolicySection[] = [
   {

@@ -84,4 +84,4 @@ The default database driver is Node's built in `node:sqlite`, so a plain node ne
 - Source, documentation, and issues: https://github.com/MagicZebraLtd/loam
 - License: AGPL-3.0-only
 
-Copyright Magic Zebra Ltd.
+Copyright [Magic Zebra Ltd](https://www.magiczebra.co.uk).

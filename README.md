@@ -168,7 +168,7 @@ computer, the same settings live in the admin area as **security profiles**
   on the host and on the phones that received them. That also means LOAM never tells us when something
   goes wrong, so if you find a problem, please
   [open an issue](https://github.com/MagicZebraLtd/loam/issues) or email Magic Zebra Ltd at
-  magicaltrailsapp@gmail.com.
+  opensource@magiczebra.co.uk.
 - **Encrypted connections.** Joining by the code sets up an encrypted connection to the host (an X25519
   handshake and XChaCha20-Poly1305), so nobody else on the Wi-Fi can read the messages. By default,
   pictures and files are downloaded unencrypted, so someone on the same Wi-Fi could see them; a network
@@ -269,5 +269,6 @@ packed CLI on every push and pull request to `master`.
 
 ## License
 
-LOAM is licensed under the [GNU Affero General Public License v3.0](LICENSE). Copyright © Magic Zebra
-Ltd. If you run a modified LOAM as a service, the AGPL asks you to offer its users the source.
+LOAM is licensed under the [GNU Affero General Public License v3.0](LICENSE). Copyright ©
+[Magic Zebra Ltd](https://www.magiczebra.co.uk). If you run a modified LOAM as a service, the AGPL asks you
+to offer its users the source.
