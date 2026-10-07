@@ -1232,7 +1232,7 @@ function LoamApp() {
         const payload: unknown = await response.json().catch(() => undefined);
 
         if (!response.ok) {
-          throw new Error(errorText(payload, `Request failed: ${response.status}`));
+          throw new ApiError(response.status, payload, `Request failed: ${response.status}`);
         }
 
         const user = UserSchema.parse(payload);

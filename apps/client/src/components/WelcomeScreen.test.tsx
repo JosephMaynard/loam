@@ -2,6 +2,7 @@ import type { User } from "@loam/schema";
 import { render } from "preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "../lib/api";
 import { parseRoute, parseSocketEvent } from "../lib/protocol";
 import { WelcomeScreen } from "./WelcomeScreen";
 
@@ -64,6 +65,21 @@ describe("WelcomeScreen", () => {
     // Someone agreeing to a newer version of the rules keeps their name.
     const returning = mount({ ...newcomer, rulesVersion: 1 });
     expect(returning.buttons).toHaveLength(1);
+  });
+
+  it("quietly drops \"Try another\" when the node says this person keeps their name", async () => {
+    const { container, buttons } = mount(
+      newcomer,
+      undefined,
+      vi.fn(async () => {
+        throw new ApiError(403, { code: "reroll_not_allowed", error: "no" }, "no");
+      }),
+    );
+    buttons.find((button) => !button.classList.contains("welcome-agree"))!.click();
+    await tick();
+    await tick();
+    expect(container.querySelectorAll("button")).toHaveLength(1);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
   it("says so when agreeing fails, and leaves the button usable", async () => {

@@ -122,6 +122,15 @@ describe("member rules", () => {
     expect(late.json()).toMatchObject({ code: "reroll_not_allowed" });
   });
 
+  it("keeps the name of someone who posted before the rules existed", async () => {
+    const app = await makeApp({ requireRulesAcceptance: false });
+    const { cookie } = await newSession(app);
+    expect((await post(app, cookie, "from before the update")).statusCode).toBe(201);
+    const response = await request(app, cookie, "POST", "/api/users/me/reroll");
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({ code: "reroll_not_allowed" });
+  });
+
   it("allows a new random name even where people can't choose their own", async () => {
     const app = await makeApp();
     const { cookie } = await newSession(app);

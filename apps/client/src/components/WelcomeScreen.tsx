@@ -2,6 +2,7 @@ import type { User } from "@loam/schema";
 import { useState } from "preact/hooks";
 
 import { t } from "../i18n";
+import { ApiError } from "../lib/api";
 import { Avatar } from "./Avatar";
 
 type WelcomeScreenProps = {
@@ -23,16 +24,22 @@ type WelcomeScreenProps = {
 export function WelcomeScreen({ nodeName, currentUser, onAgree, onReroll }: WelcomeScreenProps) {
   const [busy, setBusy] = useState<"agree" | "reroll">();
   const [error, setError] = useState<string>();
+  // The node said this person keeps their name (they posted before the rules existed).
+  const [rerollRefused, setRerollRefused] = useState(false);
   // "Try another" is only offered before the first agreement (the server enforces it): after that, a new
   // name would let someone walk away from what they posted.
-  const canReroll = currentUser.rulesVersion === undefined;
+  const canReroll = currentUser.rulesVersion === undefined && !rerollRefused;
 
   async function run(action: "agree" | "reroll"): Promise<void> {
     setBusy(action);
     setError(undefined);
     try {
       await (action === "agree" ? onAgree() : onReroll());
-    } catch {
+    } catch (failure) {
+      if (action === "reroll" && failure instanceof ApiError && failure.code === "reroll_not_allowed") {
+        setRerollRefused(true);
+        return;
+      }
       setError(t(action === "agree" ? "welcome.error" : "welcome.rerollError"));
     } finally {
       setBusy(undefined);

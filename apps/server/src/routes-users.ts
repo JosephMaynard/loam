@@ -103,7 +103,13 @@ export function registerUserRoutes(ctx: AppContext): void {
         return reply.code(403).send(errorBody(accessError));
       }
 
-      if (user.type !== "human" || user.rulesVersion !== undefined) {
+      // Someone who posted before the rules existed (an upgraded network) hasn't agreed yet either, but their
+      // name is already on what they wrote: they keep it.
+      if (
+        user.type !== "human" ||
+        user.rulesVersion !== undefined ||
+        ctx.data.messages.some((message) => message.authorId === user.id)
+      ) {
         return reply.code(403).send(errorBody("A new name is only available before you first join in"));
       }
 
