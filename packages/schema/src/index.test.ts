@@ -554,6 +554,37 @@ describe("isReactionEmoji", () => {
     }
   });
 
+  it("loads and still judges reactions on an engine with no Unicode property escapes (the Android host's Node)", async () => {
+    // nodejs-mobile's Node 18 is built without ICU: any \\p{…} in a RegExp is a SyntaxError there, which used to
+    // crash the whole server as it loaded.
+    const NativeRegExp = RegExp;
+    vi.stubGlobal(
+      "RegExp",
+      new Proxy(NativeRegExp, {
+        construct(target, args: [string, string?]) {
+          if (args[1]?.includes("v") || String(args[0]).includes("\\p{")) {
+            throw new SyntaxError("Invalid regular expression: Invalid property name");
+          }
+          return Reflect.construct(target, args);
+        },
+      }),
+    );
+    vi.resetModules();
+    try {
+      const { isReactionEmoji: fallback } = await import("./index.js");
+      for (const emoji of ["👍", "❤️", "😐", "🤞", "✅", "👍🏽", "👩‍👩‍👧", "🏳️‍🌈", "🇬🇧", "1️⃣", "🏴󠁧󠁢󠁳󠁣󠁴󠁿"]) {
+        expect(fallback(emoji), emoji).toBe(true);
+      }
+      // Looser than the precise matchers (a text-style ❤ or © passes), but never text, two emoji or half a flag.
+      for (const value of ["", "lol", "a", "1", "#", "👍👍", "👍 ", " 👍", "👍x", "🇬", "1⃣", "👍\u200d"]) {
+        expect(fallback(value), JSON.stringify(value)).toBe(false);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
+
   it("keeps the same verdicts on an engine without the regex v flag (the older-browser fallback)", async () => {
     const NativeRegExp = RegExp;
     vi.stubGlobal(

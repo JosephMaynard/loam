@@ -1094,17 +1094,45 @@ export const EMOJI_SEQUENCE_PATTERN =
   "|\\p{Regional_Indicator}{2}|[#*0-9]\\ufe0f\\u20e3)";
 
 /**
+ * One emoji element for an engine with NO Unicode property escapes at all: the Android host's embedded
+ * Node 18 is built without ICU, so any `\\p{…}` is a SyntaxError there ("Invalid property name"), and the
+ * whole server failed to load. Code-point ranges instead: the emoji blocks (regional indicators left out,
+ * so half a flag isn't one) and the older symbol blocks (with or without U+FE0F), each with an optional
+ * skin tone. Looser than the property-based patterns: it can't tell a text-style symbol from an emoji.
+ */
+const EMOJI_ELEMENT_RANGES =
+  "(?:[\\u{1F004}-\\u{1F0CF}\\u{1F170}-\\u{1F1E5}\\u{1F200}-\\u{1F3FA}\\u{1F400}-\\u{1FAFF}]" +
+  "|[\\u{00A9}\\u{00AE}\\u{203C}\\u{2049}\\u{2122}\\u{2139}\\u{2194}-\\u{21AA}\\u{231A}-\\u{23FF}\\u{24C2}" +
+  "\\u{25AA}-\\u{25FE}\\u{2600}-\\u{27BF}\\u{2934}\\u{2935}\\u{2B05}-\\u{2B55}\\u{3030}\\u{303D}\\u{3297}\\u{3299}])" +
+  "\\ufe0f?[\\u{1F3FB}-\\u{1F3FF}]?";
+
+/** {@link EMOJI_SEQUENCE_PATTERN} with no property escapes (see {@link EMOJI_ELEMENT_RANGES}). Looser, never wrong-way strict. */
+export const EMOJI_SEQUENCE_RANGES_PATTERN =
+  `(?:${EMOJI_ELEMENT_RANGES}(?:\\u200d${EMOJI_ELEMENT_RANGES})*(?:[\\u{e0020}-\\u{e007e}]+\\u{e007f})?` +
+  "|[\\u{1F1E6}-\\u{1F1FF}]{2}|[#*0-9]\\ufe0f\\u20e3)";
+
+/**
  * Exactly one emoji: one RGI emoji, so a flag, keycap, skin-tone or ZWJ sequence counts as one. Built at
- * runtime because the `v` flag needs a 2023+ engine. An older browser (iOS 16, say) gets
- * {@link EMOJI_SEQUENCE_PATTERN}, so it is only the client's pre-check; the server, on Node 24, always has
- * the precise matcher and decides.
+ * runtime, trying the most precise matcher the engine can compile: `\\p{RGI_Emoji}` needs the `v` flag (a
+ * 2023+ engine); an older browser (iOS 16, say) gets {@link EMOJI_SEQUENCE_PATTERN}; an engine without
+ * Unicode property escapes (the Android host's Node) gets {@link EMOJI_SEQUENCE_RANGES_PATTERN}. Nothing
+ * here may throw: this runs when the module loads, on every node.
  */
 const SINGLE_EMOJI = (() => {
-  try {
-    return new RegExp("^\\p{RGI_Emoji}$", "v");
-  } catch {
-    return new RegExp(`^${EMOJI_SEQUENCE_PATTERN}$`, "u");
+  const candidates: (() => RegExp)[] = [
+    () => new RegExp("^\\p{RGI_Emoji}$", "v"),
+    () => new RegExp(`^${EMOJI_SEQUENCE_PATTERN}$`, "u"),
+    () => new RegExp(`^${EMOJI_SEQUENCE_RANGES_PATTERN}$`, "u"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      return candidate();
+    } catch {
+      // This engine can't compile it: try the next, looser one.
+    }
   }
+  // Unreachable on any ES2015+ engine (the last pattern uses only the `u` flag); refuse nothing rather than crash.
+  return /^[\s\S]+$/u;
 })();
 
 /**
