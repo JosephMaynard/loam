@@ -136,6 +136,19 @@ export const en = {
   "setup.hostAck": "You run this network. What people post is stored on this phone, and you're responsible for it. Check reports, remove anything that breaks LOAM's rules, and if you find sexual content involving a child, remove it and report it to the police.",
   "setup.agreeStart": "I understand. Start the network",
   "setup.agreeContinue": "I understand. Continue",
+  "menu.open": "Open menu",
+  "menu.invite": "Invite people",
+  "menu.encryption": "Encryption",
+  "menu.assistant": "AI assistant",
+  "menu.rules": "Network rules",
+  "menu.about": "About LOAM",
+  "about.title": "About LOAM",
+  "about.version": "Version {version}",
+  "about.body": "LOAM is free and open source. It has no analytics or crash reporting, so we only hear about problems you tell us about. Please get in touch.",
+  "about.website": "Website",
+  "about.email": "Email",
+  "about.source": "Source code",
+  "about.madeBy": "Made by Magic Zebra Ltd. Licensed under the GNU AGPL v3.",
 } as const;
 
 export type AppCatalog = { [K in keyof typeof en]: string };

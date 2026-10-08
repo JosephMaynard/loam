@@ -30,6 +30,9 @@ vi.mock('@/hooks/use-app-locale', () => ({ useAppLocale: () => 'en' }));
 vi.mock('@/components/host-share-overlay', () => ({ HostShareOverlay: () => null }));
 vi.mock('@/components/model-manager', () => ({ ModelManagerOverlay: () => null }));
 vi.mock('@/components/setup-wizard', () => ({ SetupWizard: () => null }));
+vi.mock('@/components/host-menu', () => ({ HostMenu: () => null }));
+vi.mock('@/components/about-overlay', () => ({ AboutOverlay: () => null }));
+vi.mock('expo-symbols', () => ({ SymbolView: () => null }));
 vi.mock('@/components/themed-text', () => ({ ThemedText: () => null }));
 vi.mock('@/components/themed-view', () => ({ ThemedView: () => null }));
 vi.mock('@/constants/theme', () => ({
