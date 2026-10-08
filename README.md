@@ -267,6 +267,11 @@ packed CLI on every push and pull request to `master`.
 - [Languages](docs/13-i18n.md) · [The assistant](docs/06-llm.md)
 - [Mission](MISSION.md) · [Acceptable use](ACCEPTABLE_USE.md) · [Roadmap](docs/roadmap.md)
 
+## Support LOAM
+
+LOAM is free, with no ads and no in-app purchases. If it helped you, you can support its development on
+[Ko-fi](https://ko-fi.com/magiczebra), or star the repo and tell people about it.
+
 ## License
 
 LOAM is licensed under the [GNU Affero General Public License v3.0](LICENSE). Copyright ©

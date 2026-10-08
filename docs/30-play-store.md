@@ -65,6 +65,10 @@ device checks below, and size headroom before a production track.
   `dataExtractionRules` resource that excludes every domain from cloud backup **and** Android 12+
   device-to-device transfer (which `allowBackup=false` alone doesn't stop at targetSdk 36). Verified in
   the generated manifest; the transfer exclusion itself hasn't been exercised on a phone.
+- **No payments in the app.** No in-app purchases and no donation link (Play's Payments policy forbids
+  pointing to outside payment from inside an app). Donations go through Ko-fi
+  (`ko-fi.com/magiczebra`), linked only from the website, the README and `.github/FUNDING.yml`; the app's
+  About screen and Settings link to loamnet.com, never to Ko-fi.
 
 ## Blockers
 
