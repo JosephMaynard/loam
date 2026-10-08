@@ -188,6 +188,15 @@ If your safety depends on it, get a professional review first. [`SECURITY.md`](S
 threat model, and every network serves its own privacy policy at `/privacy` (also on
 [loamnet.com](https://loamnet.com/privacy)).
 
+## Why LOAM is for adults
+
+LOAM is for people 18 and over. That isn't because of anything in it: LOAM is a plain messaging tool
+with no content of its own, nothing to browse and no feed, so people only see what others on their
+network write. It's because of how it works. There are no accounts, names are anonymous, and each
+network is run by whoever starts it, with no company in the middle, so nobody can check ages or look out
+for children the way an app made for them has to. Rather than pretend otherwise, LOAM is for adults. Our
+[child safety standards](https://loamnet.com/child-safety) say how abuse is handled.
+
 ## How it works
 
 The host runs everything: the LOAM server (Node.js, Fastify), its database (SQLite) and the web app it
