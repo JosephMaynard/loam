@@ -137,7 +137,11 @@ build if that lands.
 1. Take the `loam-host-aab` artifact from a tag build (or run `pnpm --filter app aab` locally) and upload
    it to **internal testing** (this also reserves the package name — `com.loamnet.host` is permanent after
    the first upload; be sure the identity is the one you want).
-2. Console paperwork: Play App Signing, Data safety, content rating (user interaction + unmoderated chat →
-   expect Teen/16+), FGS declaration + video (H1), location declaration or the device-verified cap (H2).
-3. Closed testing, then production. (Newer *personal* developer accounts must run a closed test before
-   production access; an organisation account is exempt — check which applies.)
+2. Console paperwork: Play App Signing, Data safety, **Target audience = 18 and over only** (LOAM is
+   adults-only: the Welcome screen's "I'm 18 or over" and ACCEPTABLE_USE.md), content rating (users
+   interact, unmoderated chat), the **Child Safety Standards** declaration (the published standards page
+   `loamnet.com/child-safety` and its point of contact), FGS declaration + video (H1), location
+   declaration or the device-verified cap (H2).
+3. Closed testing, then production. Magic Zebra Ltd's developer account (set up 2026-10-08) is an
+   **organisation** account, so the 12-tester / 14-day closed test that newer personal accounts need doesn't
+   apply: internal testing can go straight to production once the device run passes.
