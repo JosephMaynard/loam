@@ -614,7 +614,7 @@ export const ar: Translation = {
   "settings.blockedNote": "لا يمكن للأشخاص الذين تحظرهم إرسال رسائل مباشرة إليك، وتُخفى رسائلهم في القنوات عنك. لا يُعلمهم LOAM بذلك.",
   "settings.blockedEmpty": "لم تحظر أحدًا.",
   "settings.privacyPolicy": "سياسة الخصوصية",
-  "settings.reportProblems": "لا يحتوي LOAM على أي تحليلات أو تقارير أعطال، لذلك لا نعرف بالمشكلات إلا إذا أبلغتنا بها. أخبرنا:",
+  "settings.reportProblems": "لا يحتوي LOAM على أي تحليلات أو تقارير أعطال، لذلك لا نعرف بالمشكلات إلا إذا أبلغتنا بها. للإبلاغ عن مشكلة أو لمعرفة المزيد عن LOAM، زر موقعنا أو راسلنا:",
   "welcome.title": "مرحبًا بك في {network}",
   "welcome.nameLabel": "اسمك على هذه الشبكة",
   "welcome.tryAnother": "جرّب اسمًا آخر",

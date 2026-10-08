@@ -11,7 +11,7 @@ import { NavLink } from "../components/NavLink";
 import { CardHeader } from "../components/ScreenParts";
 import { ScreenHeader } from "../components/ScreenHeader";
 import { t } from "../i18n";
-import { CONTACT_EMAIL, ISSUE_TRACKER } from "../lib/privacy-policy";
+import { CONTACT_EMAIL, WEBSITE } from "../lib/privacy-policy";
 import { safeQrSvg } from "../lib/qr";
 import { fingerprint, getHostKeyMismatch, inviteQrHostKey, isSessionQrVerified, joinQrUrl } from "../lib/transport";
 
@@ -303,7 +303,7 @@ export function SettingsView({
           <p className="screen-footnote report-problems">
             {t("settings.reportProblems")}
             <br />
-            <span dir="ltr">{ISSUE_TRACKER}</span>
+            <span dir="ltr">{WEBSITE}</span>
             <br />
             <span dir="ltr">{CONTACT_EMAIL}</span>
           </p>

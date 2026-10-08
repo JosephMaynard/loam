@@ -1388,6 +1388,35 @@ code {
   gap: 12px;
 }
 
+/* ---- Report a problem / Support (#help) ------------------------------------- */
+
+.help-grid {
+  display: grid;
+  gap: 20px;
+  margin-top: 28px;
+}
+
+@media (min-width: 800px) {
+  .help-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.help-card {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+  padding: clamp(24px, 4vw, 40px);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-soft);
+}
+
+.help-card h3 {
+  font-size: 24px;
+}
+
 /* ---- Footer ---------------------------------------------------------------- */
 
 .site-footer {

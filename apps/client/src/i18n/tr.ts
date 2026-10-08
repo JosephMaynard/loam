@@ -600,7 +600,7 @@ export const tr: Translation = {
   "settings.blockedNote": "Engellediğiniz kişiler size doğrudan mesaj gönderemez ve kanallardaki mesajları sizden gizlenir. LOAM onlara bildirmez.",
   "settings.blockedEmpty": "Kimseyi engellemediniz.",
   "settings.privacyPolicy": "Gizlilik politikası",
-  "settings.reportProblems": "LOAM'da analiz veya çökme raporu yoktur, bu yüzden yalnızca bize bildirdiğiniz sorunlardan haberimiz olur. Bize bildirin:",
+  "settings.reportProblems": "LOAM'da analiz veya çökme raporu yoktur, bu yüzden yalnızca bize bildirdiğiniz sorunlardan haberimiz olur. Bir sorun bildirmek ya da LOAM hakkında daha fazla bilgi almak için web sitemizi ziyaret edin veya bize e-posta gönderin:",
   "welcome.title": "{network} ağına hoş geldiniz",
   "welcome.nameLabel": "Bu ağdaki adınız",
   "welcome.tryAnother": "Başka bir ad dene",

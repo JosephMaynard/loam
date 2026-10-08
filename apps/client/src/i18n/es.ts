@@ -600,7 +600,7 @@ export const es: Translation = {
   "settings.blockedNote": "Las personas que bloqueas no pueden enviarte mensajes directos y sus mensajes en los canales quedan ocultos para ti. LOAM no se lo notifica.",
   "settings.blockedEmpty": "No has bloqueado a nadie.",
   "settings.privacyPolicy": "Política de privacidad",
-  "settings.reportProblems": "LOAM no tiene analíticas ni informes de fallos, así que solo nos enteramos de los problemas que nos cuentas. Avísanos:",
+  "settings.reportProblems": "LOAM no tiene analíticas ni informes de fallos, así que solo nos enteramos de los problemas que nos cuentas. Para informar de uno, o para saber más sobre LOAM, visita nuestra web o escríbenos:",
   "welcome.title": "Te damos la bienvenida a {network}",
   "welcome.nameLabel": "Tu nombre en esta red",
   "welcome.tryAnother": "Probar otro nombre",

@@ -673,7 +673,7 @@ export const en = {
   "settings.blockedNote": "People you block can't send you direct messages, and their channel messages are hidden from you. LOAM doesn't notify them.",
   "settings.blockedEmpty": "You haven't blocked anyone.",
   "settings.privacyPolicy": "Privacy policy",
-  "settings.reportProblems": "LOAM has no analytics or crash reporting, so we only hear about problems you report. Please tell us:",
+  "settings.reportProblems": "LOAM has no analytics or crash reporting, so we only hear about problems you tell us about. To report one, or to find out more about LOAM, visit our website or email us:",
   "welcome.title": "Welcome to {network}",
   "welcome.nameLabel": "Your name on this network",
   "welcome.tryAnother": "Try another name",
