@@ -7,6 +7,31 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Welcome screen and network rules.** Someone joining a network sees their random name and picture (with
+  "Try another name" until they first agree), the rules in one sentence, and one button: "I'm 18 or over,
+  and I agree". The full rules are at `/rules`, served by the network itself, offline, in all 15 languages.
+  Until someone agrees, the server refuses their posts, reactions, uploads, typed names, edits and new
+  channels; reading, reporting and blocking always work. Anyone who posted before the rules existed keeps
+  their name.
+- **LOAM is for adults (18+).** Not because of anything in it: there are no accounts and no company in the
+  middle, so nobody can check ages. The README and website say why; child safety standards are at
+  loamnet.com/child-safety.
+- **Reports moderators can act on.** A message report shows moderators the reported message, read live
+  (so it never outlives a deletion), with its pictures as thumbnails and files as links, and the report
+  dialog says moderators will see it. **Escalate** passes a report to the admins. Moderators and admins
+  see a live count of open reports on People.
+- **"You run this network"**: a one-time note for hosts on the Android setup screen and in the `loamnet`
+  terminal view (and on every plain-mode start), saying they are responsible for their network.
+- **Update news on the Android host, without phoning home.** The Google Play build asks the Play Store app
+  whether there is a newer LOAM; the GitHub build has a "Check for updates" link that asks GitHub only when
+  tapped. Both show only on the opening setup screen, never while a network runs, and neither downloads
+  anything.
+- **About LOAM** on the Android host: the version, links to loamnet.com, the email and the source code, and
+  the licence.
+- **Saving received files on the host phone.** Tapping a file in the host's own window now opens Android's
+  share sheet (it did nothing before).
+- **Reporting problems.** LOAM has no analytics or crash reporting, so Settings, the privacy policy and the
+  website say how to tell us: a GitHub issue or opensource@magiczebra.co.uk.
 - **A terminal screen for `loamnet`.** In a terminal, `loam` now keeps the join QR on screen instead of
   scrolling it away under a line per request, with Activity, People, Settings and Debug screens a key
   away. Press `o` to open LOAM in the browser as the network's admin (or show a QR that makes a phone
@@ -118,8 +143,13 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   back), so its QR code stays visible.
 - **Setup:** "Community" comes first, each kind of network has an icon, and choosing one moves straight on.
   The screen saying a private network "was erased" is gone: setup just starts again.
-- **Emergency reset** is in the host menu on private networks, and at the bottom of Encryption settings on
-  every network.
+- **A clearer Android host menu**, grouped with proper icons: Invite people; Encryption and AI assistant;
+  Network rules, Privacy policy and About LOAM; then Emergency reset, set apart in red, now on every
+  network (and still at the bottom of Encryption settings). The top bar shows whether anyone is connected,
+  and a tap opens the join codes.
+- **The logo is back to the darker orange**, a touch more saturated, and the interface accent matches it.
+- **LOAM now lives at github.com/MagicZebraLtd/loam**, copyright Magic Zebra Ltd. Donations go through
+  [Ko-fi](https://ko-fi.com/magiczebra), linked from the website and README only: the app has no payments.
 - **The privacy policy is served by the network itself** (`/privacy`), so it reads offline and the app
   never sends anyone to a website for it.
 - **Storage encryption:** unencrypted storage is now the last option, labelled as for testing, and asks
