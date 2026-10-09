@@ -111,6 +111,7 @@ export const ru: Translation = {
   "people.pendingLoadError": "Не удалось загрузить заявки на вступление.",
   "people.pendingLoading": "Загрузка заявок на вступление…",
   "people.pendingEmpty": "Никто не ждёт вступления.",
+  "people.pendingSince": "Запрос на вступление: {when}",
   "people.approve": "Одобрить",
   "people.deny": "Отклонить",
 

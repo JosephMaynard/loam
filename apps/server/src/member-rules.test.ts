@@ -109,19 +109,60 @@ describe("identities nobody ever used", () => {
     }
   });
 
-  it("keeps a newcomer waiting in a greeter's queue, however long the wait", async () => {
-    const app = await makeApp({ unusedIdentityMaxAgeMs: 60 });
+  it("keeps a newcomer in a greeter's queue past the usual window, and removes them, queue entry and all, after the longer one", async () => {
+    const app = await makeApp({ unusedIdentityMaxAgeMs: 60, pendingIdentityMaxAgeMs: 400 });
     const admin = await newSession(app);
     expect((await request(app, admin.cookie, "PATCH", "/api/admin/config", { access: { joinPolicy: "approval" } })).statusCode).toBe(200);
     const waiting = await newSession(app); // pending: they can't agree to the rules until someone lets them in
     expect(app.store.loadUsers().find((user) => user.id === waiting.userId)?.pending).toBe(true);
+    const queued = async () =>
+      ((await request(app, admin.cookie, "GET", "/api/access/pending")).json() as { id: string }[]).map((user) => user.id);
+
+    await sleep(120);
+    app.reapUnusedIdentities();
+    expect(userIds(app)).toContain(waiting.userId);
+    expect(await queued()).toContain(waiting.userId);
+
+    await sleep(400);
+    app.reapUnusedIdentities();
+    expect(userIds(app)).not.toContain(waiting.userId);
+    expect(await queued()).not.toContain(waiting.userId);
+    expect(app.store.loadSessions().some((session) => session.userId === waiting.userId)).toBe(false);
+  });
+
+  it("never removes a newcomer in the queue who agreed to the rules", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-rules-"));
+    cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+    const first = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000 });
+    await newSession(first); // the admin
+    const person = await newSession(first);
+    expect((await agree(first, person.cookie)).statusCode).toBe(200);
+    // Nothing queues someone who already agreed today (pending is set when the identity is made, and a
+    // pending person can't agree), so the record is written directly, as an older build or a future flow might.
+    const record = first.store.loadUsers().find((user) => user.id === person.userId)!;
+    first.store.upsertUser({ ...record, pending: true });
+    await first.close();
+
+    const app = await buildApp({ dataDir, logger: false, unusedIdentityMaxAgeMs: 1, pendingIdentityMaxAgeMs: 1 });
+    cleanups.push(() => app.close());
+    await sleep(10);
+    app.reapUnusedIdentities();
+    expect(app.store.loadUsers().find((user) => user.id === person.userId)?.pending).toBe(true);
+  });
+
+  it("does not count a block as use: an unused identity that blocked someone is still removed, with its block", async () => {
+    const app = await makeApp({ unusedIdentityMaxAgeMs: 60 });
+    const admin = await newSession(app);
+    await agree(app, admin.cookie);
+    const probe = await newSession(app);
+    expect((await request(app, probe.cookie, "PUT", `/api/users/me/blocks/${admin.userId}`)).statusCode).toBe(200);
+    expect(app.store.isUserBlocked(probe.userId, admin.userId)).toBe(true);
 
     await sleep(120);
     app.reapUnusedIdentities();
 
-    expect(userIds(app)).toContain(waiting.userId);
-    const queue = (await request(app, admin.cookie, "GET", "/api/access/pending")).json() as { id: string }[];
-    expect(queue.map((user) => user.id)).toContain(waiting.userId);
+    expect(userIds(app)).not.toContain(probe.userId);
+    expect(app.store.isUserBlocked(probe.userId, admin.userId)).toBe(false);
   });
 
   it("keeps a never-agreed reporter while their report is open or escalated, and lets them go once it is resolved", async () => {

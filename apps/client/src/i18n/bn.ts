@@ -106,6 +106,7 @@ export const bn: Translation = {
   "people.pendingLoadError": "অপেক্ষমাণ যোগদান লোড করা যায়নি।",
   "people.pendingLoading": "অপেক্ষমাণ যোগদান লোড হচ্ছে…",
   "people.pendingEmpty": "যোগ দিতে কেউ অপেক্ষা করছে না।",
+  "people.pendingSince": "যোগ দেওয়ার অনুরোধ: {when}",
   "people.approve": "অনুমোদন",
   "people.deny": "প্রত্যাখ্যান",
 

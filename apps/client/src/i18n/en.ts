@@ -144,6 +144,7 @@ export const en = {
   "people.pendingLoadError": "Unable to load pending joins.",
   "people.pendingLoading": "Loading pending joins…",
   "people.pendingEmpty": "Nobody is waiting to join.",
+  "people.pendingSince": "Asked to join {when}",
   "people.approve": "Approve",
   "people.deny": "Deny",
 

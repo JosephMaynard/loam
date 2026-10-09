@@ -106,6 +106,7 @@ export const ps: Translation = {
   "people.pendingLoadError": "پاتې غوښتنې نه شوې پورته کیدی.",
   "people.pendingLoading": "پاتې غوښتنې پورته کیږي…",
   "people.pendingEmpty": "هیڅوک د یوځای کیدو په تمه نه دي.",
+  "people.pendingSince": "د یوځای کیدو غوښتنه: {when}",
   "people.approve": "منل",
   "people.deny": "ردول",
 

@@ -18,6 +18,7 @@ import { ScreenHeader } from "../components/ScreenHeader";
 import { errorText, t } from "../i18n";
 import { fetchJson, parseUserList, requestJson, REQUEST_TIMEOUT_MS } from "../lib/api";
 import { isImageAttachment } from "../lib/attachments";
+import { ageLabel } from "../lib/dates";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "../lib/capabilities";
 import { useIsTimedOut } from "../lib/timeout";
 import { encryptedFetch } from "../lib/transport";
@@ -201,6 +202,8 @@ function PendingRow({ onResolved, user }: { onResolved: (user: User) => void; us
         <strong className="row-title" dir="auto">
           {user.displayName}
         </strong>
+        {/* A newcomer is queued the moment their identity is made, so its age is how long they've waited. */}
+        <span className="row-meta">{t("people.pendingSince", { when: ageLabel(user.createdAt) })}</span>
       </div>
       <div className="row-actions">
         <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void decide("approve")} type="button">

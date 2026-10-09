@@ -113,6 +113,7 @@ export const ar: Translation = {
   "people.pendingLoadError": "تعذّر تحميل طلبات الانضمام المعلّقة.",
   "people.pendingLoading": "جارٍ تحميل طلبات الانضمام المعلّقة…",
   "people.pendingEmpty": "لا أحد ينتظر الانضمام.",
+  "people.pendingSince": "طلب الانضمام: {when}",
   "people.approve": "قبول",
   "people.deny": "رفض",
 

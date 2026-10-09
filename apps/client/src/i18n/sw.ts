@@ -106,6 +106,7 @@ export const sw: Translation = {
   "people.pendingLoadError": "Imeshindwa kupakia maombi yanayosubiri.",
   "people.pendingLoading": "Inapakia maombi yanayosubiri…",
   "people.pendingEmpty": "Hakuna anayesubiri kujiunga.",
+  "people.pendingSince": "Aliomba kujiunga {when}",
   "people.approve": "Idhinisha",
   "people.deny": "Kataa",
 

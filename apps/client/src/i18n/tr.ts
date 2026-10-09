@@ -106,6 +106,7 @@ export const tr: Translation = {
   "people.pendingLoadError": "Bekleyen katılımlar yüklenemedi.",
   "people.pendingLoading": "Bekleyen katılımlar yükleniyor…",
   "people.pendingEmpty": "Katılmayı bekleyen kimse yok.",
+  "people.pendingSince": "Katılma isteği: {when}",
   "people.approve": "Onayla",
   "people.deny": "Reddet",
 

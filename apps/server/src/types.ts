@@ -205,6 +205,13 @@ export type AppOptions = {
    */
   unusedIdentityMaxAgeMs?: number;
   /**
+   * The same window for an unused identity waiting in a greeter's queue (`pending`, on an approval-only
+   * node, where every newcomer starts pending and can't agree to the rules until admitted). Longer, so a
+   * real newcomer outlasts a greeter's weekend away. Defaults to 7 days. A pending identity that agreed to
+   * the rules is never reaped.
+   */
+  pendingIdentityMaxAgeMs?: number;
+  /**
    * Hard cap on live transport-encryption sessions (docs/08) — `POST /api/transport/handshake` is
    * deliberately unauthenticated (it's the bootstrap step before any session exists), so without a
    * real bound a flood of handshakes could grow the session map without limit. Expired sessions are

@@ -106,6 +106,7 @@ export const es: Translation = {
   "people.pendingLoadError": "No se pudieron cargar las solicitudes pendientes.",
   "people.pendingLoading": "Cargando solicitudes pendientes…",
   "people.pendingEmpty": "Nadie está esperando para unirse.",
+  "people.pendingSince": "Pidió unirse {when}",
   "people.approve": "Aprobar",
   "people.deny": "Rechazar",
 

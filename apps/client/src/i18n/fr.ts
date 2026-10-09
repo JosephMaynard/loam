@@ -106,6 +106,7 @@ export const fr: Translation = {
   "people.pendingLoadError": "Impossible de charger les demandes en attente.",
   "people.pendingLoading": "Chargement des demandes en attente…",
   "people.pendingEmpty": "Personne n’attend pour rejoindre.",
+  "people.pendingSince": "A demandé à rejoindre {when}",
   "people.approve": "Approuver",
   "people.deny": "Refuser",
 

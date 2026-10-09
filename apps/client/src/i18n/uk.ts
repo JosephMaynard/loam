@@ -111,6 +111,7 @@ export const uk: Translation = {
   "people.pendingLoadError": "Не вдалося завантажити запити на приєднання.",
   "people.pendingLoading": "Завантаження запитів на приєднання…",
   "people.pendingEmpty": "Ніхто не очікує на приєднання.",
+  "people.pendingSince": "Запит на приєднання: {when}",
   "people.approve": "Схвалити",
   "people.deny": "Відхилити",
 

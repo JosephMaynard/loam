@@ -106,6 +106,7 @@ export const ur: Translation = {
   "people.pendingLoadError": "زیرِ التوا درخواستیں لوڈ نہیں ہو سکیں۔",
   "people.pendingLoading": "زیرِ التوا درخواستیں لوڈ ہو رہی ہیں…",
   "people.pendingEmpty": "کوئی شامل ہونے کے لیے منتظر نہیں۔",
+  "people.pendingSince": "شامل ہونے کی درخواست: {when}",
   "people.approve": "منظور کریں",
   "people.deny": "مسترد کریں",
 

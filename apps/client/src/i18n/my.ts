@@ -106,6 +106,7 @@ export const my: Translation = {
   "people.pendingLoadError": "စောင့်ဆိုင်းနေသော ဝင်ရောက်မှုများ ဖွင့်၍မရပါ။",
   "people.pendingLoading": "စောင့်ဆိုင်းနေသော ဝင်ရောက်မှုများ ဖွင့်နေသည်…",
   "people.pendingEmpty": "ဝင်ရောက်ရန် စောင့်နေသူ မရှိပါ။",
+  "people.pendingSince": "ဝင်ရောက်ရန် တောင်းဆိုချိန်: {when}",
   "people.approve": "ခွင့်ပြုရန်",
   "people.deny": "ငြင်းပယ်ရန်",
 

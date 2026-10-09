@@ -178,6 +178,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const identityWindowMs = options.identityWindowMs ?? 10 * 60_000;
   // How long an identity nobody ever used may linger before `reapUnusedIdentities` removes it.
   const unusedIdentityMaxAgeMs = options.unusedIdentityMaxAgeMs ?? 24 * 3_600_000;
+  // The same for one waiting in a greeter's queue: longer, so a greeter away for a weekend still finds
+  // a real newcomer there, but not for ever.
+  const pendingIdentityMaxAgeMs = options.pendingIdentityMaxAgeMs ?? 7 * 24 * 3_600_000;
   const tombstoneHorizonMs = options.tombstoneHorizonMs ?? defaultTombstoneHorizonMs;
   // Uploaded-but-unattached attachment ids → uploader + upload time. A message may only reference
   // the uploader's own pending uploads; each id is consumed on first use. RAM-only: entries a
@@ -2371,21 +2374,33 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * curl, a HEAD) mints and persists a user record, which then sits on the People list and in the DM picker
    * for ever. A human record older than `unusedIdentityMaxAgeMs` that never agreed to the member rules,
    * neither wrote nor received a message, owns or belongs to no channel, holds no admin flag, role or
-   * moderation state, is not waiting in a greeter's queue (`pending`: such a person cannot agree to the rules
-   * until admitted), has no report still open in the moderators' queue (reporting, like reading and
+   * moderation state, has no report still open in the moderators' queue (reporting, like reading and
    * blocking, is allowed before agreeing), and has no socket open or mid-challenge is such a ghost. Its row,
    * sessions, identity tokens and mesh keypair go, with the rows that exist only for it (`deleteUser`: its
    * block-list rows, private-channel join requests and mesh address book), all in one transaction; a
    * returning cookie mints afresh, and clients drop it when they next reconcile the roster from
    * `GET /api/users`. Nothing is broadcast: nobody ever saw it do anything. Only meaningful while the rules
    * gate is on, since agreeing is the signal that a person is behind the record.
+   *
+   * On an approval-only node every newcomer is minted `pending` (waiting in a greeter's queue) and can't
+   * agree to the rules until admitted, so a probe there would wait in the queue for ever. A pending ghost
+   * (the same criteria) is therefore reaped too, after the longer `pendingIdentityMaxAgeMs`, and its queue
+   * entry goes with it (the queue is the pending records themselves). A pending record that did agree to
+   * the rules is a person waiting and is never reaped; nothing queues such a record today, so that guard is
+   * defensive.
+   *
+   * A block is deliberately NOT a sign of use: the Welcome screen keeps a real member from blocking anyone
+   * before agreeing, so a block-list row on an unagreed record is a probe's, and counting it would let a
+   * probe keep itself alive by blocking someone. Its block rows go with it.
    */
   function reapUnusedIdentities(): void {
     if (!requireRulesAcceptance) {
       return;
     }
 
-    const cutoff = Date.now() - unusedIdentityMaxAgeMs;
+    const now = Date.now();
+    const cutoff = now - unusedIdentityMaxAgeMs;
+    const pendingCutoff = now - pendingIdentityMaxAgeMs;
     const connected = new Set<string>();
     for (const session of sockets) {
       connected.add(session.userId);
@@ -2416,11 +2431,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         user.rulesVersion === undefined &&
         !user.isAdmin &&
         !user.roles?.length &&
-        !user.pending &&
         !user.banned &&
         !user.shadowBanned &&
         user.timeoutUntil === undefined &&
-        user.createdAt < cutoff &&
+        user.createdAt < (user.pending ? pendingCutoff : cutoff) &&
         !connected.has(user.id) &&
         !referenced.has(user.id) &&
         // Last, so only the few records that are otherwise ghosts cost a query (the indexed reporter column).

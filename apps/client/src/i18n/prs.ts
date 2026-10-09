@@ -107,6 +107,7 @@ export const prs: Translation = {
   "people.pendingLoadError": "بارگیری درخواست‌های در انتظار ممکن نشد.",
   "people.pendingLoading": "در حال بارگیری درخواست‌های در انتظار…",
   "people.pendingEmpty": "کسی منتظر پیوستن نیست.",
+  "people.pendingSince": "درخواست پیوستن: {when}",
   "people.approve": "تأیید",
   "people.deny": "رد",
 
