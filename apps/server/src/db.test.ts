@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import type { Channel, Message, User } from "@loam/schema";
+import type { Channel, Message, Report, User } from "@loam/schema";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { assertNotPlaintextSqliteFile, importLegacyJsonData, openStore, type LoamStore } from "./db.js";
@@ -113,6 +113,16 @@ describe("openStore", () => {
     // Deleting an absent id is a harmless no-op.
     store.deleteUser("user.gone");
     expect(store.loadUsers().map((user) => user.id)).toEqual(["user.keep"]);
+  });
+
+  it("deletes a user's join requests and own mesh address book with the row, and nobody else's", () => {
+    store.addJoinRequest("ops", "user.gone");
+    store.addJoinRequest("ops", "user.keep");
+    store.upsertMeshContact("user.gone", "mesh.someone", "{}");
+    store.upsertMeshContact("user.keep", "mesh.someone", "{}");
+    store.deleteUser("user.gone");
+    expect(store.loadJoinRequests("ops")).toEqual(["user.keep"]);
+    expect(store.loadMeshContacts().map((row) => row.ownerUserId)).toEqual(["user.keep"]);
   });
 
   it("round-trips channels", () => {
@@ -429,6 +439,66 @@ describe("openStore", () => {
       }
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("reports", () => {
+  function makeReport(id: string, targetId: string, reporterUserId: string, status: Report["status"] = "open"): Report {
+    return { id, targetType: "message", targetId, reporterUserId, reason: "spam", createdAt: 1_704_067_200_000, status };
+  }
+
+  it("finds the open reports about one target and counts open ones per reporter and node-wide", () => {
+    const store = openStore(":memory:");
+    try {
+      store.upsertReport(makeReport("rpt_000000000000000a", "msg_1", "user.rep"));
+      store.upsertReport(makeReport("rpt_000000000000000b", "msg_1", "user.other", "escalated"));
+      store.upsertReport(makeReport("rpt_000000000000000c", "msg_2", "user.rep"));
+      store.upsertReport(makeReport("rpt_000000000000000d", "msg_1", "user.rep", "resolved"));
+
+      expect(store.loadOpenReportsForTarget("msg_1").map((report) => report.id).sort()).toEqual([
+        "rpt_000000000000000a",
+        "rpt_000000000000000b",
+      ]);
+      expect(store.loadOpenReportsForTarget("msg_none")).toEqual([]);
+      expect(store.countOpenReports()).toBe(3);
+      expect(store.countOpenReports("user.rep")).toBe(2);
+      expect(store.countOpenReports("user.nobody")).toBe(0);
+
+      // Resolving moves a report out of every open count and lookup.
+      store.upsertReport(makeReport("rpt_000000000000000a", "msg_1", "user.rep", "resolved"));
+      expect(store.loadOpenReportsForTarget("msg_1").map((report) => report.id)).toEqual(["rpt_000000000000000b"]);
+      expect(store.countOpenReports("user.rep")).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("adds the indexed target and reporter columns to a reports table written before them, filled from the stored JSON", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loam-db-reports-"));
+    const path = join(dir, "loam.db");
+    try {
+      const raw = new DatabaseSync(path);
+      raw.exec(
+        "CREATE TABLE reports (id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL)",
+      );
+      const old = makeReport("rpt_000000000000000e", "msg_old", "user.old");
+      raw.prepare("INSERT INTO reports (id, status, created_at, data) VALUES (?, ?, ?, ?)").run(old.id, old.status, old.createdAt, JSON.stringify(old));
+      // A row whose JSON is unreadable must not stop the migration (it simply never matches a lookup).
+      raw.prepare("INSERT INTO reports (id, status, created_at, data) VALUES (?, ?, ?, ?)").run("rpt_000000000000000f", "open", 1, "{not json");
+      raw.close();
+
+      const store = openStore(path);
+      try {
+        expect(store.loadOpenReportsForTarget("msg_old").map((report) => report.id)).toEqual([old.id]);
+        expect(store.countOpenReports("user.old")).toBe(1);
+        const columns = (new DatabaseSync(path).prepare("PRAGMA table_info(reports)").all() as { name: string }[]).map((column) => column.name);
+        expect(columns).toEqual(expect.arrayContaining(["target_id", "reporter_user_id"]));
+      } finally {
+        store.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
@@ -808,11 +878,51 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
       }
     });
 
-    it("throws when called on a plaintext (unencrypted) store — no pragma handle to checkpoint through", () => {
+    it("folds a plaintext store's WAL into loam.db too, so the main file alone holds the commit", () => {
       const plain = openStore(dbPath);
+      const copyDir = mkdtempSync(join(tmpdir(), "loam-ckpt-copy-"));
+      /** The bodies a power cut would leave: `loam.db` alone, with the unsynced `-wal` lost. */
+      function bodiesInMainFileAlone(name: string): string[] {
+        const copy = join(copyDir, name);
+        copyFileSync(dbPath, copy);
+        const reopened = openStore(copy);
+        try {
+          return reopened.loadMessages().map((message) => ("body" in message ? message.body : ""));
+        } finally {
+          reopened.close();
+        }
+      }
       try {
-        expect(() => plain.checkpoint()).toThrow(/encryptionKey|plaintext/);
+        plain.insertMessage(makeChannelPost("msg_plain_wal"));
+        // Precondition: the commit sits only in a non-empty -wal sidecar.
+        expect(statSync(`${dbPath}-wal`).size).toBeGreaterThan(0);
+        expect(bodiesInMainFileAlone("before.db")).not.toContain("body of msg_plain_wal");
+
+        expect(() => plain.checkpoint()).not.toThrow();
+
+        // The WAL is empty (or gone) and the main file now carries the row on its own.
+        expect(existsSync(`${dbPath}-wal`) ? statSync(`${dbPath}-wal`).size : 0).toBe(0);
+        expect(bodiesInMainFileAlone("after.db")).toContain("body of msg_plain_wal");
+        expect(plain.loadMessages()).toEqual([makeChannelPost("msg_plain_wal")]);
       } finally {
+        plain.close();
+        rmSync(copyDir, { recursive: true, force: true });
+      }
+    });
+
+    it("throws on a plaintext store when another connection's read keeps the checkpoint from finishing", () => {
+      const plain = openStore(dbPath);
+      const reader = new DatabaseSync(dbPath);
+      try {
+        plain.insertMessage(makeChannelPost("msg_before_reader"));
+        // An open read transaction pins the WAL, so TRUNCATE comes back busy instead of resetting it.
+        reader.exec("BEGIN");
+        reader.prepare("SELECT COUNT(*) AS total FROM messages").get();
+        plain.insertMessage(makeChannelPost("msg_after_reader"));
+        expect(() => plain.checkpoint()).toThrow(/did not fully fold and truncate the WAL/);
+      } finally {
+        reader.exec("COMMIT");
+        reader.close();
         plain.close();
       }
     });

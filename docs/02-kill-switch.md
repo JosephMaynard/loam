@@ -24,6 +24,38 @@
 > deletes the files, which on flash is best-effort removal, not secure erasure.** Media-at-rest
 > encryption is tracked in `docs/29` (Track 2). Remaining (future): duress/decoy passphrase; RAM
 > key-zeroing via a native buffer.
+>
+> **Failure handling.** Every in-process branch of the wipe runs under one guard: if a store call
+> (`wipeAll()`, the reopen after the files are deleted, the reload) or the filesystem throws partway, the
+> wipe is reported as **incomplete** exactly like a deletion that could not be verified: the `wipe` event is
+> still broadcast so clients purge, sockets are closed, in-memory state is dropped, and the node stays
+> locked (every route but `/api/health` answers 503) until it is restarted. Every branch, the plaintext
+> logical wipe and the ephemeral key rotation included, writes the wipe journal (`.loam-wipe-phase`: the
+> intent plus the sanitized config snapshot) before its first destructive step, so the next boot finishes an
+> interrupted wipe (deletes the database files and media, restores the config, re-seeds) before anything is
+> served and stays locked if that fails; only when the journal itself could not be written does a restart
+> not finish the wipe, and the notice and the 503 body then say so: the body's `code` is `wipe_incomplete`
+> (a restart finishes it) or `wipe_unrecorded` (restart, then run the reset again), and its `journaled`
+> field carries the same fact for the launcher, which also gets it from the in-process host reset. The route
+> answers 503, never a 500 that would leave the gate raised with nothing told to purge. The plaintext logical
+> wipe checkpoints the write-ahead log into `loam.db` (`checkpoint()`, which syncs the file) right after
+> `wipeAll()`: the store commits under `synchronous = NORMAL`, so without it a power cut after the journal is
+> cleared could roll the deletion back with nothing left to finish it. A checkpoint that comes back busy or
+> partial counts as a failed wipe, so the node stays locked with its journal on disk.
+>
+> **Which branch a keyed node takes.** `persistent`/`passphrase` nodes take the journaled fixed-key wipe
+> (delete, prove gone, journal, hand off or recreate); `ephemeral` nodes rotate their RAM key. A real key
+> with no declared `LOAM_DB_ENCRYPTION_MODE` (the `loamnet --encrypt` CLI, a bare `LOAM_DB_KEY=<secret>`)
+> is a fixed key, so both entry points (`server.ts`, `embedded.ts`) treat it as `passphrase` and it gets the
+> journaled branch too; only the literal `LOAM_DB_KEY=ephemeral` is ephemeral.
+>
+> **Sync after a fixed-key reset.** The config a hooked fixed-key wipe carries across the launcher restart is
+> written to plain files (`.loam-wipe-phase`, `config.json`), so the plaintext bearer `sync.token` is
+> stripped from it. A node that synced *with* a token must not come back syncing *without* one (pulling
+> unauthenticated, its own `/api/sync/*` open), so the same snapshot turns `sync.enabled` off; the next
+> boot logs that sync was turned off by the reset and the operator sets a new token and turns it on again.
+> A no-hook fixed-key wipe re-persists the full config (token included) into the fresh encrypted database,
+> which wins over `config.json` on the next boot, so there sync stays as it was.
 
 ## Goal & threat model
 

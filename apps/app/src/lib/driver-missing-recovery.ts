@@ -1,47 +1,38 @@
-// `db_encryption_driver_missing` recovery (pre-release review 2026-09-25) — the actions behind the host
-// screen's lock notice (src/app/index.tsx), kept here so they're testable without a renderer
+// `db_encryption_driver_missing` recovery: the actions behind the host screen's lock notice
+// (src/app/index.tsx), kept here so they're testable without a renderer
 // (src/lib/driver-missing-recovery.test.ts). The SQLCipher module didn't load, so the launcher refused to
 // start under an encrypted selection. Two ways out: Retry (re-probe the driver) or a CONFIRMED "Start
-// without encryption" (persist mode 'off' and retry) — a real security downgrade, so never a single tap.
+// without encryption" (persist mode 'off' and retry), a real security downgrade, so never a single tap.
 import {
   applyDbModeChange,
   type ApplyDbModeChangeDeps,
   type DbEncryptionMode,
   type DbUnlockResult,
 } from './db-encryption';
+import { t } from './i18n';
 import type { ShowAlert } from './show-alert';
 
 export type StartUnencryptedConfirmation = { title: string; message: string; confirmLabel: string };
 
 /**
- * The confirmation text for switching encryption off. What happens to the existing database depends on the
- * mode that locked: in `ephemeral` mode the launcher already deleted it when it locked (its RAM-only key
- * died with the previous launch, so nothing survives a restart anyway — boot-config.js
- * `deleteStaleEphemeralDb`); in `persistent`/`passphrase` mode it stays on disk, unreadable without
- * encryption. `undefined` = the mode couldn't be read, so the copy covers both.
+ * The confirmation text for switching encryption off, in the app's language. What happens to the existing
+ * database depends on the mode that locked: in `ephemeral` mode the launcher already deleted it when it
+ * locked (its RAM-only key died with the previous launch, so nothing survives a restart anyway;
+ * boot-config.js `deleteStaleEphemeralDb`); in `persistent`/`passphrase` mode it stays on disk, unreadable
+ * without encryption. `undefined` = the mode couldn't be read, so the copy covers both.
  */
 export function startUnencryptedConfirmation(lockedMode: DbEncryptionMode | undefined): StartUnencryptedConfirmation {
-  const intro =
-    'Encrypted storage is unavailable on this device. Switching encryption off stores the database ' +
-    'UNENCRYPTED from now on.';
-  const keptOnDisk =
-    'An existing encrypted database stays on disk but cannot be opened without encryption: you will be ' +
-    'offered to preserve it and start a fresh one.';
-  const ephemeralGone =
-    'Ephemeral mode keeps nothing across restarts, so the previous database is already gone and the host ' +
-    'starts with an empty one.';
-  let detail: string;
-  if (lockedMode === 'ephemeral') {
-    detail = ephemeralGone;
-  } else if (lockedMode === undefined) {
-    detail =
-      'If this host used ephemeral encryption, its previous database is already gone. Otherwise the existing ' +
-      'encrypted database stays on disk but cannot be opened without encryption: you will be offered to ' +
-      'preserve it and start a fresh one.';
-  } else {
-    detail = keptOnDisk;
-  }
-  return { title: 'Start without encryption?', message: `${intro} ${detail}`, confirmLabel: 'Switch encryption off' };
+  const detail =
+    lockedMode === 'ephemeral'
+      ? t('recovery.unencryptedEphemeral')
+      : lockedMode === undefined
+        ? t('recovery.unencryptedUnknown')
+        : t('recovery.unencryptedKept');
+  return {
+    title: t('recovery.unencryptedTitle'),
+    message: `${t('recovery.unencryptedIntro')} ${detail}`,
+    confirmLabel: t('recovery.unencryptedConfirm'),
+  };
 }
 
 /** Ask first; `onConfirm` runs only when the destructive button is pressed (Cancel does nothing). */
@@ -52,7 +43,7 @@ export function confirmStartUnencrypted(
 ): void {
   const text = startUnencryptedConfirmation(lockedMode);
   showAlert(text.title, text.message, [
-    { text: 'Cancel', style: 'cancel' },
+    { text: t('common.cancel'), style: 'cancel' },
     { text: text.confirmLabel, style: 'destructive', onPress: onConfirm },
   ]);
 }
@@ -91,11 +82,11 @@ export async function switchEncryptionOffAndRetry(
     writeHint: deps.writeHint,
   });
   if (!outcome.applied) {
-    return { ok: false, failed: 'mode', error: outcome.error ?? 'unknown error' };
+    return { ok: false, failed: 'mode', error: outcome.error ?? t('common.unknownError') };
   }
   const result = await deps.requestUnlock();
   if (!result.ok) {
-    return { ok: false, failed: 'retry', error: result.error ?? 'unknown error' };
+    return { ok: false, failed: 'retry', error: result.error ?? t('common.unknownError') };
   }
   return { ok: true };
 }

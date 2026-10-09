@@ -196,6 +196,14 @@ export type AppOptions = {
   /** Sliding window (ms) for `maxNewIdentitiesPerWindow`. Defaults to 10 minutes. */
   identityWindowMs?: number;
   /**
+   * How long (ms) an identity that nobody ever used may exist before the reaper removes it. Every cookie-less
+   * request to `/api/config` (a monitoring probe, a curl, a HEAD) mints and persists a user record; one that
+   * never agreed to the member rules, never posted or received a message, holds no role and has no open
+   * socket is a ghost on the People list. Defaults to 24 hours; tests shorten it. Only applies while
+   * `requireRulesAcceptance` is on (without the rules gate there is no "never agreed" signal).
+   */
+  unusedIdentityMaxAgeMs?: number;
+  /**
    * Hard cap on live transport-encryption sessions (docs/08) — `POST /api/transport/handshake` is
    * deliberately unauthenticated (it's the bootstrap step before any session exists), so without a
    * real bound a flood of handshakes could grow the session map without limit. Expired sessions are
@@ -245,6 +253,8 @@ export type LoamApp = {
   getAdminSetupCode(): string | undefined;
   /** Delete messages older than the configured retention TTL now (also runs on a timer). */
   reapExpiredMessages(): void;
+  /** Remove identities nobody ever used, older than `unusedIdentityMaxAgeMs` (also runs on the reaper timer). */
+  reapUnusedIdentities(): void;
   /** Delete unreferenced/abandoned attachment files now (also runs on the reaper timer). */
   reapOrphanedAttachments(): Promise<void>;
   /** Delete avatar image files no user references now (also runs once at boot). */
@@ -269,9 +279,10 @@ export type LoamApp = {
    * Emergency Reset from the host device itself (the Android host's menu, through the launcher bridge):
    * the same wipe as `POST /api/admin/kill-switch`, but with no admin session, and regardless of
    * `killSwitch.enabled`, which gates the remote triggers. The phone's owner, holding the phone, can
-   * always wipe it. Never reachable from the network. `keyClearRequested`: see `KillSwitchResult`.
+   * always wipe it. Never reachable from the network. `keyClearRequested` and `journaled` (whether a restart
+   * finishes an incomplete wipe): see `KillSwitchResult`.
    */
-  emergencyReset(): Promise<{ complete: boolean; keyClearRequested: boolean }>;
+  emergencyReset(): Promise<{ complete: boolean; keyClearRequested: boolean; journaled: boolean }>;
   /** The in-process host API (host-api.ts) for a launcher on the host machine: the `loamnet` terminal UI. */
   host: HostApi;
   close(): Promise<void>;

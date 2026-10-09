@@ -1,6 +1,7 @@
 import { NativeModule, requireOptionalNativeModule } from 'expo';
 
 import type {
+  HostServiceLabels,
   HotspotAddressCandidate,
   HotspotCredentials,
   LoamHotspotEvents,
@@ -28,8 +29,9 @@ declare class LoamHotspotModule extends NativeModule<LoamHotspotEvents> {
    */
   wifiStationInfo(): Promise<WifiStationInfo>;
   /** Start a foreground service so the host survives screen-off / backgrounding. Best-effort; returns
-   * false when the platform refused (e.g. API 31+ while the app is in the background). */
-  startHostService(): boolean;
+   * false when the platform refused (e.g. API 31+ while the app is in the background). `labels` is the
+   * notification's text in the app's language; without it the service uses its English defaults. */
+  startHostService(labels?: HostServiceLabels): boolean;
   /** Stop the foreground host service. */
   stopHostService(): void;
   /** Pin the app (Android screen pinning / lock-task) so it can't be left without the device PIN. */

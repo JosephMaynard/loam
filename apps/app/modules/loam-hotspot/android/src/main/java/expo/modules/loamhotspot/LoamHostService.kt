@@ -44,7 +44,7 @@ class LoamHostService : Service() {
       return START_NOT_STICKY
     }
     try {
-      startForegroundNotification()
+      startForegroundNotification(NotificationLabels.fromIntent(intent))
       acquireWakeLock()
     } catch (error: Throwable) {
       Log.w(TAG, "Failed to enter the foreground host state", error)
@@ -70,12 +70,44 @@ class LoamHostService : Service() {
     super.onDestroy()
   }
 
-  private fun startForegroundNotification() {
+  /**
+   * The notification's text. JS passes it in the app's language on every start (`startHostService(labels)`,
+   * read from the intent extras); a start without labels falls back to English. Blank values fall back too.
+   */
+  private data class NotificationLabels(
+    val channelName: String,
+    val channelDescription: String,
+    val title: String,
+    val text: String,
+  ) {
+    companion object {
+      val DEFAULT =
+        NotificationLabels(
+          channelName = "LOAM host",
+          channelDescription = "Keeps LOAM reachable while the screen is off.",
+          title = "LOAM is hosting",
+          text = "Others can join while this stays on. Tap to open.",
+        )
+
+      fun fromIntent(intent: Intent): NotificationLabels =
+        NotificationLabels(
+          channelName = intent.getStringExtra(EXTRA_CHANNEL_NAME)?.takeIf { it.isNotBlank() } ?: DEFAULT.channelName,
+          channelDescription =
+            intent.getStringExtra(EXTRA_CHANNEL_DESCRIPTION)?.takeIf { it.isNotBlank() } ?: DEFAULT.channelDescription,
+          title = intent.getStringExtra(EXTRA_TITLE)?.takeIf { it.isNotBlank() } ?: DEFAULT.title,
+          text = intent.getStringExtra(EXTRA_TEXT)?.takeIf { it.isNotBlank() } ?: DEFAULT.text,
+        )
+    }
+  }
+
+  private fun startForegroundNotification(labels: NotificationLabels) {
     val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      // Re-creating an existing channel updates its name and description (Android keeps the user's own
+      // importance/sound choices), so a language change reaches the system settings on the next start.
       val channel =
-        NotificationChannel(CHANNEL_ID, "LOAM host", NotificationManager.IMPORTANCE_LOW).apply {
-          description = "Keeps LOAM reachable while the screen is off."
+        NotificationChannel(CHANNEL_ID, labels.channelName, NotificationManager.IMPORTANCE_LOW).apply {
+          description = labels.channelDescription
           setShowBadge(false)
         }
       manager.createNotificationChannel(channel)
@@ -96,9 +128,13 @@ class LoamHostService : Service() {
         @Suppress("DEPRECATION") Notification.Builder(this)
       }
     builder
-      .setContentTitle("LOAM is hosting")
-      .setContentText("Others can join while this stays on. Tap to open.")
-      .setSmallIcon(applicationInfo.icon)
+      .setContentTitle(labels.title)
+      .setContentText(labels.text)
+      // A monochrome 24dp vector of this module's own (res/drawable). The launcher icon is a full-colour
+      // adaptive icon, which the status bar would draw as an alpha blob; the app's generated
+      // `ic_launcher_monochrome` lives in the app module, out of this library's R, and is laid out for the
+      // adaptive-icon safe zone rather than a status-bar glyph.
+      .setSmallIcon(R.drawable.loam_host_notification)
       .setOngoing(true)
     if (contentIntent != null) {
       builder.setContentIntent(contentIntent)
@@ -174,10 +210,23 @@ class LoamHostService : Service() {
     // Backstop for the partial wake lock: bounds a leak to this long instead of forever. Active
     // hosting re-acquires it on the next start, so 12h comfortably outlasts any real gap between starts.
     private const val WAKE_LOCK_TIMEOUT_MS = 12 * 60 * 60 * 1000L
+    // Intent extras carrying the notification text from JS (see `NotificationLabels`).
+    private const val EXTRA_CHANNEL_NAME = "loam.channelName"
+    private const val EXTRA_CHANNEL_DESCRIPTION = "loam.channelDescription"
+    private const val EXTRA_TITLE = "loam.title"
+    private const val EXTRA_TEXT = "loam.text"
 
-    /** Start the foreground host service (best-effort; safe to call repeatedly). */
-    fun start(context: Context) {
+    /**
+     * Start the foreground host service (best-effort; safe to call repeatedly). `labels` is the
+     * notification text in the app's language (`channelName`, `channelDescription`, `title`, `text`;
+     * only string values are used); null or a missing entry means the English default.
+     */
+    fun start(context: Context, labels: Map<String, Any?>? = null) {
       val intent = Intent(context, LoamHostService::class.java)
+      (labels?.get("channelName") as? String)?.let { intent.putExtra(EXTRA_CHANNEL_NAME, it) }
+      (labels?.get("channelDescription") as? String)?.let { intent.putExtra(EXTRA_CHANNEL_DESCRIPTION, it) }
+      (labels?.get("title") as? String)?.let { intent.putExtra(EXTRA_TITLE, it) }
+      (labels?.get("text") as? String)?.let { intent.putExtra(EXTRA_TEXT, it) }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         context.startForegroundService(intent)
       } else {

@@ -39,9 +39,84 @@ const FG: Record<Color, number> = {
 /** Control characters (C0, DEL, C1) and the bidi controls that could reorder what the operator reads. */
 const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
 
-/** `text` with every control character removed (tabs become a space). */
+/**
+ * Invisible characters: Unicode's format characters and default ignorables (zero-width spaces and joiners,
+ * the word joiner, soft hyphens, the byte order mark, Hangul fillers, tag characters…). Two names that differ
+ * only by one of these look the same, so none reaches the terminal, with two exceptions made in {@link clean}:
+ * a variation selector (it only picks a glyph, ☀ against ☀️) and a zero-width joiner holding an emoji
+ * sequence together (👨‍👩‍👧).
+ */
+const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
+
+const ZWJ = "\u200d";
+const VARIATION_SELECTOR = /^[\ufe00-\ufe0f]$/u;
+const EMOJI_MODIFIER = /^[\u{1f3fb}-\u{1f3ff}]$/u;
+const PICTOGRAPHIC = /^\p{Extended_Pictographic}$/u;
+
+/**
+ * A combining mark, variation selectors aside (they pick a glyph rather than stack on it). Too many on one
+ * base draw over the rows above and below in most terminals, so {@link clean} keeps the first three (enough
+ * for Burmese, Khmer and Tibetan stacks).
+ */
+const MARK = "(?:(?![\\ufe00-\\ufe0f])\\p{M})";
+const STACKED_MARKS = new RegExp(`(${MARK}{3})${MARK}+`, "gu");
+
+/** The code point that ends just before `index`, with where it starts. */
+function codePointBefore(text: string, index: number): { codePoint: number; start: number } | undefined {
+  if (index <= 0) {
+    return undefined;
+  }
+  const low = text.charCodeAt(index - 1);
+  if (low >= 0xdc00 && low <= 0xdfff && index >= 2) {
+    const high = text.charCodeAt(index - 2);
+    if (high >= 0xd800 && high <= 0xdbff) {
+      return { codePoint: text.codePointAt(index - 2)!, start: index - 2 };
+    }
+  }
+  return { codePoint: low, start: index - 1 };
+}
+
+/**
+ * Whether the zero-width joiner at `index` sits between two pictographs (looking past a skin tone or
+ * variation selector before it): the joiner of an emoji sequence, not an invisible character on its own.
+ */
+function joinsEmoji(text: string, index: number): boolean {
+  const after = text.codePointAt(index + ZWJ.length);
+  if (after === undefined || !PICTOGRAPHIC.test(String.fromCodePoint(after))) {
+    return false;
+  }
+  let at = index;
+  for (;;) {
+    const before = codePointBefore(text, at);
+    if (!before) {
+      return false;
+    }
+    const char = String.fromCodePoint(before.codePoint);
+    if (PICTOGRAPHIC.test(char)) {
+      return true;
+    }
+    if (!VARIATION_SELECTOR.test(char) && !EMOJI_MODIFIER.test(char)) {
+      return false;
+    }
+    at = before.start;
+  }
+}
+
+/**
+ * `text` as it may reach the terminal: tabs become a space; control characters, bidi controls and invisible
+ * characters are removed (see {@link INVISIBLE} for the two kept); a base keeps at most three combining marks (enough for Burmese, Khmer and Tibetan stacks; not enough to smear rows).
+ */
 export function clean(text: string): string {
-  return text.replace(/\t/g, " ").replace(UNSAFE, "");
+  return text
+    .replace(/\t/g, " ")
+    .replace(UNSAFE, "")
+    .replace(INVISIBLE, (char, offset: number, whole: string) => {
+      if (VARIATION_SELECTOR.test(char) || (char === ZWJ && joinsEmoji(whole, offset))) {
+        return char;
+      }
+      return "";
+    })
+    .replace(STACKED_MARKS, "$1");
 }
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -87,7 +162,9 @@ export function graphemeWidth(grapheme: string): number {
   if (/^[\p{M}\p{Default_Ignorable_Code_Point}]+$/u.test(grapheme)) {
     return 0;
   }
-  if (/\p{Emoji_Presentation}|\p{Extended_Pictographic}️/u.test(grapheme) || isWideCodePoint(first)) {
+  // \ufe0f is VARIATION SELECTOR-16, emoji presentation: a pictograph on its own (☀) is text, one column
+  // wide; with the selector (☀️) it is the colour emoji, two wide. Written as an escape so it stays visible.
+  if (/\p{Emoji_Presentation}|\p{Extended_Pictographic}\ufe0f/u.test(grapheme) || isWideCodePoint(first)) {
     return 2;
   }
   return 1;

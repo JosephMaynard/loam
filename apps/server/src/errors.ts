@@ -61,6 +61,52 @@ export class DbEncryptionDriverMissingError extends Error {
 }
 
 /**
+ * Thrown by `openInitialStore` when an ephemeral (random, per-boot) key is configured but the data dir
+ * holds a `loam.db` that no ephemeral boot wrote: the `.loam-db-ephemeral` marker every ephemeral boot
+ * leaves behind is absent, so the file is a persistent database (passphrase-encrypted or plaintext) that a
+ * fresh random key can never open. The server refuses to start rather than delete it; the message names the
+ * directory and the two ways out (another data dir, or the database's own passphrase). Distinct from
+ * `DbEncryptionUnreadableError` on purpose: nothing about the key is wrong or lost.
+ */
+export class DbEphemeralExistingDatabaseError extends Error {
+  readonly code = "db_ephemeral_existing_database" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "DbEphemeralExistingDatabaseError";
+  }
+}
+
+/**
+ * Thrown by `openInitialStore` when an ephemeral key is configured but the `.loam-db-ephemeral` marker can't
+ * be written durably. Thrown before any database is opened: a `loam.db` created without the marker would
+ * look like a persistent database to the next ephemeral boot, which would then refuse to start over it
+ * ({@link DbEphemeralExistingDatabaseError}). The message names the marker, the data directory and the
+ * filesystem error.
+ */
+export class DbEphemeralMarkerUnwritableError extends Error {
+  readonly code = "db_ephemeral_marker_unwritable" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "DbEphemeralMarkerUnwritableError";
+  }
+}
+
+/**
+ * Thrown by `openInitialStore` when a fixed-key or plaintext boot finds a stale `.loam-db-ephemeral` marker
+ * and can't durably remove it. Thrown before the database is opened, so nothing is written: the database
+ * such a boot writes is persistent, and a marker left beside it would tell a later ephemeral boot over the
+ * same data dir that `loam.db` is an ephemeral boot's leftovers, which that boot deletes. The message names
+ * the marker, the filesystem error and the way out (remove the marker by hand).
+ */
+export class DbEphemeralMarkerUnremovableError extends Error {
+  readonly code = "db_ephemeral_marker_unremovable" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "DbEphemeralMarkerUnremovableError";
+  }
+}
+
+/**
  * Thrown by `buildApp`'s boot-time wipe-phase resume (P1-1, Sol round 8) after it has re-run (and, on a
  * `delete-pending` phase, RETRIED) the fixed-key kill-switch artifact deletion BEFORE opening a serving
  * store. It never opens the real store — either the wipe is not yet safe to complete (deletion still
@@ -198,6 +244,55 @@ export const ERROR_CODES: Record<string, ServerErrorCode> = {
   "A new name is only available before you first join in": "reroll_not_allowed",
   // The generic 5xx body (see the app's error handler) — internal detail is logged, never returned.
   "Internal server error": "internal_error",
+  // A request whose `Host` names something this node doesn't serve (DNS rebinding): 421.
+  "This address isn't served by this LOAM node": "host_not_allowed",
+  // Strings that used to reach the client without a code (so a 15-locale client showed English). Several
+  // share a code on purpose: the member sees one translated sentence, the log keeps the precise text.
+  "Attachment is empty or too large": "attachment_too_large",
+  "That user cannot be added": "channel_member_unavailable",
+  "Invalid report": "invalid_request",
+  "Invalid resolution": "invalid_request",
+  "Invalid removal request": "invalid_request",
+  "Invalid typing request": "invalid_request",
+  "Invalid mesh send request": "invalid_request",
+  "Invalid mesh broadcast request": "invalid_request",
+  "Invalid mesh inbound request": "invalid_request",
+  "Invalid handshake request": "invalid_request",
+  "Invalid tunnel target": "invalid_request",
+  "Malformed encrypted request": "invalid_request",
+  "Encrypted session requires a sealed request body": "invalid_request",
+  "Cross-origin websocket refused": "invalid_request",
+  "Report target does not exist": "target_not_found",
+  "Report does not exist": "not_found",
+  "No such join request": "not_found",
+  "No such mesh contact": "recipient_not_found",
+  "Too many pending connections; try again": "too_many_attempts",
+  "Only the channel owner or an admin can review join requests": "channel_change_forbidden",
+  "Only the channel owner or an admin can approve join requests": "channel_change_forbidden",
+  "Only the channel owner or an admin can deny join requests": "channel_change_forbidden",
+  "Only the channel owner or an admin can delete this channel": "channel_change_forbidden",
+  "A message in this channel is still being written": "message_streaming",
+  "Invalid identity token": "invalid_token",
+  "Transport session expired": "session_invalid",
+  "Replayed or out-of-order encrypted request": "session_invalid",
+  "Session already bound": "session_invalid",
+  "This channel has messages from other people: only an admin can delete it": "channel_delete_admin_required",
+  "Location sharing is disabled on this LOAM node": "location_disabled",
+  "You are timed out by a moderator and cannot post right now": "timed_out",
+  "This LOAM node is resetting": "node_resetting",
+  "This node is restarting after a kill switch reset.": "node_resetting",
+  "This LOAM node was reset": "node_reset",
+  "The emergency wipe could not be completed; the node is locked down. Restart it to finish the wipe.": "wipe_incomplete",
+  "The emergency wipe could not be completed and could not be recorded; the node is locked down. Restart it and fire the Emergency Reset again.":
+    "wipe_unrecorded",
+  "This user has no mesh identity": "mesh_identity_missing",
+  "Invalid mesh card": "mesh_card_invalid",
+  "This node requires an encrypted session": "encrypted_session_required",
+  "This node requires an encrypted session. Scan the join QR to connect.": "encrypted_session_required",
+  "Resume requires an encrypted session": "encrypted_session_required",
+  "Logout requires an encrypted session": "encrypted_session_required",
+  "Tunnel requires an encrypted session": "encrypted_session_required",
+  "Resume an identity before tunnelling content": "encrypted_session_required",
 };
 
 /** All stable error codes actually in use, exported so tests can assert client-catalog coverage. */

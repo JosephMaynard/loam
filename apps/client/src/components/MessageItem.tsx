@@ -17,9 +17,8 @@ import { AttachmentFile } from "./AttachmentFile";
 import { AttachmentImage } from "./AttachmentImage";
 import { Avatar } from "./Avatar";
 import { Dialog } from "./Dialog";
-import { IconChevronRight, IconCopy, IconEdit, IconFlag, IconPlus, IconReply, IconSmile, IconTrash } from "./icons";
+import { IconChevronRight, IconCopy, IconEdit, IconFlag, IconMore, IconPlus, IconReply, IconTrash } from "./icons";
 import { LocationCard } from "./LocationCard";
-import { Menu, type MenuItem } from "./Menu";
 
 interface MessageItemProps {
   currentUser: User;
@@ -72,7 +71,7 @@ function textDirection(text: string): "ltr" | "rtl" {
   return typeof document !== "undefined" && document.documentElement.dir === "rtl" ? "rtl" : "ltr";
 }
 
-/** One action a message offers, shared by the desktop menu and the touch sheet. */
+/** One action a message offers in its actions sheet (the reply one also gets a toolbar button). */
 interface MessageAction {
   key: string;
   label: string;
@@ -86,9 +85,10 @@ interface MessageAction {
  * its actions.
  *
  * Actions are never a permanently visible icon row. With a mouse, hovering (or focusing) the message
- * reveals a small floating toolbar: quick reactions, reply in thread, and a ⋮ menu (copy, edit, delete,
- * report). On touch, a long-press on the bubble opens a bottom sheet with the same options; tapping the
- * time inside the bubble opens it too, so nothing is reachable only through a gesture.
+ * reveals a small floating toolbar: quick reactions, reply in thread, and a ⋮ button. On touch, a long-press
+ * on the bubble opens the actions sheet; tapping the time inside the bubble opens it too, so nothing is
+ * reachable only through a gesture. The ⋮ button and the time open that same sheet (the full reaction grid,
+ * then reply, copy, edit, delete, report): one destination for everything a message offers.
  */
 export function MessageItem({
   currentUser,
@@ -209,8 +209,14 @@ export function MessageItem({
     }
   }, [emojiFieldOpen]);
 
-  // Everything behind the ⋮ menu (desktop) and below the reactions in the sheet (touch), in one order.
-  const menuActions: MessageAction[] = [
+  // Everything the actions sheet lists below the reactions, in one order: reply first, then copy, edit,
+  // delete, report. The toolbar's ⋮ button and the time inside the bubble both open that sheet, so this is
+  // the one list of what a message offers beyond reacting.
+  const replyAction: MessageAction | undefined = canReply
+    ? { key: "reply", label: t("thread.replyLabel"), icon: <IconReply />, onSelect: () => onOpenThread?.(message.id) }
+    : undefined;
+  const sheetActions: MessageAction[] = [
+    ...(replyAction ? [replyAction] : []),
     ...(canCopy
       ? [{ key: "copy", label: t("message.copyText"), icon: <IconCopy />, onSelect: () => void copyText(bodyText) }]
       : []),
@@ -232,10 +238,6 @@ export function MessageItem({
       ? [{ key: "report", label: t("message.report"), icon: <IconFlag />, onSelect: () => onReport?.(message) }]
       : []),
   ];
-  const replyAction: MessageAction | undefined = canReply
-    ? { key: "reply", label: t("thread.replyLabel"), icon: <IconReply />, onSelect: () => onOpenThread?.(message.id) }
-    : undefined;
-  const sheetActions = replyAction ? [replyAction, ...menuActions] : menuActions;
   const hasActions = canReact || sheetActions.length > 0;
 
   const hasLocation = !removed && "location" in message && !!message.location;
@@ -491,17 +493,6 @@ export function MessageItem({
                     </button>
                   ))
                 : null}
-              {canReact ? (
-                <button
-                  aria-haspopup="dialog"
-                  aria-label={t("message.moreReactions")}
-                  className="btn btn-icon btn-sm btn-ghost"
-                  onClick={() => setSheetOpen(true)}
-                  type="button"
-                >
-                  <IconSmile size={18} />
-                </button>
-              ) : null}
               {replyAction ? (
                 <button
                   aria-label={replyAction.label}
@@ -512,21 +503,17 @@ export function MessageItem({
                   <IconReply size={18} />
                 </button>
               ) : null}
-              {menuActions.length ? (
-                <Menu
-                  items={menuActions.map(
-                    (action): MenuItem => ({
-                      label: action.label,
-                      icon: action.icon,
-                      onSelect: action.onSelect,
-                      danger: action.danger,
-                    }),
-                  )}
-                  label={t("message.moreActions")}
-                  presentation="popover"
-                  triggerClassName="btn-sm message-more"
-                />
-              ) : null}
+              {/* The one way to the rest: the same actions sheet the time inside the bubble opens (the full
+                  reaction grid plus every action), never a second, shorter menu beside it. */}
+              <button
+                aria-haspopup="dialog"
+                aria-label={t("message.moreActions")}
+                className="btn btn-icon btn-sm btn-ghost message-more"
+                onClick={() => setSheetOpen(true)}
+                type="button"
+              >
+                <IconMore size={18} />
+              </button>
             </div>
           ) : null}
         </div>

@@ -537,3 +537,133 @@ export function countUnreadByConversation(
 
   return counts;
 }
+
+/**
+ * How many posts/replies (or DMs) of one conversation the on-disk cache keeps: the newest this many, plus
+ * the root post of every kept reply (see `messageCacheOverflow`). Older ones stay available from the node; a
+ * device that never reloads a 20 000-message channel into IndexedDB boots faster and leaves less behind.
+ */
+export const MESSAGE_CACHE_LIMIT_PER_CONVERSATION = 500;
+
+/**
+ * The ids the on-disk cache must NOT hold: for every conversation, everything but its newest `limit`
+ * posts/replies/DMs, plus the reactions targeting those (a reaction has no conversation of its own and would
+ * otherwise outlive its target). The in-memory history is left alone; this only decides what is written to
+ * and kept in IndexedDB.
+ *
+ * Threads are kept whole from the top: a root post whose reply is kept is kept too, however old the root is,
+ * so a busy thread may push a conversation a few messages over the cap. The conversation view reaches a reply
+ * only through its root (`topLevelMessages` + `groupRepliesByParent`), so a cached reply without its root
+ * would be an unreachable orphan on disk. The rule runs the other way as well: a root is evicted once every
+ * reply under it is, and its reactions go with it like any evicted message's. Replies are one level deep (the
+ * node refuses a reply to a reply), so a kept reply protects exactly its root.
+ *
+ * @param messages - The whole in-memory history (any order).
+ * @param currentUserId - The signed-in user's id (resolves which DM a message belongs to).
+ * @param limit - Messages kept per conversation.
+ * @returns The ids past the cap.
+ */
+export function messageCacheOverflow(
+  messages: Message[],
+  currentUserId: string,
+  limit = MESSAGE_CACHE_LIMIT_PER_CONVERSATION,
+): Set<string> {
+  const byConversation = new Map<string, Message[]>();
+
+  for (const message of messages) {
+    const key = messageConversationKey(message, currentUserId);
+
+    if (key === undefined) {
+      continue;
+    }
+
+    const bucket = byConversation.get(key);
+
+    if (bucket) {
+      bucket.push(message);
+    } else {
+      byConversation.set(key, [message]);
+    }
+  }
+
+  const overflow = new Set<string>();
+
+  for (const bucket of byConversation.values()) {
+    if (bucket.length <= limit) {
+      continue;
+    }
+
+    // Oldest first, so the ones to drop are at the front. The history is normally already in this order.
+    bucket.sort(compareCreatedAt);
+
+    for (let index = 0; index < bucket.length - limit; index += 1) {
+      overflow.add(bucket[index]!.id);
+    }
+  }
+
+  if (overflow.size === 0) {
+    return overflow;
+  }
+
+  // A kept reply keeps its root. Roots are posts, never replies, so taking one out of the overflow changes no
+  // reply's verdict and a single pass is exact.
+  for (const message of messages) {
+    if (message.type === "channelReply" && !overflow.has(message.id)) {
+      overflow.delete(message.parentMessageId);
+    }
+  }
+
+  for (const message of messages) {
+    if (message.type === "reaction" && overflow.has(message.targetMessageId)) {
+      overflow.add(message.id);
+    }
+  }
+
+  return overflow;
+}
+
+/**
+ * Cached messages whose conversation the node no longer lists for this user: posts/replies in a channel
+ * absent from `/api/channels` (deleted, or access revoked while this device was away) and DMs with a partner
+ * absent from `/api/dms` (every message of that conversation is gone from the node), plus the reactions
+ * targeting any of them. Either list may be `undefined` while it is unknown (the inbox has not answered, or
+ * an older node has none): that kind of conversation is then left alone.
+ *
+ * @param messages - The in-memory history.
+ * @param channelIds - The channel ids the node returned, or `undefined` when unknown.
+ * @param dmPeerIds - The DM partners the node's inbox returned, or `undefined` when unknown.
+ * @param currentUserId - The signed-in user's id (resolves the DM partner).
+ * @returns The ids to drop.
+ */
+export function staleConversationMessageIds(
+  messages: Message[],
+  channelIds: ReadonlySet<string> | undefined,
+  dmPeerIds: ReadonlySet<string> | undefined,
+  currentUserId: string,
+): Set<string> {
+  const stale = new Set<string>();
+
+  for (const message of messages) {
+    if (message.type === "channelPost" || message.type === "channelReply") {
+      if (channelIds && !channelIds.has(message.channelId)) {
+        stale.add(message.id);
+      }
+    } else if (message.type === "dm" && dmPeerIds) {
+      const peer = message.authorId === currentUserId ? message.recipientUserId : message.authorId;
+
+      if (!dmPeerIds.has(peer)) {
+        stale.add(message.id);
+      }
+    }
+  }
+
+  if (stale.size) {
+    for (const message of messages) {
+      if (message.type === "reaction" && stale.has(message.targetMessageId)) {
+        stale.add(message.id);
+      }
+    }
+  }
+
+  return stale;
+}

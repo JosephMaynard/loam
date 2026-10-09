@@ -3,7 +3,7 @@
     "name": "LOAM",
     "slug": "loam",
     "version": "0.6.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/images/loam-icon.png",
     "scheme": "loam",
     "userInterfaceStyle": "automatic",

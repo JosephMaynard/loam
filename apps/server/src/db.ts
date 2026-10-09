@@ -212,8 +212,13 @@ export interface LoamStore {
   loadQuarantinedMessageRows(): QuarantinedMessageRow[];
   loadSessions(): SessionRecord[];
   upsertUser(user: User): void;
-  /** Delete a single user row by id. Used for the legacy demo-user cleanup (`user.1234`/`user.5678`);
-   * the caller removes any messages that reference the user separately. */
+  /**
+   * Delete a single user row by id, with the rows that exist only for that user: their block-list rows (as
+   * blocker or blocked), their pending private-channel join requests, and their own mesh address book
+   * (`mesh_contacts` they own; other users' contact entries are theirs to keep). Used by the legacy
+   * demo-user cleanup (`user.1234`/`user.5678`), the legacy `mesh.` sentinel cleanup and the unused-identity
+   * reaper. The caller removes messages, sessions, identity tokens and the mesh keypair separately.
+   */
   deleteUser(userId: string): void;
   upsertChannel(channel: Channel): void;
   /** Delete a single channel row by id. The caller cascades (messages, attachments, tombstones). */
@@ -254,8 +259,8 @@ export interface LoamStore {
   /**
    * Store (or replace) one entry in a local user's mesh address book (docs/16): the owner's user id,
    * the contact's `mesh.` id, and an opaque JSON card (public keys + the contact's secret mailbox
-   * token, needed to seal to them). Per-owner so one local user's contacts aren't another's; wiped by
-   * the kill switch.
+   * token, needed to seal to them). Per-owner so one local user's contacts aren't another's; an owner's
+   * rows go when that user is deleted (`deleteUser`); wiped by the kill switch.
    */
   upsertMeshContact(ownerUserId: string, meshId: string, data: string): void;
   loadMeshContacts(): { ownerUserId: string; meshId: string; data: string }[];
@@ -298,6 +303,13 @@ export interface LoamStore {
    */
   loadOpenReports(onReport?: (report: StoredRowReport) => void): Report[];
   /**
+   * The still-open (open or escalated) reports about one target, newest first, by the indexed `target_id`
+   * column, so a per-message check ("is this in a moderator's queue?") never loads the whole table.
+   */
+  loadOpenReportsForTarget(targetId: string): Report[];
+  /** How many reports are still open (open or escalated): node-wide, or filed by one reporter. */
+  countOpenReports(reporterUserId?: string): number;
+  /**
    * Record that a channel was IMPORTED from a sync peer (C1 provenance) — local-only, never exported.
    * Only channels marked here are eligible for peer-driven metadata re-sync; a locally-created channel
    * (including the seeded defaults, which every node shares an id for) is never in this set, so a peer
@@ -327,7 +339,8 @@ export interface LoamStore {
   isUserSynced(userId: string): boolean;
   /**
    * Pending join requests for private channels (P10). Idempotent add; per-channel load (the requester ids);
-   * removal on approve/deny; bulk removal when a channel is deleted. Wiped by the kill switch.
+   * removal on approve/deny; bulk removal when a channel is deleted, and of a requester's rows when that user
+   * is deleted (`deleteUser`). Wiped by the kill switch.
    */
   addJoinRequest(channelId: string, userId: string): void;
   loadJoinRequests(channelId: string): string[];
@@ -374,14 +387,20 @@ export interface LoamStore {
    * Fold the write-ahead log back into the main `loam.db` file via `PRAGMA wal_checkpoint(TRUNCATE)`,
    * so that single file is a complete, standalone snapshot with nothing left to lose in `-wal`/`-shm`
    * (TRUNCATE also shrinks the WAL to zero, so a later file-level copy can't pick up stale frames).
-   * Used by the passphrase key-migration in `openInitialStore` (P1-a, Sol round 6): the crash-atomic
-   * pre-migration backup is a raw copy of `loam.db` alone, which would otherwise MISS committed
-   * transactions still resident in the WAL — this makes the snapshot single-file-consistent first.
-   * Only meaningful on a SQLCipher (encrypted) connection, the only path that migrates; throws on a
-   * plaintext store (no `pragma` handle), mirroring {@link rekey}. Also throws if the checkpoint comes
-   * back `busy` (RF6-e, Sol round 6) — a non-zero `busy` means the WAL wasn't fully truncated (the
-   * sole-connection invariant is broken), so the file is NOT a complete snapshot and must not be copied
-   * as a backup. Never logs any key material.
+   * SQLite syncs the main file once a checkpoint completes, so this is also how a caller makes a commit
+   * DURABLE: under `synchronous = NORMAL` a WAL commit is never fsynced and a power cut can roll it back.
+   *
+   * Two callers, on every driver (`node:sqlite`, plain `better-sqlite3`, SQLCipher):
+   * - the passphrase key-migration in `openInitialStore` (P1-a, Sol round 6): the crash-atomic
+   *   pre-migration backup is a raw copy of `loam.db` alone, which would otherwise MISS committed
+   *   transactions still resident in the WAL; this makes the snapshot single-file-consistent first;
+   * - the plaintext Emergency Reset, right after `wipeAll()`: the deletion must be in the main file before
+   *   the wipe journal (its only recovery record) is durably removed.
+   *
+   * Throws if the checkpoint comes back `busy` or with fewer frames folded than the WAL holds (RF6-e, Sol
+   * round 6): another connection held a lock, so the WAL wasn't fully folded and truncated, the file is NOT
+   * a complete snapshot, and it must neither be copied as a backup nor be trusted to hold a commit. Never
+   * logs any key material.
    */
   checkpoint(): void;
   /**
@@ -672,6 +691,30 @@ function migrateTombstonesCreatedAt(db: SqliteConnection): void {
 }
 
 /**
+ * Add the indexed `reports.target_id` and `reports.reporter_user_id` columns to a database created before
+ * they existed, filled from each row's JSON. They let the per-message queue check and the per-reporter cap
+ * query one target or one reporter instead of parsing the whole table; the JSON stays the record of truth
+ * (`upsertReport` writes both). A row whose JSON lacks the field keeps NULL and simply never matches.
+ */
+function migrateReportsTargetColumns(db: SqliteConnection): void {
+  const columns = db.prepare("PRAGMA table_info(reports)").all() as { name: string }[];
+  const has = (name: string): boolean => columns.some((column) => column.name === name);
+
+  if (!has("target_id")) {
+    db.exec("ALTER TABLE reports ADD COLUMN target_id TEXT");
+  }
+  if (!has("reporter_user_id")) {
+    db.exec("ALTER TABLE reports ADD COLUMN reporter_user_id TEXT");
+  }
+  db.exec(
+    "UPDATE reports SET target_id = json_extract(data, '$.targetId'), reporter_user_id = json_extract(data, '$.reporterUserId') " +
+      "WHERE (target_id IS NULL OR reporter_user_id IS NULL) AND json_valid(data)",
+  );
+  db.exec("CREATE INDEX IF NOT EXISTS idx_reports_target ON reports (target_id, status)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_reports_reporter ON reports (reporter_user_id, status)");
+}
+
+/**
  * Backfill the `missing_attachments.last_attempt_at` column onto a database created before
  * retry-backoff existed (docs/15 A6 / F1). `0` (never attempted) is the correct backfill for
  * existing rows — the retry pass treats it as "due immediately", which is the same behaviour those
@@ -804,7 +847,9 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       id TEXT PRIMARY KEY,
       status TEXT NOT NULL,
       created_at INTEGER NOT NULL DEFAULT 0,
-      data TEXT NOT NULL
+      data TEXT NOT NULL,
+      target_id TEXT,
+      reporter_user_id TEXT
     );
     CREATE TABLE IF NOT EXISTS synced_channels (
       channel_id TEXT PRIMARY KEY
@@ -832,6 +877,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   migrateTombstonesCreatedAt(db);
   migrateMissingAttachmentsLastAttempt(db);
   migrateMissingAttachmentsNextAttempt(db);
+  migrateReportsTargetColumns(db);
   createSealedOffersSeenTable(db);
 
   const upsertUserStmt = db.prepare(
@@ -901,12 +947,20 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     "UPDATE missing_attachments SET attempts = attempts + 1, last_attempt_at = ?, next_attempt_at = ? WHERE message_id = ? AND attachment_id = ?",
   );
   const upsertReportStmt = db.prepare(
-    `INSERT INTO reports (id, status, created_at, data) VALUES (?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET status = excluded.status, data = excluded.data`,
+    `INSERT INTO reports (id, status, created_at, data, target_id, reporter_user_id) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET status = excluded.status, data = excluded.data,
+       target_id = excluded.target_id, reporter_user_id = excluded.reporter_user_id`,
   );
   const getReportStmt = db.prepare("SELECT data FROM reports WHERE id = ?");
   const loadOpenReportsStmt = db.prepare(
     "SELECT id, data FROM reports WHERE status IN ('open', 'escalated') ORDER BY created_at DESC, rowid DESC",
+  );
+  const loadOpenReportsForTargetStmt = db.prepare(
+    "SELECT id, data FROM reports WHERE target_id = ? AND status IN ('open', 'escalated') ORDER BY created_at DESC, rowid DESC",
+  );
+  const countOpenReportsStmt = db.prepare("SELECT COUNT(*) AS total FROM reports WHERE status IN ('open', 'escalated')");
+  const countOpenReportsByReporterStmt = db.prepare(
+    "SELECT COUNT(*) AS total FROM reports WHERE reporter_user_id = ? AND status IN ('open', 'escalated')",
   );
   const markChannelSyncedStmt = db.prepare(
     "INSERT INTO synced_channels (channel_id) VALUES (?) ON CONFLICT(channel_id) DO NOTHING",
@@ -932,6 +986,8 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     "DELETE FROM channel_join_requests WHERE channel_id = ? AND user_id = ?",
   );
   const removeJoinRequestsForChannelStmt = db.prepare("DELETE FROM channel_join_requests WHERE channel_id = ?");
+  const removeJoinRequestsForUserStmt = db.prepare("DELETE FROM channel_join_requests WHERE user_id = ?");
+  const deleteMeshContactsForOwnerStmt = db.prepare("DELETE FROM mesh_contacts WHERE owner_user_id = ?");
   const addUserBlockStmt = db.prepare(
     "INSERT INTO user_blocks (blocker_id, blocked_id, created_at) VALUES (?, ?, ?) ON CONFLICT(blocker_id, blocked_id) DO NOTHING",
   );
@@ -1113,6 +1169,8 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     deleteUser(userId) {
       deleteUserStmt.run(userId);
       deleteUserBlocksForUserStmt.run(userId, userId);
+      removeJoinRequestsForUserStmt.run(userId);
+      deleteMeshContactsForOwnerStmt.run(userId);
     },
     upsertChannel(channel) {
       refuseQuarantined("channels", channel.id);
@@ -1231,7 +1289,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       return !row || row.total === 0;
     },
     upsertReport(report) {
-      upsertReportStmt.run(report.id, report.status, report.createdAt, JSON.stringify(report));
+      upsertReportStmt.run(report.id, report.status, report.createdAt, JSON.stringify(report), report.targetId, report.reporterUserId);
     },
     getReport(id) {
       const row = getReportStmt.get(id) as { data: string } | undefined;
@@ -1249,6 +1307,15 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       const { loaded, report } = scanStoredRows(loadOpenReportsStmt.all(), parseStoredReport, new Set());
       reportStoredRows(report, onReport);
       return loaded;
+    },
+    loadOpenReportsForTarget(targetId) {
+      return scanStoredRows(loadOpenReportsForTargetStmt.all(targetId), parseStoredReport, new Set()).loaded;
+    },
+    countOpenReports(reporterUserId) {
+      const row = (reporterUserId === undefined
+        ? countOpenReportsStmt.get()
+        : countOpenReportsByReporterStmt.get(reporterUserId)) as { total: number } | undefined;
+      return Number(row?.total ?? 0);
     },
     markChannelSynced(channelId) {
       markChannelSyncedStmt.run(channelId);
@@ -1338,28 +1405,32 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       quarantinedMessages.clear();
     },
     checkpoint() {
-      if (!pragma) {
-        throw new Error(
-          "checkpoint() requires a store opened with encryptionKey (SQLCipher) — this store is plaintext.",
-        );
-      }
-      // TRUNCATE folds all committed WAL frames back into the main DB file and resets the WAL to zero
-      // bytes. This store is the sole open connection when the migration calls it (nothing else can
-      // hold a read lock), so the checkpoint can't be blocked/partial — the single `loam.db` is a
-      // complete snapshot afterward.
+      // TRUNCATE folds all committed WAL frames back into the main DB file, syncs it, and resets the WAL to
+      // zero bytes. This store is the sole open connection when its callers run it (nothing else can hold a
+      // read lock), so the checkpoint can't be blocked/partial — the single `loam.db` is a complete snapshot
+      // afterward. SQLCipher goes through its own `pragma()` as it always has; the plaintext drivers read the
+      // same single result row through a prepared statement (`exec` would discard it).
       //
       // RF6-e (Sol round 6): DON'T trust that silently. `wal_checkpoint(TRUNCATE)` returns a single
       // `(busy, log, checkpointed)` row; `busy !== 0` means another connection held a lock and the WAL
-      // was NOT fully folded/truncated — i.e. the sole-connection invariant this migration relies on is
-      // broken and the raw file copy that follows would MISS WAL-resident committed rows. Fail loudly
-      // instead of committing an incomplete pre-migration backup: the caller (`openInitialStore`) then
-      // skips the unbackable in-place rekey rather than risk an unrecoverable interrupted migration.
-      const rows = pragma("wal_checkpoint(TRUNCATE)") as Array<{ busy?: number }> | undefined;
-      const busy = Array.isArray(rows) && rows.length > 0 ? rows[0]?.busy : undefined;
-      if (busy !== 0) {
+      // was NOT fully folded/truncated, and `checkpointed < log` means frames were left behind. Either way
+      // the sole-connection invariant is broken: the migration's raw file copy would MISS WAL-resident rows
+      // and the plaintext wipe's deletion may still be only in the WAL. Fail loudly: `openInitialStore` then
+      // skips the unbackable in-place rekey, and the kill switch stays locked with its journal on disk.
+      // (A store that is not in WAL mode, e.g. `:memory:`, reports `log = checkpointed = -1`: nothing to fold.)
+      const row = (
+        pragma
+          ? (pragma("wal_checkpoint(TRUNCATE)") as SqliteRow[] | undefined)?.[0]
+          : db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()
+      ) as { busy?: unknown; log?: unknown; checkpointed?: unknown } | undefined;
+      const busy = row?.busy;
+      const log = row?.log;
+      const checkpointed = row?.checkpointed;
+      if (busy !== 0 || typeof log !== "number" || log !== checkpointed) {
         throw new Error(
-          `wal_checkpoint(TRUNCATE) did not fully truncate the WAL (busy=${String(busy)}) — the ` +
-            "sole-connection invariant is broken, so this DB file is NOT a complete standalone snapshot.",
+          `wal_checkpoint(TRUNCATE) did not fully fold and truncate the WAL (busy=${String(busy)}, ` +
+            `log=${String(log)}, checkpointed=${String(checkpointed)}); the sole-connection invariant is ` +
+            "broken, so this DB file is NOT a complete standalone snapshot.",
         );
       }
     },

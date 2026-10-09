@@ -2,6 +2,7 @@
   "name": "app",
   "main": "expo-router/entry",
   "version": "0.6.0",
+  "license": "AGPL-3.0-only",
   "dependencies": {
     "@comapeo/nodejs-mobile-react-native": "18.20.4-2",
     "@expo/dom-webview": "~57.0.1",

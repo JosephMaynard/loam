@@ -31,7 +31,7 @@ You can encrypt your report if needed. If you want to use encrypted email, menti
 
 ## What to Expect
 
-I will aim to:
+We aim to:
 
 - acknowledge receipt of your report within **5 working days**
 - assess and triage the report as quickly as possible
@@ -63,25 +63,25 @@ Please allow reasonable time for investigation and remediation before making any
 
 Security research conducted in good faith is welcome and authorized, provided it is **non-disruptive**
 and directed only at a LOAM node or instance you control. This authorization does not extend to
-accessing data that isn't yours, denial-of-service testing, or any other destructive activity — those
+accessing data that isn't yours, denial-of-service testing, or any other destructive activity: those
 remain out of scope regardless of intent. Report any issue you find privately, before any public
 disclosure.
 
 To the extent it is within our legal authority, we will not pursue, or support, legal action against
-researchers who follow this policy in good faith — even where a report turns out to describe intended
+researchers who follow this policy in good faith, even where a report turns out to describe intended
 behaviour rather than a bug. We cannot waive the rights of third parties (for example, the operator of
 a LOAM instance you don't control), so this commitment reaches only as far as our own authority to
 grant it.
 
-LOAM is maintained by a small volunteer team, not a paid bug-bounty programme with contractual SLAs, so
-response times vary with maintainer availability. If a report is accepted as a genuine security issue,
-I will credit the reporter in release notes or documentation, unless they ask to remain anonymous.
+LOAM is maintained by Magic Zebra Ltd, a small company, not a paid bug-bounty programme with contractual
+SLAs, so response times vary with maintainer availability. If a report is accepted as a genuine security issue,
+we will credit the reporter in release notes or documentation, unless they ask to remain anonymous.
 
 ## Threat model & accepted limitations
 
 LOAM's threat models span disaster-relief openness to protest-mode hostile environments, and the
 **server host is trusted** (it can read all plaintext). The following are deliberate, documented
-trade-offs — not open bugs:
+trade-offs, not open bugs:
 
 - **Plain HTTP on the LAN** (`http://<lan-ip>`, no TLS/CA on a local hotspot). Not a browser secure
   context, so WebCrypto and service workers are unavailable. **App-layer transport encryption is
@@ -89,34 +89,40 @@ trade-offs — not open bugs:
   encryption, `optional` by default, `required` in the `hardened` profile. Honest residual:
   `optional` mode still accepts a plaintext client that joined without the QR key (a manually typed
   URL); `required` refuses them.
-- **No end-to-end encryption** — the server processes plaintext (search, LLM, audience filtering).
+- **No end-to-end encryption**: the server processes plaintext (search, LLM, audience filtering).
   Optional E2EE is a future initiative ([docs/07](docs/07-more-features.md)), strongest once a
   signed native client exists (a host-served PWA can replace its own JavaScript).
-- **Node-to-node sync peers are coarsely authenticated** — an optional shared bearer token
+- **Node-to-node sync peers are coarsely authenticated**: an optional shared bearer token
   (`sync.token`) gates the sync endpoints, and only public content is exposed with defensive imports
   ([docs/11](docs/11-node-sync.md)). Honest residuals: peer transport keys are TOFU-learned unless
   pinned by the admin; there are no per-peer credentials; and an *authorized but hostile* peer can
-  attribute imported messages to an ordinary (non-privileged) local user id — signed authorship is
+  attribute imported messages to an ordinary (non-privileged) local user id: signed authorship is
   the tracked long-term fix ([docs/29](docs/29-next-phase.md)).
 - **On-device Android database encryption is shipped** (SQLCipher via
   better-sqlite3-multiple-ciphers, [docs/04](docs/04-android-host-app.md)) and fails closed: an
   encrypted mode whose driver won't load locks rather than falling back to plaintext. OS cloud backup
-  and Android 12+ device-to-device transfer are both excluded. Final on-device runtime verification is
-  the current release gate ([docs/21](docs/21-device-verification-checklist.md)).
+  and Android 12+ device-to-device transfer are both excluded. Runtime verification on a physical phone
+  (actual `PRAGMA key`, rekey and wipe) is tracked in [docs/21](docs/21-device-verification-checklist.md)
+  and is not complete; the checks that exist are source-level and emulator-level.
 - **Uploaded media (attachments, avatars) is stored as plaintext files outside the encrypted
-  database** — destroying the database key does *not* cryptographically erase media; the kill switch
+  database**: destroying the database key does *not* cryptographically erase media; the kill switch
   deletes the files, which is best-effort on flash storage. Media-at-rest encryption is tracked in
   [docs/29](docs/29-next-phase.md) (Track 2).
 - **Logical delete is not secure flash erasure** without encryption ([docs/02](docs/02-kill-switch.md)).
 
 ## Review history
 
-### 2026-09-25 — pre-release review (with the 2026-09-09 review's findings)
+How these reviews were done: the maintainer runs the reviews below with AI models (the names in the
+headings are the models used), each working from the source with a written brief, and every finding is
+re-verified against the code and covered by a regression test before it is counted as fixed. There has
+been no third-party human security audit yet. If you do one, we will link it here.
+
+### 2026-09-25: pre-release review (with the 2026-09-09 review's findings)
 
 Two reviews ahead of the 0.5.0 release, each finding re-verified against the source. **Fixed on
 `fix/pre-release-2026-09-25`:**
 
-**Server** — a profile edit could point a user's avatar at, and a later replacement delete, a file other
+**Server**: a profile edit could point a user's avatar at, and a later replacement delete, a file other
 than their own avatar (`imageId` is now exactly `avt_<16hex>` and may only name the user's current
 image); on an approval-policy node a successful admin claim left the claimer pending;
 `transportEncryption: "off"` was still accepted from the admin API and config files (now refused, or
@@ -129,7 +135,7 @@ tunnel re-dispatches; tunnel re-dispatches were request-logged with their real p
 undoing the tunnel's path hiding in the logs; the ephemeral and plaintext Emergency Reset paths left
 preserved-recovery snapshots behind.
 
-**Sync and mesh** — a sync peer could rewrite a post a local user wrote, re-type a private message id
+**Sync and mesh**: a sync peer could rewrite a post a local user wrote, re-type a private message id
 into the public flow, alias a local private attachment into an anonymous download, or undo a
 moderator's removal with its next edit; a peer-supplied mesh key could be adopted onto a local user;
 sealed-mail replay protection keyed on the unsealed outer id, and a carrier could shadow genuine mail
@@ -138,38 +144,38 @@ mail, telling the serving peer where the recipient lives; the sync token could b
 pull; the mesh bridge accepted any loopback caller when no host token was set (behind a same-host
 reverse proxy, that is every LAN client).
 
-**Client** — an unsealed tunnel reply on a pinned session reached the caller (an on-path attacker could
+**Client**: an unsealed tunnel reply on a pinned session reached the caller (an on-path attacker could
 forge, for example, a mesh identity card); a `#k=` link could silently replace a pinned host key; a
 member's invite QR could pass on an unverified key; a device that missed an Emergency Reset kept its
 old cache under the next identity (it now purges when the server-confirmed identity changes).
 
-**Android host** — an encrypted mode whose SQLCipher driver failed to load booted on plaintext (now
+**Android host**: an encrypted mode whose SQLCipher driver failed to load booted on plaintext (now
 fails closed); Android 12+ device-to-device transfer copied the database and media; the foreground
 service could be refused when started from the background, leaving the host frozen at screen-off; a
 release AAB could be silently debug-signed (now refused without a release keystore).
 
-### 2026-09-04 — full-codebase review (Fable 5.1)
+### 2026-09-04: full-codebase review (Fable 5.1)
 
 A second full read of the post-#118 code (server, client, Android host) with three parallel adversarial
 audits, each finding re-verified against the source. **Fixed on `feat/review-fixes-and-server-split`:**
 
-**High** — a QR-joined client on the default `optional` transport mode silently continued in plaintext
+**High**: a QR-joined client on the default `optional` transport mode silently continued in plaintext
 with a cookie identity when its handshake failed once: the fallback keyed off the *unauthenticated*
 advertised mode rather than the QR-pinned effective mode, so an on-path attacker only had to drop one
 handshake POST.
 
-**Medium** — the Android host's `firstUser` grant was raceable from the LAN on every fresh-DB boot (the
+**Medium**: the Android host's `firstUser` grant was raceable from the LAN on every fresh-DB boot (the
 server listens on all interfaces before the operator's own WebView loads); replaced by a `hostDevice`
 bootstrap keyed on a per-boot launcher token that only the host's WebView receives. Passphrase mode
 auto-unlocked from the device on every boot (the passphrase was stored beside the device secret), so it
 protected nothing beyond `persistent`; the passphrase is now asked for at every start and never stored.
-The WebSocket accepted 100 MiB inbound frames (library default) on pre-auth sockets — capped at 16 KiB.
+The WebSocket accepted 100 MiB inbound frames (library default) on pre-auth sockets, now capped at 16 KiB.
 An Emergency Reset stranded previously QR-joined clients in a resume loop (nothing detected the changed
-host key — now a mismatching handshake marks the pin broken and gates on a rescan, keeping the pin); a forged unsealed 401 on a GET could leave a socket silently deaf after the re-handshake;
+host key, now a mismatching handshake marks the pin broken and gates on a rescan, keeping the pin); a forged unsealed 401 on a GET could leave a socket silently deaf after the re-handshake;
 ephemeral mode left uploaded avatars on disk across restarts; a system-stopped hotspot kept showing a
 dead SSID/QR.
 
-**Low** — a non-member's PATCH on a private channel returned 403 where a missing channel returned 404
+**Low**: a non-member's PATCH on a private channel returned 403 where a missing channel returned 404
 (an existence oracle); sync import bypassed a local channel's posting policy and the node's feature
 flags; typing signals ignored the posting policy; sealed mesh mail materialised DMs on a node with DMs
 disabled; the "loopback-only" mesh bridge is reachable by any app on Android (now also token-gated);
@@ -181,7 +187,7 @@ revocation; the WebSocket challenge and audience filtering; the mutation policy 
 route; the markdown sanitiser and every HTML sink; `#k=` fragment handling; the key handoff, wipe resume
 and supply-chain pinning on the Android host.
 
-**Round 2 (same day) — three independent reviews of the fixes themselves** found, and this branch
+**Round 2 (same day): three independent reviews of the fixes themselves** found, and this branch
 closed, two regressions the first pass had introduced: the client's "key changed" handling could drop a
 QR pin and then fall back to plaintext mid-session (now: the pin is kept and marked broken, the client
 gates on a rescan, and a pinned client refuses plaintext outright); and the Android passphrase rework
@@ -195,10 +201,10 @@ archived ones; a setup code was minted on a host-token node where it could never
 split was verified by a normalised per-function diff against master: no function or route missing or
 altered beyond the intended fixes.
 
-### 2026-08-15 — external full-codebase review (Sol)
+### 2026-08-15: external full-codebase review (Sol)
 
-An independent external review of v0.4.0-era code (commit `7cd5558`) reproduced six findings —
-three authorization-lifecycle gaps, a join-bootstrap gap, and two resource-limit gaps — all
+An independent external review of v0.4.0-era code (commit `7cd5558`) reproduced six findings:
+three authorization-lifecycle gaps, a join-bootstrap gap, and two resource-limit gaps, all
 confirmed and fixed on the `feat/pre-tester-hardening` branch:
 
 **Fixed:** members removed from a private channel could still edit/delete their old messages there;
@@ -213,26 +219,26 @@ edits bypassing posting-policy lockdowns and runtime feature shutdowns (DMs/repl
 timeouts not covering channel creation/metadata/roster growth, and a non-member admin's client
 retaining a deleted private channel.
 
-**Documented (not silently promised):** uploaded media files live outside the encrypted database —
+**Documented (not silently promised):** uploaded media files live outside the encrypted database:
 see the threat-model list above.
 
 **Found clean:** the transport cryptography, wipe paths, migrations, sync bounds, schema validation,
-and client privacy filtering; the full 999-test suite, build, and typecheck passed.
+and client privacy filtering; the full test suite, build, and typecheck passed.
 
-### 2026-07-06 — full pre-launch review
+### 2026-07-06: full pre-launch review
 
 An adversarial review covered every server route, the WebSocket audience filter, the DAL, the client
 markdown/XSS path and all HTML sinks, the QR/avatar generators, and the Android host.
 
-**Fixed:** Android host admin lockout (the readiness probe consumed the `firstUser` admin grant —
-added a no-identity `GET /api/health`); banned/pending users can no longer edit their profile or
+**Fixed:** Android host admin lockout (the readiness probe consumed the `firstUser` admin grant;
+fixed by adding a no-identity `GET /api/health`); banned/pending users can no longer edit their profile or
 upload avatars; human-submitted message/reaction bodies are length-capped; the session cookie is
 `Secure` based on real TLS (not `NODE_ENV`, which broke sessions on the http LAN); a strict CSP +
 `nosniff` are served; Android OS backup disabled; QR rendering degrades gracefully instead of
 throwing.
 
 **Deferred (tracked):** unbounded anonymous user creation by a LAN participant who withholds their
-cookie (a behavioural fix — defer persisting a user until first participation — held back to avoid
+cookie (a behavioural fix, to defer persisting a user until first participation, held back to avoid
 destabilising identity semantics right before handoff; the `/api/health` fix removed the accidental
 Android self-DoS contributor); release APK is debug-signed (needs a real release keystore, a manual
 release-engineering step); sync author-id namespacing (belongs with sync peer-auth).

@@ -1,9 +1,10 @@
 /**
- * @loam/crypto — Phase 0 cryptographic identity + sealed-mailbox primitives for the
- * opportunistic mesh (docs/16). Pure JS, no native deps: runs byte-identically on the embedded
- * Node 18 (Android) runtime, Node 24, and an insecure-context PWA browser (only
- * `globalThis.crypto.getRandomValues`, via `@noble/*`). Nothing here is wired into a runtime path
- * yet — this is the isolated primitive from Phase 0.
+ * @loam/crypto — the cryptographic identity, key-agreement and sealed-mailbox primitives. Pure JS, no
+ * native deps: runs byte-identically on the embedded Node (Android) runtime, Node 24, and an
+ * insecure-context PWA browser (only `globalThis.crypto.getRandomValues`, via `@noble/*`). Two runtime
+ * paths ride on it: the client-to-node transport encryption (docs/08: the X25519 handshake, the sealed
+ * request bodies, tunnel and WebSocket frames) and the mesh's sealed mail (docs/16: mesh identities,
+ * sealed-sender envelopes, routing tags).
  *
  * Primitives: Ed25519 (long-term signing identity), X25519 (sealed-mailbox ECDH), XChaCha20-Poly1305
  * (AEAD), HKDF-SHA256 (key/tag derivation). All from `@noble/*`, pinned to the Node-18-safe 1.x line.

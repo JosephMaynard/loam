@@ -4,6 +4,7 @@ import { render } from "preact";
 import { LocationProvider } from "preact-iso";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { ANNOUNCE_DELAY_MS } from "../lib/live-announcer";
 import type { Conversation } from "../lib/protocol";
 import { installViewportSync } from "../lib/viewport";
 import { ConversationView, type ConversationViewProps } from "./ConversationView";
@@ -145,9 +146,10 @@ describe("ConversationView is scoped per conversation", () => {
 
   it("an open message report dialog does not follow into the next conversation", async () => {
     const host = mount(view({ conversation: GENERAL, messages: [post("p1")] }));
+    // The ⋮ button opens the message's actions sheet (the same one the time opens); Report is in it.
     host.querySelector<HTMLButtonElement>(".message-more")!.click();
     await tick();
-    Array.from(host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+    Array.from(host.querySelectorAll<HTMLButtonElement>(".message-sheet .menu-item"))
       .find((item) => item.textContent === "Report")!
       .click();
     await tick();
@@ -325,5 +327,85 @@ describe("the message list", () => {
 
     stop();
     Object.defineProperty(window, "visualViewport", { configurable: true, value: undefined });
+  });
+});
+
+/** Open a message's actions sheet (its toolbar's more button) and choose the action with this label. */
+async function chooseMessageAction(host: HTMLElement, label: string): Promise<void> {
+  host.querySelector<HTMLButtonElement>(".message-more")!.click();
+  await tick();
+  Array.from(host.querySelectorAll<HTMLButtonElement>(".message-sheet .menu-item"))
+    .find((item) => item.textContent === label)!
+    .click();
+  await tick();
+}
+
+/** The button with this label inside the open alertdialog. */
+function alertButton(host: HTMLElement, label: string): HTMLButtonElement {
+  return Array.from(host.querySelector('[role="alertdialog"]')!.querySelectorAll("button")).find(
+    (button) => button.textContent === label,
+  )!;
+}
+
+describe("deleting a message", () => {
+  it("asks in an alertdialog first: cancel deletes nothing, confirm calls onDelete once with the id", async () => {
+    const onDelete = vi.fn();
+    const host = mount(view({ messages: [post("mine", me.id)], onDelete }));
+
+    await chooseMessageAction(host, "Delete");
+    const dialog = host.querySelector('[role="alertdialog"]')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.textContent).toContain("Delete this message?");
+    expect(onDelete).not.toHaveBeenCalled();
+
+    alertButton(host, "Cancel").click();
+    await tick();
+    expect(host.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(onDelete).not.toHaveBeenCalled();
+
+    await chooseMessageAction(host, "Delete");
+    alertButton(host, "Delete").click();
+    await tick();
+    expect(host.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    expect(onDelete).toHaveBeenCalledWith("mine");
+  });
+});
+
+describe("the live region for arriving messages", () => {
+  it("announces a new message from someone else, and a burst as one line; history and own posts stay silent", async () => {
+    vi.useFakeTimers();
+    try {
+      const p1 = post("p1");
+      const host = mount(view({ messages: [p1] }));
+      const region = host.querySelector(".message-announcer")!;
+      expect(region.getAttribute("aria-live")).toBe("polite");
+      await vi.advanceTimersByTimeAsync(ANNOUNCE_DELAY_MS * 2);
+      expect(region.textContent).toBe(""); // what the list opened with is history, not news
+
+      const p2 = { ...post("p2"), createdAt: 200 } as Message;
+      rerender(host, view({ messages: [p1, p2] }));
+      await vi.advanceTimersByTimeAsync(ANNOUNCE_DELAY_MS * 2);
+      expect(region.textContent).toBe("New message from Ada");
+
+      // Three land inside one window: one announcement, with the count.
+      const p3 = { ...post("p3"), createdAt: 300 } as Message;
+      const p4 = { ...post("p4"), createdAt: 400 } as Message;
+      const p5 = { ...post("p5"), createdAt: 500 } as Message;
+      rerender(host, view({ messages: [p1, p2, p3] }));
+      await vi.advanceTimersByTimeAsync(ANNOUNCE_DELAY_MS / 3);
+      rerender(host, view({ messages: [p1, p2, p3, p4, p5] }));
+      await vi.advanceTimersByTimeAsync(ANNOUNCE_DELAY_MS * 2);
+      expect(region.textContent).toBe("3 new messages");
+
+      // Your own post, and an older one a history fetch fills in, are not news.
+      const mine = { ...post("mine", me.id), createdAt: 600 } as Message;
+      const older = { ...post("older"), createdAt: 50 } as Message;
+      rerender(host, view({ messages: [older, p1, p2, p3, p4, p5, mine] }));
+      await vi.advanceTimersByTimeAsync(ANNOUNCE_DELAY_MS * 2);
+      expect(region.textContent).toBe("3 new messages");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -327,6 +327,73 @@ export function parseSocketEvent(data: unknown): SocketEvent | undefined {
 }
 
 /**
+ * The public, cookie-free `GET /api/bootstrap` reply (docs/20): everything `/api/config` returns EXCEPT
+ * `currentUser`. A `required`/bound client reads this FIRST, before it has an identity, to learn the transport
+ * mode and host key.
+ */
+export type BootstrapResponse = {
+  /** The node's build version, shown in the join/settings footer. Absent on very old nodes. */
+  version?: string;
+  joinUrl: string;
+  websocketPath: string;
+  networkConfig: NetworkConfig;
+};
+
+/** The cookie-path `GET /api/config` reply: the bootstrap plus the caller's own user record. */
+export type ConfigResponse = BootstrapResponse & { currentUser: User };
+
+/**
+ * Validates a `GET /api/bootstrap` body. Every field the app later reads is checked here, with the shared
+ * `NetworkConfigSchema` for the flags, so a node answering with the wrong shape (a proxy's error page parsed as
+ * JSON, an incompatible build) is refused at the boundary instead of surfacing later as a `TypeError` deep in
+ * the boot.
+ *
+ * @param payload - The parsed JSON response
+ * @returns The validated bootstrap, or `undefined` for an unrecognised shape
+ */
+export function parseBootstrapResponse(payload: unknown): BootstrapResponse | undefined {
+  if (!payload || typeof payload !== "object") {
+    return undefined;
+  }
+
+  const candidate = payload as { version?: unknown; joinUrl?: unknown; websocketPath?: unknown; networkConfig?: unknown };
+  const networkConfig = NetworkConfigSchema.safeParse(candidate.networkConfig);
+
+  if (
+    !networkConfig.success ||
+    typeof candidate.joinUrl !== "string" ||
+    typeof candidate.websocketPath !== "string" ||
+    (candidate.version !== undefined && typeof candidate.version !== "string")
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(typeof candidate.version === "string" ? { version: candidate.version } : {}),
+    joinUrl: candidate.joinUrl,
+    websocketPath: candidate.websocketPath,
+    networkConfig: networkConfig.data,
+  };
+}
+
+/**
+ * Validates a `GET /api/config` body: a bootstrap plus a `currentUser` that passes `UserSchema`.
+ *
+ * @param payload - The parsed JSON response
+ * @returns The validated config, or `undefined` for an unrecognised shape
+ */
+export function parseConfigResponse(payload: unknown): ConfigResponse | undefined {
+  const bootstrap = parseBootstrapResponse(payload);
+
+  if (!bootstrap) {
+    return undefined;
+  }
+
+  const currentUser = UserSchema.safeParse((payload as { currentUser?: unknown }).currentUser);
+  return currentUser.success ? { ...bootstrap, currentUser: currentUser.data } : undefined;
+}
+
+/**
  * Validates a `POST /api/messages` response body into a `MessageResponse`.
  *
  * @param payload - The parsed JSON response

@@ -13,6 +13,19 @@ import { markdownToPlainText } from "../lib/markdown";
 import { bodyFor, displayTime } from "../lib/message-format";
 
 /**
+ * The last term searched in this tab, and who searched it, so coming back from a result (or reopening
+ * the screen) shows the same search. It lives here and nowhere else: a term in the address would reach
+ * the wire on every reload and sit in the browser's history and caches, so the address stays `/search`.
+ * Keyed by user so a term never follows an identity change in the same tab.
+ */
+let rememberedSearch: { userId: string; term: string } | undefined;
+
+/** Forget the remembered search (a device wipe, or the start of a different identity). */
+export function forgetRememberedSearch(): void {
+  rememberedSearch = undefined;
+}
+
+/**
  * Full-text message search over `GET /api/search`. The server scopes results strictly to what this
  * user may read (public channels, their private channels, their own DMs), so the client just
  * renders whatever comes back. Tapping a result jumps to its conversation (or thread).
@@ -29,8 +42,10 @@ export function SearchView({
   usersById: Map<string, User>;
 }) {
   const location = useLocation();
-  // `/search?q=…` opens with that search run (and each search updates the address, so reload/back work).
-  const initialQuery = typeof location.query.q === "string" ? location.query.q : "";
+  // A `/search?q=…` link (a deep link from elsewhere) runs that search once; its term comes off the
+  // address before the request goes out. Otherwise the search this person last ran here, if any.
+  const deepLinkQuery = typeof location.query.q === "string" ? location.query.q.trim() : "";
+  const initialQuery = deepLinkQuery || (rememberedSearch?.userId === currentUser.id ? rememberedSearch.term : "");
   const [query, setQuery] = useState(initialQuery);
   // The terms of the results on screen (what to highlight), not whatever is being typed now.
   const [searchedFor, setSearchedFor] = useState("");
@@ -48,9 +63,7 @@ export function SearchView({
 
     setSearching(true);
     setError(undefined);
-    if (location.query.q !== trimmed) {
-      location.route(`/search?q=${encodeURIComponent(trimmed)}`, true);
-    }
+    rememberedSearch = { userId: currentUser.id, term: trimmed };
 
     try {
       const payload = await fetchJson<unknown>(`/api/search?q=${encodeURIComponent(trimmed)}`);
@@ -72,9 +85,13 @@ export function SearchView({
     }
   }
 
-  // Opened as /search?q=…: run it once.
+  // Opened with a term (a deep link, or a search to come back to): run it once. A deep link's term is
+  // replaced in the address first, so the one request is the only place it goes.
   useEffect(() => {
-    if (initialQuery.trim()) {
+    if (deepLinkQuery) {
+      location.route(location.path, true);
+    }
+    if (initialQuery) {
       void run(initialQuery);
     }
     // Only on arrival; later searches go through the form.

@@ -74,8 +74,11 @@ export function registerChannelRoutes(ctx: AppContext): void {
     }
 
     const members = ctx.channelMemberIds(channel);
-    // Sanitize like the roster: a non-moderator member must not learn another member's roles/shadowBan.
-    return ctx.data.users.filter((user) => members.has(user.id)).map((user) => ctx.sanitizeUserFor(currentUser, user));
+    // Sanitize like the roster: a non-moderator member must not learn another member's roles/shadowBan, and
+    // a banned or still-pending member is left out exactly as `visibleUsers` leaves them off the roster.
+    return ctx.data.users
+      .filter((user) => members.has(user.id) && !user.banned && !user.pending)
+      .map((user) => ctx.sanitizeUserFor(currentUser, user));
   });
 
   // Invite a user into a private channel. The channel owner or an admin only; adding an existing
@@ -304,7 +307,18 @@ export function registerChannelRoutes(ctx: AppContext): void {
       }
 
       const members = ctx.channelMemberIds(channel);
-      return members.has(target.id) ? channel : ctx.applyChannelMembers(channel, [...members, target.id]);
+
+      if (members.has(target.id)) {
+        return channel;
+      }
+
+      // The same rule as an invite: a block in either direction gets the generic answer, so the blocked party
+      // isn't told about the block.
+      if (blockedEitherWay(ctx, currentUser.id, target.id)) {
+        return reply.code(403).send(errorBody("This person isn't available for this channel"));
+      }
+
+      return ctx.applyChannelMembers(channel, [...members, target.id]);
     },
   );
 
@@ -503,6 +517,13 @@ export function registerChannelRoutes(ctx: AppContext): void {
 
     if (!body.success) {
       return reply.code(400).send(errorBody("Invalid channel update request"));
+    }
+
+    // Retention is the operator's call: a channel's `messageTtlMs` is set, changed
+    // or cleared by an admin only. The reaper also caps it at the node-wide TTL, but an owner must not get to
+    // touch the axis at all; the admin channels panel is the only UI that sends it.
+    if (body.data.messageTtlMs !== undefined && !currentUser.isAdmin) {
+      return reply.code(403).send(errorBody("Admin access required"));
     }
 
     // A new name or description is published text: it needs the member rules agreed. Settings like

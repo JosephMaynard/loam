@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security problem
+    url: https://github.com/MagicZebraLtd/loam/blob/master/SECURITY.md
+    about: Please do not open a public issue for a suspected vulnerability. SECURITY.md explains how to report one privately.
+  - name: Child safety
+    url: https://www.loamnet.com/child-safety
+    about: Our child safety standards and how to reach us about them.

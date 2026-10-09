@@ -140,4 +140,82 @@ describe("ChannelMembersPanel", () => {
     // A non-owner member can still leave.
     expect(host.querySelector(".members-leave")?.textContent).toContain("Leave");
   });
+
+  it("asks before handing over ownership: cancel sends nothing, confirm POSTs the transfer", async () => {
+    const fetchMock = vi.mocked(globalThis.fetch);
+    const host = mount(
+      <ChannelMembersPanel
+        channel={channel}
+        currentUser={owner}
+        onChannelUpsert={() => {}}
+        onLeftChannel={() => {}}
+        users={[owner, member, outsider]}
+      />,
+    );
+    await flush();
+    const callsBefore = fetchMock.mock.calls.length;
+
+    host.querySelector<HTMLButtonElement>(".member-transfer")!.click();
+    await tick();
+    const dialog = host.querySelector('[role="alertdialog"]')!;
+    expect(dialog.textContent).toContain("Transfer ownership to this person?");
+    alertButton(host, "Cancel").click();
+    await tick();
+    expect(host.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(fetchMock.mock.calls.length).toBe(callsBefore);
+
+    host.querySelector<HTMLButtonElement>(".member-transfer")!.click();
+    await tick();
+    alertButton(host, "Make owner").click();
+    await flush();
+    const transfer = fetchMock.mock.calls.slice(callsBefore).find(([input]) => String(input).includes("/transfer"));
+    expect(transfer).toBeDefined();
+    expect(String(transfer![0])).toContain("/api/channels/channel.secret/transfer");
+    expect((transfer![1] as RequestInit).method).toBe("POST");
+  });
+
+  it("asks before leaving: cancel keeps you in, confirm sends the DELETE and reports the channel left", async () => {
+    const fetchMock = vi.mocked(globalThis.fetch);
+    const onLeftChannel = vi.fn();
+    const host = mount(
+      <ChannelMembersPanel
+        channel={channel}
+        currentUser={member}
+        onChannelUpsert={() => {}}
+        onLeftChannel={onLeftChannel}
+        users={[owner, member, outsider]}
+      />,
+    );
+    await flush();
+    const callsBefore = fetchMock.mock.calls.length;
+
+    host.querySelector<HTMLButtonElement>(".members-leave")!.click();
+    await tick();
+    expect(host.querySelector('[role="alertdialog"]')!.textContent).toContain("Leave this channel?");
+    alertButton(host, "Cancel").click();
+    await tick();
+    expect(fetchMock.mock.calls.length).toBe(callsBefore);
+    expect(onLeftChannel).not.toHaveBeenCalled();
+
+    host.querySelector<HTMLButtonElement>(".members-leave")!.click();
+    await tick();
+    alertButton(host, "Leave channel").click();
+    await flush();
+    const removal = fetchMock.mock.calls.slice(callsBefore).find(([input]) => String(input).includes("/members/"));
+    expect(String(removal![0])).toContain("/api/channels/channel.secret/members/user.member");
+    expect((removal![1] as RequestInit).method).toBe("DELETE");
+    expect(onLeftChannel).toHaveBeenCalledWith("channel.secret");
+  });
 });
+
+/** Let Preact flush one batched state update. */
+function tick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** The button with this label inside the open alertdialog. */
+function alertButton(host: HTMLElement, label: string): HTMLButtonElement {
+  return Array.from(host.querySelector('[role="alertdialog"]')!.querySelectorAll("button")).find(
+    (button) => button.textContent === label,
+  )!;
+}

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildApp } from "./app.js";
-import { parseDbEncryptionMode } from "./embedded.js";
+import { parseDbEncryptionMode, parsePort, resolveDbEncryptionMode } from "./embedded.js";
 import { resolveLanIPv4 } from "./net.js";
 
 const rootDir = fileURLToPath(new URL("../../..", import.meta.url));
@@ -38,7 +38,10 @@ function resolveVersion(): string {
   return "dev";
 }
 const port = Number.parseInt(process.env.PORT ?? "3000", 10);
-const clientPort = Number.parseInt(process.env.CLIENT_PORT ?? "3000", 10);
+// The port joiners are sent to. In production the server serves the client itself, so it is the listen
+// port unless `CLIENT_PORT` says otherwise (`scripts/dev.ts` sets both: Vite on 3000, the API on 3001);
+// defaulting it to a fixed 3000 put the wrong port in the join QR whenever `PORT` was anything else.
+const clientPort = parsePort(process.env.CLIENT_PORT, port);
 const host = process.env.HOST ?? "0.0.0.0";
 
 // LOAM_DB_KEY: a passphrase encrypts at rest; the literal "ephemeral" uses a random RAM-only key
@@ -46,8 +49,9 @@ const host = process.env.HOST ?? "0.0.0.0";
 const ephemeralDbKey = process.env.LOAM_DB_KEY === "ephemeral";
 // LOAM_DB_ENCRYPTION_MODE: the operator-declared at-rest key strategy, threaded through so the reported
 // posture (`networkConfig.dbEncryption`) reflects the ACTUAL key path, not just `security.dbEncryption`
-// in config — same contract the embedded/Android launcher uses (embedded.ts). Unset on the CLI = fall
-// back to the configured value; `ephemeral` is inferred from the `LOAM_DB_KEY === "ephemeral"` literal.
+// in config — same contract the embedded/Android launcher uses (embedded.ts). Unset = inferred from the key:
+// the `LOAM_DB_KEY === "ephemeral"` literal is `ephemeral`, any other key is a fixed `passphrase` key (so
+// the Emergency Reset journals its wipe), no key is no mode (resolveDbEncryptionMode).
 // Fail startup (CodeRabbit) rather than silently falling back on a garbled value or a contradiction: a typo
 // must not quietly disable encryption, and an ephemeral key paired with a non-ephemeral declared mode would
 // misreport the effective posture.
@@ -59,7 +63,7 @@ if (rawDbEncryptionMode !== undefined && parsedDbEncryptionMode === undefined) {
 if (ephemeralDbKey && parsedDbEncryptionMode !== undefined && parsedDbEncryptionMode !== "ephemeral") {
   throw new Error('LOAM_DB_KEY="ephemeral" requires LOAM_DB_ENCRYPTION_MODE=ephemeral (or unset)');
 }
-const dbEncryptionMode = parsedDbEncryptionMode ?? (ephemeralDbKey ? "ephemeral" : undefined);
+const dbEncryptionMode = resolveDbEncryptionMode(parsedDbEncryptionMode, process.env.LOAM_DB_KEY);
 
 const app = await buildApp({
   dataDir,

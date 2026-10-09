@@ -100,40 +100,63 @@ function openDatabase(): Promise<IDBDatabase> {
   }
 
   if (!databasePromise) {
-    databasePromise = new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, DB_VERSION);
-
-      request.onupgradeneeded = () => {
-        const database = request.result;
-
-        for (const storeName of STORE_NAMES) {
-          if (!database.objectStoreNames.contains(storeName)) {
-            database.createObjectStore(storeName, { keyPath: "id" });
-          }
-        }
-      };
-
-      request.onsuccess = () => {
-        const database = request.result;
-        // Close this connection the moment ANOTHER tab tries to delete/upgrade the DB (docs/20): a device
-        // wipe in a sibling tab fires `deleteDatabase`, which blocks while this tab holds a connection.
-        // Reacting to `versionchange` by closing lets that deletion proceed instead of hanging. We also
-        // latch `wiped` so this tab won't re-open + rehydrate the DB the other tab is erasing.
-        database.onversionchange = () => {
-          wiped = true;
-          database.close();
-          databasePromise = undefined;
-        };
-        resolve(database);
-      };
-      request.onerror = () => {
-        databasePromise = undefined;
-        reject(request.error);
-      };
+    databasePromise = openConnection(DB_VERSION).catch((error: unknown) => {
+      // The database on disk is NEWER than this page's code (a sibling tab loaded a newer build and upgraded
+      // it). Open it at whatever version it has: the stores this build knows are kept across upgrades, so it
+      // stays usable instead of dead until a reload.
+      // Duck-typed: a `DOMException` need not be an `Error` instance in every runtime.
+      if (typeof error === "object" && error !== null && (error as { name?: unknown }).name === "VersionError") {
+        return openConnection(undefined);
+      }
+      throw error;
+    });
+    databasePromise.catch(() => {
+      databasePromise = undefined;
     });
   }
 
   return databasePromise;
+}
+
+/** One `indexedDB.open`, at `version` (creating the stores on upgrade) or at the current version when omitted. */
+function openConnection(version: number | undefined): Promise<IDBDatabase> {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request = version === undefined ? indexedDB.open(DB_NAME) : indexedDB.open(DB_NAME, version);
+
+    request.onupgradeneeded = () => {
+      const database = request.result;
+
+      for (const storeName of STORE_NAMES) {
+        if (!database.objectStoreNames.contains(storeName)) {
+          database.createObjectStore(storeName, { keyPath: "id" });
+        }
+      }
+    };
+
+    request.onsuccess = () => {
+      const database = request.result;
+      // Close this connection the moment ANOTHER tab deletes or upgrades the DB (docs/20): either blocks while
+      // this tab holds a connection, so reacting to `versionchange` by closing lets it proceed instead of
+      // hanging. The two cases then differ: a DELETION (`newVersion === null`, a device wipe in a sibling tab)
+      // latches `wiped`, so this tab never re-opens and rehydrates the DB the other tab is erasing. An
+      // UPGRADE (a sibling tab running a newer build bumped `DB_VERSION`) only drops the cached connection:
+      // the next read or write re-opens on demand, at the new version if need be (see `openDatabase`).
+      // Latching on an upgrade would silently stop every other open tab reading and writing until a reload.
+      database.onversionchange = (event) => {
+        if (event.newVersion === null) {
+          wiped = true;
+        }
+        database.close();
+        databasePromise = undefined;
+      };
+      resolve(database);
+    };
+    request.onerror = (event) => {
+      // Handled here (the promise rejects); without this an unhandled IndexedDB error event is rethrown.
+      event.preventDefault();
+      reject(request.error);
+    };
+  });
 }
 
 export async function getAllRecords<T>(storeName: StoreName): Promise<T[]> {
@@ -175,13 +198,23 @@ export async function putRecord<T extends StoredRecord>(
 }
 
 export async function deleteRecord(storeName: StoreName, id: string): Promise<void> {
-  if (!hasIndexedDb() || wiped) {
+  await deleteRecords(storeName, [id]);
+}
+
+/** Delete several records in one transaction (a missing id is not an error). */
+export async function deleteRecords(storeName: StoreName, ids: readonly string[]): Promise<void> {
+  if (!hasIndexedDb() || wiped || !ids.length) {
     return;
   }
 
   const database = await openDatabase();
   const transaction = database.transaction(storeName, "readwrite");
-  transaction.objectStore(storeName).delete(id);
+  const store = transaction.objectStore(storeName);
+
+  for (const id of ids) {
+    store.delete(id);
+  }
+
   await transactionDone(transaction);
 }
 

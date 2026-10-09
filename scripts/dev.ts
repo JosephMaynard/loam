@@ -9,6 +9,8 @@ const host = process.env.HOST ?? "0.0.0.0";
 const joinHost = process.env.LOAM_JOIN_HOST ?? localIPv4();
 const joinUrl = `http://${joinHost}:${clientPort}`;
 const children: ReturnType<typeof spawn>[] = [];
+/** How long to wait for the server to come up and report its transport key before printing a keyless QR. */
+const KEY_WAIT_MS = 15_000;
 
 function localIPv4(): string {
   for (const interfaces of Object.values(networkInterfaces())) {
@@ -82,12 +84,58 @@ process.on("SIGTERM", () => {
   process.exit(143);
 });
 
+/**
+ * The transport public key the server advertises, read from the public, cookie-free `/api/bootstrap` once
+ * the server answers (polled until `deadlineMs` passes). Undefined when it never answered in time, or
+ * answered without a key (Developer Mode turns transport encryption off).
+ */
+async function fetchTransportKey(deadlineMs: number): Promise<string | undefined> {
+  const probeHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+  const deadline = Date.now() + deadlineMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://${probeHost}:${serverPort}/api/bootstrap`, { signal: AbortSignal.timeout(1_000) });
+      if (response.ok) {
+        const body = (await response.json()) as { networkConfig?: { transportPublicKey?: unknown } };
+        const key = body.networkConfig?.transportPublicKey;
+        return typeof key === "string" && key ? key : undefined;
+      }
+    } catch {
+      // Not listening yet (tsx is still compiling), or a slow answer: try again.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return undefined;
+}
+
+/**
+ * Print the join QR once the server is up, so it carries the node's key as `#k=<key>` (docs/08) and a
+ * scanned join is encrypted and MITM-resistant, as `loam` and the Android host print it. The URL alone is
+ * printed first, so there is something to type while the server boots.
+ */
+async function printJoinQr(): Promise<void> {
+  const key = await fetchTransportKey(KEY_WAIT_MS);
+  const link = key ? `${joinUrl}#k=${key}` : joinUrl;
+  // Black on white on a colour terminal (bare blocks invert on a dark theme, which scanners refuse).
+  const colour = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
+  let out = `\nScan to join: ${link}\n`;
+  try {
+    out += `${renderQRToTerminal(encodeQR(link), { quietZone: 2, colour })}\n`;
+  } catch {
+    out += "(The join link is too long for a QR code; share the link above instead.)\n";
+  }
+  if (!key) {
+    out += "(The server reported no transport key, so this QR joins without one. Scan the key from the server's own output instead, if it prints one.)\n";
+  }
+  // One write, so the children's prefixed lines can't land inside the code.
+  process.stdout.write(`${out}\n`);
+}
+
 console.log("");
 console.log("LOAM local dev");
 console.log(`Open on this laptop: http://localhost:${clientPort}`);
 console.log(`Open on your phone:  ${joinUrl}`);
-console.log("");
-console.log(renderQRToTerminal(encodeQR(joinUrl), { quietZone: 2 }));
+console.log("(The join QR prints once the server is up, with its encryption key.)");
 console.log("");
 
 start("[server]", ["--filter", "@loam/server", "dev"], {
@@ -103,3 +151,5 @@ start("[client]", ["--filter", "client", "exec", "vite", "--host", host, "--port
   CLIENT_PORT: String(clientPort),
   LOAM_API_PORT: String(serverPort),
 });
+
+void printJoinQr();

@@ -68,7 +68,7 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 |------|------|
 | `apps/server` | Fastify backend: REST + WebSocket, SQLite persistence behind a DAL (`src/db.ts`), optional Ollama LLM. `src/app.ts` is the composition root (`buildApp()`, testable via `inject`) plus the domain core; the transport layer, realtime, kill switch, store lifecycle, sync, mesh, LLM and per-domain routes are sibling modules over one `AppContext` (see "Server architecture"). `src/server.ts` is the thin entry point (env, listen, SIGINT). |
 | `apps/client` | Preact + Vite PWA. Main app: `src/app.tsx` (~2.2k lines: `LoamApp` state, boot, WebSocket, routing). Screens in `src/views/`, components in `src/components/`, libs in `src/lib/`, styles in `src/styles/` (see `apps/client/DESIGN.md`). |
-| `apps/app` | Expo SDK 57 / RN 0.86 — the **Android host** (embedded Node server + hotspot + WebView, see `docs/04-android-host-app.md`). The Step-2 join address is **discovered, never assumed**: Android gives a LocalOnlyHotspot a random address per start (`192.168.49.1` is Wi-Fi Direct's, not a hotspot's), so the Kotlin module enumerates interfaces (`hotspotAddressCandidates`, with upstream / pre-existing hints) and `src/lib/hotspot-address.ts` scores them; no confident pick → Step 2 shows the manual "Gateway" route, not a guess (docs/04 "The Step-2 address"). The share overlay has a persisted **host mode** (`HostMode = 'hotspot' \| 'wifi'`, SecureStore `loam.hostMode`, default hotspot): Wi-Fi mode starts no hotspot, never asks for location, and advertises the phone's Wi-Fi station address via the pure `pickWifiAddress` (`src/lib/host-mode.ts`; native `wifiStationInfo()`), see docs/04 "Hosting modes". Has `scripts/bundle-server.mjs` (esbuild → `nodejs-assets/nodejs-project/loam-server.js`, gitignored; run `fetch:native` first — it fails without both SQLite prebuilds unless `LOAM_ALLOW_MISSING_NATIVE=1`) and the host UI (`HostPanel`, `QRCode`). Both android-arm64 SQLite prebuilds (plain `better-sqlite3` and `multiple-ciphers`) are **vendored** under `native-prebuilds/`, sha256-pinned — nothing is downloaded from upstream releases. **Setup screens** (`src/components/setup-wizard.tsx`, logic in `src/lib/setup.ts` + `new-network.ts`, docs/04 "Setup screens") run every launch before the runtime starts: language, kind of network (Private and short-lived / Community / Choose every setting myself = a security profile + identity/presence flags + DB encryption mode), name, Hotspot or Wi-Fi; later launches offer one-tap Continue or a hold-to-confirm new network. A new network rides every `loam-db-key-response` as `newNetwork {id, config}` until main.js acknowledges it; main.js (`new-network.js`) marks the folder `.loam-setup-pending`, empties it (keeping that marker and the mode hint), durably writes `config.json` and records the id (a repeat is a no-op), staying locked if that fails, and on every boot while the marker names an unapplied operation; setup also writes the chosen mode into the launcher's mode hint first, so a failed key handoff on a fresh install locks instead of booting plaintext. The host app has its own i18n (`src/lib/i18n`, all 15 locales, parity-tested). **Update news** (`modules/loam-updates`, `src/lib/app-updates.ts`, `components/update-notice.tsx`), on the opening setup screen only (never on a running network): the AAB is built with `-PloamDistribution=play` and asks the Play Store app (Google's `app-update` library, linked only in that build); the GitHub APK (`github`, the default) has a tap-only "Check for updates" against GitHub's latest-release API. Neither downloads anything. Has a vitest harness (`src/**/*.test.ts`, in `pnpm test`); also validate types with `pnpm --filter app typecheck` (a CI step). **GOTCHA: never put `*.test.*` files under `src/app/`** — that dir is the Expo Router root, whose `require.context` eagerly bundles EVERY file in it into the release APK, so a test's `vitest` import pulls `vite` into the bundle and breaks `assembleRelease` (debug is unaffected, so it hides until an APK build). Keep tests in `src/lib/` or `src/__tests__/`. |
+| `apps/app` | Expo SDK 57 / RN 0.86 — the **Android host** (embedded Node server + hotspot + WebView, see `docs/04-android-host-app.md`). The Step-2 join address is **discovered, never assumed**: Android gives a LocalOnlyHotspot a random address per start (`192.168.49.1` is Wi-Fi Direct's, not a hotspot's), so the Kotlin module enumerates interfaces (`hotspotAddressCandidates`, with upstream / pre-existing hints) and `src/lib/hotspot-address.ts` scores them; no confident pick → Step 2 shows the manual "Gateway" route, not a guess (docs/04 "The Step-2 address"). The share overlay has a persisted **host mode** (`HostMode = 'hotspot' \| 'wifi'`, SecureStore `loam.hostMode`, default hotspot): Wi-Fi mode starts no hotspot, never asks for location, and advertises the phone's Wi-Fi station address via the pure `pickWifiAddress` (`src/lib/host-mode.ts`; native `wifiStationInfo()`, whose `wired` flag lets a laptop with no Wi-Fi host on its wired network), see docs/04 "Hosting modes". **Large screens** (docs/04 "Large screens", docs/30): `orientation: "default"` (no lock), `android:resizeableActivity="true"` and an optional touchscreen (`OPTIONAL_FEATURES`) so it runs on tablets, foldables and Android laptops, with every native screen a scrolling column centred at `MaxContentWidth`. Has `scripts/bundle-server.mjs` (esbuild → `nodejs-assets/nodejs-project/loam-server.js`, gitignored; run `fetch:native` first — it fails without both SQLite prebuilds unless `LOAM_ALLOW_MISSING_NATIVE=1`) and the host UI (`HostPanel`, `QRCode`). Both android-arm64 SQLite prebuilds (plain `better-sqlite3` and `multiple-ciphers`) are **vendored** under `native-prebuilds/`, sha256-pinned — nothing is downloaded from upstream releases. **Setup screens** (`src/components/setup-wizard.tsx`, logic in `src/lib/setup.ts` + `new-network.ts`, docs/04 "Setup screens") run every launch before the runtime starts: language, kind of network (Private and short-lived / Community / Choose every setting myself = a security profile + identity/presence flags + DB encryption mode), name, Hotspot or Wi-Fi; later launches offer one-tap Continue or a hold-to-confirm new network. A new network rides every `loam-db-key-response` as `newNetwork {id, config}` until main.js acknowledges it; main.js (`new-network.js`) marks the folder `.loam-setup-pending`, empties it (keeping that marker and the mode hint), durably writes `config.json` and records the id (a repeat is a no-op), staying locked if that fails, and on every boot while the marker names an unapplied operation; setup also writes the chosen mode into the launcher's mode hint first, so a failed key handoff on a fresh install locks instead of booting plaintext. The host app has its own i18n (`src/lib/i18n`, all 15 locales, parity-tested). **Update news** (`modules/loam-updates`, `src/lib/app-updates.ts`, `components/update-notice.tsx`), on the opening setup screen only (never on a running network): the AAB is built with `-PloamDistribution=play` and asks the Play Store app (Google's `app-update` library, linked only in that build); the GitHub APK (`github`, the default) has a tap-only "Check for updates" against GitHub's latest-release API. Neither downloads anything. Has a vitest harness (`src/**/*.test.ts`, in `pnpm test`); also validate types with `pnpm --filter app typecheck` (a CI step). **GOTCHA: never put `*.test.*` files under `src/app/`** — that dir is the Expo Router root, whose `require.context` eagerly bundles EVERY file in it into the release APK, so a test's `vitest` import pulls `vite` into the bundle and breaks `assembleRelease` (debug is unaffected, so it hides until an APK build). Keep tests in `src/lib/` or `src/__tests__/`. |
 | `packages/schema` | **The client↔server contract.** Zod schemas + inferred TS types for users, channels, messages, config, stream events. |
 | `packages/display-name` | Deterministic anonymous name from an id (`adjective.material.creature`), FNV-1a + mix32 hashed. |
 | `packages/avatar` | Deterministic SVG avatar from an id. Three modes: `face` (SVG template), `initial`, `pattern`. OKLCH colour derivation with WCAG contrast fixups. Has a standalone `demo/`. |
@@ -138,6 +138,8 @@ request protocol, not `NODE_ENV`).
 `packages/schema` is the source of truth for wire types. Both ends validate with Zod:
 
 - **Message** is a discriminated union on `type`: `channelPost`, `channelReply`, `dm`, `reaction`.
+  A `channelReply`'s parent must be a `channelPost` (replies to replies are refused with `parent_not_found`);
+  `collectDeletionSet` still follows `parentMessageId` chains to any depth for rows an older build wrote.
   A separate `MessageCreateRequest` union is what clients POST (server assigns `id`, `authorId`,
   `createdAt`, `meta`).
 - **Channel** carries `visibility` (`public` | `private`) and, for private channels, `memberUserIds`
@@ -277,7 +279,10 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   `AppOptions.logStream` lets tests capture output.
 - **Ephemeral messages** (off by default; `retention.messageTtlMs`): a 30s reaper (+ boot sweep)
   deletes expired messages and broadcasts `messageDeleted`; streaming LLM messages are spared until
-  complete.
+  complete. A channel's own `messageTtlMs` is **admin-only** on `PATCH /api/channels/:id` (an owner sending
+  it gets 403 `admin_required`) and can only **shorten** retention: the reaper applies
+  `min(channelTtl, nodeTtl)`, so no channel outlives the node-wide TTL; with the node TTL off a channel TTL
+  stands alone.
 - **Kill switch** (off by default; `killSwitch.enabled`): `executeKillSwitch()` deletes avatars,
   invalidates sessions, broadcasts `wipe` (clients purge IndexedDB/localStorage/SW caches and show a
   neutral disconnected screen), closes sockets, and re-seeds defaults. Config survives. The data
@@ -288,7 +293,18 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   `.loam-recovery-*` snapshots (a start-fresh's moved-aside DB + media): fail-closed in the encrypted
   branches, best-effort (warns on a survivor) in the plaintext one. A client that was offline during the
   wipe purges its cache on reconnect, because its server-confirmed identity changed (`lib/identity.ts`).
-  Optional unauthenticated panic token (`killSwitch.panicToken`) fires it via `POST /api/panic`.
+  Optional unauthenticated panic token (`killSwitch.panicToken`) fires it via `POST /api/panic`. Everything
+  after the synchronous 503 gate runs in one try/catch: a throw (`wipeAll`, the reopen, `loadData`) goes through
+  `lockDownAndReportIncomplete` and answers `{ complete: false }` (503, `wipe` broadcast, node locked), never a
+  500. Every branch (plaintext and ephemeral too) writes the wipe journal (`.loam-wipe-phase`: intent + sanitized
+  config) before its first destructive step, the in-process branches clear it after `loadData()`, and the boot-time
+  resume (`resumeWipePhaseThenOpenStore`) finishes an interrupted wipe (delete DB files + media, restore
+  config.json, fresh store) before serving, in-process on any node without a fixed device key, so a restart
+  never serves pre-wipe data. A hooked fixed-key reset that had to strip `sync.token` from the restart config also sets
+  `sync.enabled: false` and leaves a `.loam-sync-off-after-reset` note the next boot logs and consumes. Both
+  entry points treat an undeclared real `LOAM_DB_KEY` as `passphrase` (`resolveDbEncryptionMode`), so
+  `loamnet --encrypt` takes the journaled fixed-key branch; only a direct `buildApp` embedder with a key and no
+  mode reaches the legacy branch.
 - **Broadcast filtering**: `broadcast()` sends to all sockets but `socketCanReceiveEvent` restricts DM
   and DM-reaction events to their participants and **everything about a private channel (the channel
   upsert, its messages, and reactions on them) to its members** (`messageAudienceUserIds` resolves the
@@ -376,6 +392,17 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   a strict CSP (`default-src 'self'`, `frame-ancestors 'none'`, no external origins) on the app shell
   (non-`/api/` navigations). No HSTS — LOAM serves plain HTTP on the LAN by design. The session
   cookie's `Secure` flag tracks the real request protocol (`x-forwarded-proto`/TLS), not `NODE_ENV`.
+  **Host allowlist** (DNS rebinding): the global `onRequest` hook serves a request only when its `Host`
+  (port stripped, IPv6 brackets handled) is an IP literal, `localhost`/`*.localhost`, an mDNS `*.local`
+  name, or the advertised join host (`currentJoinHost()`, so `LOAM_JOIN_HOST`/the TUI's pinned address);
+  anything else gets 421 `host_not_allowed` before any identity is minted, and the request log replaces a
+  non-allowlisted hostname with `[hostname]`. The `/ws` upgrade additionally refuses (403, before the
+  upgrade) an `Origin` that isn't `http:`/`https:` on the request's `Host` name and on either the `Host`'s
+  port or the advertised `clientPort` (a left-out port is the scheme's default; `originMatchesHost`), since
+  cookies are shared across the ports of one host; `pnpm dev` passes because Vite's `/ws` proxy keeps the
+  browser's `Host` (no `changeOrigin`). A client that sends no Origin is judged by its credentials alone.
+  `@fastify/websocket` registers before these global hooks, so an upgrade they refuse (421/503) still has
+  its socket closed.
 - **Transport encryption** (docs/08, `security.transportEncryption` — `optional` **default (secure by
   default)** / `required`; `off` is no longer operator-settable, see below):
   QR-bootstrapped app-layer session encryption over plain HTTP (no WebCrypto/TLS in the
@@ -471,7 +498,12 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
 - **Report queue**: `GET /api/moderation/reports` returns `ModerationReport`s: open ones, plus `escalated` ones for
   admins; a message report carries the reported message read live (`reportedMessage`), or `messageGone`.
   "Escalate" sets `status: "escalated"` (admins only can then resolve). Moderators/admins get a content-free
-  `reportsChanged` socket event (never broadcast) that drives the People badge.
+  `reportsChanged` socket event (never broadcast) that drives the People badge. `POST /api/reports` keeps ONE
+  open report per (reporter, target): a repeat updates its reason/note (200), a new one is 201; at most 20 open
+  reports per reporter and 2 000 node-wide (429 `too_many_attempts`). The `reports` table carries indexed
+  `target_id` + `reporter_user_id` columns (migrated and backfilled from the JSON on older DBs), so
+  `reportVisibleTo` is a targeted query and the queue is one pass over a `Map` of messages; a reported body
+  longer than `REPORTED_MESSAGE_BODY_MAX_LENGTH` is cut with `truncated: true` rather than dropped.
 - **User blocking** (docs/30 B3): a member's private block list in the `user_blocks` DAL table (write-
   through, read straight from the DB; `deleteUser` drops rows on both sides, `wipeAll`/kill switch clears
   it; never synced, broadcast or put on a user record; `UserBlockListSchema { blockedUserIds }`). Only a
@@ -554,9 +586,15 @@ kill switch. See `docs/09-security-profiles.md`.
 - **Markdown**: `src/lib/markdown.ts` renders with `snarkdown`, escapes first, sanitises with
   `DOMPurify`, hardens links (safe protocols only, `rel=noreferrer target=_blank`) and strips `#k=`
   fragments. Any new rendered-HTML path must go through this — never inject raw message HTML.
-- **PWA**: `public/service-worker.js` (cache `loam-poc-v2`) caches the app shell — **network-first for
-  navigations** (so a deploy isn't masked by a stale `index.html`), cache-first for immutable hashed
-  assets; never touches `/api` or `/ws`. Registered only in PROD (`main.tsx`).
+- **PWA**: `src/service-worker.ts` is bundled by the `loam:service-worker` Vite plugin into
+  `dist/service-worker.js` AFTER the app, with the build's file list and a content hash defined in (cache
+  `loam-shell-<hash>`; every other cache is dropped on activate, so a deploy refreshes the unhashed icons and
+  manifest and evicts old bundles). Every navigation is answered from ONE request for `/` (network-first,
+  cached under `/` only, so a conversation id or search term in the address never reaches the wire or the
+  cache); build files are precached on install and served cache-first; `/api` and `/ws` are never touched.
+  The pure decisions live in `src/lib/service-worker-routing.ts` (tested). Registered only in PROD
+  (`main.tsx`). `SearchView` keeps the search term out of the address (a `/search?q=` deep link is read once,
+  then replaced).
 - **Avatar upload editor**: `components/AvatarImageEditor.tsx` — canvas crop/zoom/rotate with pointer
   gestures, re-encodes to webp/png under 128KB before upload.
 
@@ -605,7 +643,14 @@ kill switch. See `docs/09-security-profiles.md`.
   pre-token behaviour). Sync pulls ride the same transport encryption as clients (docs/08, docs/11).
 - **Anonymous-user creation is bounded**: `getSessionUserId` mints a new identity only within a per-IP
   budget (`maxNewIdentitiesPerWindow`, default 60 / 10 min; `AppOptions`), throwing a `429` past it —
-  a client that keeps its session cookie never touches it, and on a LAN each device has its own IP.
+  a client that keeps its session cookie never touches it, and on a LAN each device has its own IP. **Ghost
+  identities are reaped**: `reapUnusedIdentities()` (on the 30 s reaper tick) deletes a human user who never
+  agreed to the rules, holds no role or moderation state, is not `pending` (a greeter's queue entry), has no
+  open or escalated report filed, authored or received no message, owns or belongs to no channel, is on no
+  socket, and is older than `unusedIdentityMaxAgeMs` (24 h; `AppOptions`), dropping its sessions/tokens, mesh
+  keypair and (via `store.deleteUser`) its block-list rows, join requests and mesh address book in one
+  transaction; nothing is broadcast (clients drop it on the next `reconcileRoster`). A no-op when
+  `requireRulesAcceptance` is off.
 - **Release signing**: `pnpm --filter app keystore` generates a real signing key;
   `plugins/with-release-signing.js` injects the release `signingConfig` at prebuild **only when
   `keystore.properties` exists**. Without it, `pnpm --filter app aab` refuses to build (sets

@@ -179,6 +179,9 @@ function keyStorageOrigin(): string {
   }
 }
 
+/** The join QR's key fragment, exactly: `#k=` + one base64url key and nothing else. */
+const HASH_KEY_PATTERN = /^#k=([A-Za-z0-9_-]+)$/;
+
 /**
  * Read a `#k=<b64url>` fragment left by the join QR, cache it for this origin, and strip it from the
  * visible URL/history (the fragment is never sent to the server, but it's still a secret-shaped value
@@ -186,7 +189,7 @@ function keyStorageOrigin(): string {
  * acts when the hash is actually present.
  */
 function consumeHashKey(): string | undefined {
-  const match = /^#k=([A-Za-z0-9_-]+)$/.exec(window.location.hash);
+  const match = HASH_KEY_PATTERN.exec(window.location.hash);
 
   if (!match) {
     return undefined;
@@ -520,6 +523,16 @@ async function observeNodeHostKey(): Promise<void> {
  */
 let startupHashKey: string | undefined;
 
+/**
+ * Whether this page load began with a host key from an out-of-band source: a syntactically valid `#k=`
+ * fragment (a scanned join QR, whether it was then adopted or parked as a pending change), or the Android
+ * launcher's injected key in the host's own WebView. Recorded by {@link captureJoinKey}, which strips the
+ * fragment from the URL, so this is the only way the app can learn afterwards that a QR was scanned
+ * (the wipe gate used to re-read the hash after it was gone, so a wiped device
+ * could never rejoin by rescanning).
+ */
+let startupJoinKeyPresent = false;
+
 /** Adopt the Android launcher's key, if this is the host's own WebView (see `ensureSession`). */
 function adoptLauncherKey(): void {
   const launcherKey = launcherHostKey();
@@ -536,7 +549,20 @@ function adoptLauncherKey(): void {
  */
 export function captureJoinKey(): void {
   adoptLauncherKey();
+  // Remember the scan BEFORE `consumeHashKey` strips the fragment (and whether or not it adopts the key: a
+  // `#k=` that differs from a held pin is parked, yet it is still the user's explicit act of scanning).
+  startupJoinKeyPresent = HASH_KEY_PATTERN.test(window.location.hash) || launcherHostKey() !== undefined;
   startupHashKey = consumeHashKey();
+}
+
+/**
+ * Whether a host key arrived out-of-band at THIS page load (see `startupJoinKeyPresent`): a scanned join
+ * QR's `#k=`, or the launcher's injected key inside the Android host's own WebView, which is as deliberate
+ * as a scan (the host has no QR to rescan). A wipe tombstone treats this as a rejoin attempt and lets boot
+ * proceed to the handshake; the tombstone itself is lifted only once that handshake succeeds.
+ */
+export function joinKeyPresentAtStartup(): boolean {
+  return startupJoinKeyPresent;
 }
 
 function launcherHostKey(): string | undefined {
@@ -1462,6 +1488,8 @@ export function resetTransportStateForTests(): void {
   memoryPinBroken = false;
   pendingHostKey = undefined;
   observedHostKey = undefined;
+  startupHashKey = undefined;
+  startupJoinKeyPresent = false;
   reHandshakeInFlight = undefined;
   mintSuppressed = false;
   wipeTokenSnapshot = undefined;

@@ -6,7 +6,9 @@ import { openTransport, sealTransport } from "@loam/crypto";
 import type { StreamEvent } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
+import { originMatchesHost } from "./transport-server.js";
 import type { ClientEvent, SocketClient, SocketSession } from "./types.js";
+import type { FastifyReply, FastifyRequest } from "fastify";
 
 /** Direction-separated AADs for the reflection-safe WS key-confirmation (docs/20 §7): the challenge
  * and the proof seal under DIFFERENT constants, so a keyless attacker can't reflect the server's
@@ -294,7 +296,25 @@ export function createRealtime(ctx: AppContext) {
 
   /** Register the `/ws` route (after the websocket plugin is registered). */
   function registerWebSocketRoute(): void {
-    ctx.server.get("/ws", { websocket: true }, (connection: SocketClient, request) => {
+    // Origin check: a browser always sends the page's `Origin` on a WebSocket, so a page
+    // served by another origin (a DNS-rebinding page, any cross-site page) is refused here, BEFORE the
+    // upgrade (a hook's reply aborts it) and before any session work, however valid its cookie. The Origin
+    // must be `http:`/`https:` on the host the request was addressed to, and on its port or the advertised
+    // client port (`originMatchesHost`): cookies are shared across the ports of one host, so another web app
+    // on the same machine must not ride a member's cookie. The node's own pages pass: the app shell on the
+    // listen port, the Android host's WebView (`http://localhost:3000` against `Host: localhost:3000`), and
+    // the `pnpm dev` Vite page on :3000, whose `/ws` proxy keeps the browser's `Host: …:3000` (no
+    // `changeOrigin`). A non-browser client that sends no Origin is judged by its credentials alone, as before.
+    const refuseCrossOriginUpgrade = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+      const origin = request.headers.origin;
+      if (
+        origin !== undefined &&
+        !originMatchesHost(origin, request.headers.host, { clientPort: ctx.clientPort, protocol: request.protocol })
+      ) {
+        return reply.code(403).send(errorBody("Cross-origin websocket refused"));
+      }
+    };
+    ctx.server.get("/ws", { websocket: true, onRequest: refuseCrossOriginUpgrade }, (connection: SocketClient, request) => {
       const mode = ctx.effectiveTransportEncryption();
       const transportSession = mode === "off" ? undefined : ctx.wsTransportSession(request.url);
       const transportKey = transportSession?.key;

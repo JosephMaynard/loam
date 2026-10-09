@@ -291,7 +291,7 @@ export const en = {
   "admin.meshHeading": "Opportunistic mesh",
   "admin.meshEnable": "Enable opportunistic mesh delivery",
   "admin.meshNote":
-    "Sealed-mailbox delivery that lets a message hop node-to-node toward an offline recipient (docs/16). Off by default.",
+    "Sealed-mailbox delivery that lets a message hop node-to-node toward an offline recipient. Off by default.",
   "admin.meshRelay": "Relay other people's sealed mail onward",
   "admin.meshLifetimeLabel": "Message lifetime (hours)",
   "admin.meshLifetimeNote":
@@ -304,6 +304,11 @@ export const en = {
   "admin.strategy": "Strategy",
   "admin.newPassphrase": "New admin passphrase (min 8 chars; leave blank to keep the current one)",
   "admin.bootstrapNote": "The setup-code strategy prints a one-time claim code in the server logs at startup.",
+  "admin.bootstrapOption.firstUser": "First person to join",
+  "admin.bootstrapOption.setupCode": "One-time setup code",
+  "admin.bootstrapOption.passphrase": "Passphrase",
+  "admin.bootstrapOption.hostDevice": "This device (the host)",
+  "admin.bootstrapOption.none": "Nobody",
   "admin.saveConfig": "Save node config",
   "admin.saved": "Saved. Connected clients pick the change up live.",
   // Add-a-peer control.
@@ -429,6 +434,7 @@ export const en = {
   "nodeLink.again": "New code",
   "admin.peerLinking": "linking…",
   "admin.peerLinkRefused": "Its link code was refused (expired or already used). Ask that network for a new one.",
+  "admin.peerKeyChanged": "This peer's key changed since this node started. Its public channels are still pulled, but the sync token is withheld until this node restarts or the key is pinned.",
 
   // Unread badge.
   "unreadBadge.label": "{n} unread",
@@ -447,6 +453,7 @@ export const en = {
 
   // App-level error fallbacks.
   "app.userUnrecognised": "The server returned an unrecognised user payload.",
+  "app.configUnrecognised": "The server returned an unrecognised configuration payload.",
   "app.deleteError": "Unable to delete the message.",
   "app.editError": "Unable to edit the message.",
   "app.sendError": "Unable to send the message.",
@@ -467,6 +474,8 @@ export const en = {
   "gate.pendingBody":
     "Waiting for someone on this node to let you in. This screen updates the moment you're approved.",
   "gate.inviteRefused": "That invite code has expired. Scan the code on the host's screen again, or wait here to be let in.",
+  // A "link another node" QR opened in a browser (lib/link-code-fragment.ts): the key joined, the code did nothing.
+  "join.linkCodeOpened": "That QR code links another LOAM node to this network. It is not a join code, so nothing was linked. You have joined as a member.",
   "gate.connection": "Connection: {status}",
   // Shown when this node requires transport encryption (docs/08) but no host key was ever delivered
   // by a scanned join QR — there is no safe way to connect without one.
@@ -476,6 +485,7 @@ export const en = {
 
   // Confirmation dialogs.
   "confirm.deleteMessage": "Delete this message? This can't be undone.",
+  "confirm.deleteMessageTitle": "Delete message",
 
   // Server error codes (localized from the {error, code} envelope; English mirrors the server text).
   "error.admin_required": "Admin access required",
@@ -483,7 +493,7 @@ export const en = {
   "error.admin_user_edit_disabled": "Admin user editing is disabled on this LOAM node",
   "error.promote_requires_active": "Approve or unban this user before promoting them",
   "error.attachment_not_found": "Attachment does not exist",
-  "error.attachment_too_large": "Attachment image must be 256KB or smaller",
+  "error.attachment_too_large": "Attachment is empty or too large (pictures up to 256 KB, other files up to 1 MB)",
   "error.attachment_type_mismatch": "Attachment image type does not match the uploaded data",
   "error.attachments_disabled": "Attachments are disabled on this LOAM node",
   "error.avatar_not_found": "Avatar image does not exist",
@@ -673,7 +683,7 @@ export const en = {
   "settings.blockedNote": "People you block can't send you direct messages, and their channel messages are hidden from you. LOAM doesn't notify them.",
   "settings.blockedEmpty": "You haven't blocked anyone.",
   "settings.privacyPolicy": "Privacy policy",
-  "settings.reportProblems": "LOAM has no analytics or crash reporting, so we only hear about problems you tell us about. To report one, or to find out more about LOAM, visit our website or email us:",
+  "settings.reportProblems": "LOAM has no analytics or crash reporting, so we only hear about problems you tell us about. To report one, to ask for a feature, or to find out more about LOAM, visit our website or email us:",
   "welcome.title": "Welcome to {network}",
   "welcome.nameLabel": "Your name on this network",
   "welcome.tryAnother": "Try another name",
@@ -709,6 +719,17 @@ export const en = {
   "error.rules_not_accepted": "Agree to the network's rules before posting",
   "error.rules_version_mismatch": "These rules have changed. Reload to read the current ones",
   "error.reroll_not_allowed": "A new name is only available before you first join in",
+  "error.host_not_allowed": "This address isn't served by this LOAM node",
+  "error.channel_delete_admin_required": "This channel has messages from other people: only an admin can delete it",
+  "error.location_disabled": "Location sharing is disabled on this LOAM node",
+  "error.timed_out": "A moderator has timed you out, so you can't post right now",
+  "error.node_resetting": "This network is resetting. Try again in a moment.",
+  "error.node_reset": "This network was reset. Reload to join it again.",
+  "error.wipe_incomplete": "The Emergency Reset could not finish, so the network is locked. Restart it to try again.",
+  "error.wipe_unrecorded": "The Emergency Reset could not be recorded and did not finish. Restart the network and run the Emergency Reset again.",
+  "error.mesh_identity_missing": "You have no mesh identity on this network yet",
+  "error.mesh_card_invalid": "That mesh identity card is not valid",
+  "error.encrypted_session_required": "This network only accepts encrypted connections. Scan its join QR code to connect.",
   "error.dm_unavailable": "Direct messages to this person aren't available",
   "error.dm_blocked_by_you": "You blocked this person. Unblock them to send a message",
   "error.channel_member_unavailable": "This person isn't available for this channel",
@@ -719,13 +740,15 @@ export const en = {
   "message.actionsAt": "Message actions, sent {time}",
   "message.reactWith": "React with {emoji}",
   "message.moreActions": "More actions",
-  "message.moreReactions": "More reactions",
   "message.otherEmoji": "Other emoji",
   "message.emojiFieldPlaceholder": "Pick an emoji",
   "message.emojiFieldHint": "Use your keyboard's emoji button, or paste an emoji.",
   "message.emojiFieldRefused": "Only an emoji can be used as a reaction.",
   "message.copyText": "Copy text",
   "messageList.newMessages": "New messages",
+  // Screen-reader announcement of messages arriving in the open conversation (one per quiet window).
+  "liveRegion.newMessage": "New message from {name}",
+  "liveRegion.newMessages": { one: "{n} new message", other: "{n} new messages" },
   "thread.inChannel": "in #{name}",
   "report.done": "Done",
   "settings.title": "Settings",

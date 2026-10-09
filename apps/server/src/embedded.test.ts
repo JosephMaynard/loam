@@ -12,6 +12,7 @@ import {
   parseDbDriver,
   parseDbEncryptionMode,
   parsePort,
+  resolveDbEncryptionMode,
   resolveEphemeralDbKey,
   startEmbeddedServer,
 } from "./embedded.js";
@@ -95,6 +96,22 @@ describe("resolveEphemeralDbKey (P1-3, Sol round 3)", () => {
 
   it("is false when LOAM_DB_KEY is unset (unencrypted boot)", () => {
     expect(resolveEphemeralDbKey(undefined)).toBe(false);
+  });
+});
+
+describe("resolveDbEncryptionMode", () => {
+  it("keeps a declared mode whatever the key looks like", () => {
+    expect(resolveDbEncryptionMode("persistent", "some real key")).toBe("persistent");
+    expect(resolveDbEncryptionMode("off", undefined)).toBe("off");
+    expect(resolveDbEncryptionMode("ephemeral", "ephemeral")).toBe("ephemeral");
+  });
+
+  it("infers the mode from the key when none is declared: the literal is ephemeral, any other key is a fixed passphrase key, no key is no mode", () => {
+    expect(resolveDbEncryptionMode(undefined, "ephemeral")).toBe("ephemeral");
+    // The `loamnet --encrypt` case: a real key and no LOAM_DB_ENCRYPTION_MODE must take the journaled fixed-key wipe.
+    expect(resolveDbEncryptionMode(undefined, "correct horse battery staple")).toBe("passphrase");
+    expect(resolveDbEncryptionMode(undefined, undefined)).toBeUndefined();
+    expect(resolveDbEncryptionMode(undefined, "")).toBeUndefined();
   });
 });
 

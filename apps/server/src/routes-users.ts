@@ -2,11 +2,16 @@
 // upload/serve. Extracted verbatim from app.ts (2026-09-04 split) over the shared AppContext.
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { AttachmentUploadRequestSchema, MEMBER_RULES_VERSION, RulesAcceptRequestSchema, AvatarImageUploadRequestSchema, InviteRedeemRequestSchema, MODERATION_TIMEOUT_MAX_MS, type MessageAttachment, MessageRemoveRequestSchema, MessageSchema, ModerationUpdateRequestSchema, type Report, type ModerationReport, ReportCreateRequestSchema, ReportResolveRequestSchema, ReportSchema, type ReportedMessage, RolesUpdateRequestSchema, TypingRequestSchema, type User, type UserBlockList, UserSchema, UserUpdateRequestSchema } from "@loam/schema";
+import { AttachmentUploadRequestSchema, MEMBER_RULES_VERSION, RulesAcceptRequestSchema, AvatarImageUploadRequestSchema, InviteRedeemRequestSchema, MODERATION_TIMEOUT_MAX_MS, type Message, type MessageAttachment, MessageRemoveRequestSchema, MessageSchema, ModerationUpdateRequestSchema, type Report, type ModerationReport, REPORTED_MESSAGE_BODY_MAX_LENGTH, ReportCreateRequestSchema, ReportResolveRequestSchema, ReportSchema, type ReportedMessage, RolesUpdateRequestSchema, TypingRequestSchema, type User, type UserBlockList, UserSchema, UserUpdateRequestSchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
 import { newMessageId } from "./ids.js";
-import { attachmentFileMaxBytes, attachmentFileName, attachmentMaxBytes, avatarImageHasExpectedSignature, isAvatarImageId, isImageAttachmentMime, newAttachmentId, newAvatarImageId, parseAttachmentFileName, parseAvatarImageId, sanitizeAttachmentName } from "./media.js";
+import { attachmentContentDisposition, attachmentFileMaxBytes, attachmentFileName, attachmentMaxBytes, avatarImageHasExpectedSignature, isAvatarImageId, isImageAttachmentMime, newAttachmentId, newAvatarImageId, parseAttachmentFileName, parseAvatarImageId, sanitizeAttachmentName } from "./media.js";
+
+/** The most still-open reports one person may have filed; past it, new reports wait for the queue to clear. */
+export const OPEN_REPORTS_PER_REPORTER_MAX = 20;
+/** The most still-open reports the node keeps at once (a bound on the moderators' queue and the table). */
+export const OPEN_REPORTS_MAX = 2_000;
 
 /** Register user, profile/avatar, roles, moderation/report, join-approval, typing, and attachment routes. */
 export function registerUserRoutes(ctx: AppContext): void {
@@ -264,7 +269,8 @@ export function registerUserRoutes(ctx: AppContext): void {
 
     const user = ctx.data.users.find((candidate) => candidate.id === request.params.userId);
 
-    if (!user) {
+    // Roles are for people: the assistant bot and system records answer like an unknown user.
+    if (!user || user.type !== "human") {
       return reply.code(404).send(errorBody("User does not exist"));
     }
 
@@ -309,7 +315,8 @@ export function registerUserRoutes(ctx: AppContext): void {
 
     const user = ctx.data.users.find((candidate) => candidate.id === request.params.userId);
 
-    if (!user) {
+    // Moderation is for people: the assistant bot and system records answer like an unknown user.
+    if (!user || user.type !== "human") {
       return reply.code(404).send(errorBody("User does not exist"));
     }
 
@@ -403,6 +410,28 @@ export function registerUserRoutes(ctx: AppContext): void {
         }
       }
 
+      // One open report per reporter and target: filing again updates the reason and note on the existing
+      // one instead of adding a row, so a repeated tap or a flood against one message can't pile up the queue.
+      const existing = ctx.store
+        .loadOpenReportsForTarget(targetId)
+        .find((report) => report.reporterUserId === currentUser.id && report.targetType === targetType);
+
+      if (existing) {
+        const updated = ReportSchema.parse({ ...existing, reason, note: note || undefined });
+        ctx.store.upsertReport(updated);
+        notifyModerators(ctx);
+        return reply.code(200).send({ ok: true, id: updated.id });
+      }
+
+      // Bounded in two ways: how many a single person may have open (a flood from one account), and how many
+      // the node keeps at once (a flood from many accounts on a busy node). Both clear as moderators resolve.
+      if (
+        ctx.store.countOpenReports(currentUser.id) >= OPEN_REPORTS_PER_REPORTER_MAX ||
+        ctx.store.countOpenReports() >= OPEN_REPORTS_MAX
+      ) {
+        return reply.code(429).send(errorBody("Too many attempts"));
+      }
+
       const report = ReportSchema.parse({
         id: newMessageId("rpt"),
         targetType,
@@ -417,7 +446,7 @@ export function registerUserRoutes(ctx: AppContext): void {
       // No broadcast and no reporter detail in the response — reports are moderator-private. Moderators only
       // get a content-free nudge so their queue count updates.
       notifyModerators(ctx);
-      return reply.code(201).send({ ok: true });
+      return reply.code(201).send({ ok: true, id: report.id });
     },
   );
 
@@ -432,6 +461,8 @@ export function registerUserRoutes(ctx: AppContext): void {
       return reply.code(403).send(errorBody("Moderator access required"));
     }
 
+    // Index the messages once per read, so a queue of N reports costs one pass over the history, not N.
+    const messagesById = new Map(ctx.data.messages.map((message) => [message.id, message]));
     return ctx.store
       .loadOpenReports()
       .filter((report) => report.status === "open" || currentUser.isAdmin)
@@ -439,7 +470,7 @@ export function registerUserRoutes(ctx: AppContext): void {
         if (report.targetType !== "message") {
           return report;
         }
-        const message = reportedMessage(ctx, report.targetId);
+        const message = reportedMessage(ctx, messagesById, report.targetId);
         return message ? { ...report, message } : { ...report, messageGone: true };
       });
   });
@@ -968,17 +999,10 @@ export function registerUserRoutes(ctx: AppContext): void {
           owningMessage && "attachments" in owningMessage
             ? owningMessage.attachments?.find((entry) => entry.id === attachment.id)
             : undefined;
-        const downloadName = sanitizeAttachmentName(record?.name);
-        // RFC 6266: an ASCII-folded `filename=` (a header value may not carry a byte > 0xFF, which would
-        // make Node throw ERR_INVALID_CHAR → 500 for any CJK/emoji/Cyrillic name) PLUS a `filename*` that
-        // percent-encodes the real UTF-8 name, so modern browsers still get the correct international name.
-        const asciiName = downloadName.replace(/[^\x20-\x7e]/g, "_");
+        // RFC 6266 `filename=` + `filename*=` from the sanitised stored name; never throws (media.ts).
         return reply
           .type("application/octet-stream")
-          .header(
-            "content-disposition",
-            `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(downloadName)}`,
-          )
+          .header("content-disposition", attachmentContentDisposition(record?.name))
           .send(fileBytes);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -1046,13 +1070,12 @@ function notifyModerators(ctx: AppContext): void {
  * no longer exists: deleted by its author, or expired under the network's retention setting. Nothing is kept
  * with the report itself, so reporting never outlives the network's own deletion rules.
  */
-function reportedMessage(ctx: AppContext, messageId: string): ReportedMessage | undefined {
-  const message = ctx.data.messages.find((candidate) => candidate.id === messageId);
+function reportedMessage(ctx: AppContext, messagesById: ReadonlyMap<string, Message>, messageId: string): ReportedMessage | undefined {
+  const message = messagesById.get(messageId);
   if (!message || message.type === "sealed") {
     return undefined;
   }
-  const placed =
-    message.type === "reaction" ? ctx.data.messages.find((candidate) => candidate.id === message.targetMessageId) : message;
+  const placed = message.type === "reaction" ? messagesById.get(message.targetMessageId) : message;
   if (!placed || placed.type === "sealed" || placed.type === "reaction") {
     return undefined;
   }
@@ -1065,7 +1088,7 @@ function reportedMessage(ctx: AppContext, messageId: string): ReportedMessage | 
   }
   return {
     authorId: message.authorId,
-    body: message.type === "reaction" ? "" : message.body,
+    ...reportedMessageBody(message.type === "reaction" ? "" : message.body),
     attachments: message.type === "reaction" ? [] : (message.attachments ?? []).slice(0, 8),
     ...(message.type === "reaction" ? { reaction: message.reaction } : {}),
     where,
@@ -1075,19 +1098,26 @@ function reportedMessage(ctx: AppContext, messageId: string): ReportedMessage | 
 }
 
 /**
+ * The text of a reported message as the queue carries it: cut at the schema's cap and flagged `truncated`
+ * rather than failing the whole queue response over one long body (the stored message is untouched).
+ */
+export function reportedMessageBody(body: string): Pick<ReportedMessage, "body" | "truncated"> {
+  return body.length > REPORTED_MESSAGE_BODY_MAX_LENGTH
+    ? { body: body.slice(0, REPORTED_MESSAGE_BODY_MAX_LENGTH), truncated: true }
+    : { body };
+}
+
+/**
  * Whether `user` has a report about `messageId` in their moderation queue right now: an open report for any
  * moderator or admin, an escalated one for an admin (the queue's own rule in `GET /api/moderation/reports`).
+ * Reads only that message's reports (indexed), not the whole table: this runs on every private attachment a
+ * moderator opens.
  */
 function reportVisibleTo(ctx: AppContext, user: User, messageId: string): boolean {
   if (!ctx.canModerate(user)) {
     return false;
   }
   return ctx.store
-    .loadOpenReports()
-    .some(
-      (report) =>
-        report.targetType === "message" &&
-        report.targetId === messageId &&
-        (report.status === "open" || user.isAdmin),
-    );
+    .loadOpenReportsForTarget(messageId)
+    .some((report) => report.targetType === "message" && (report.status === "open" || user.isAdmin));
 }

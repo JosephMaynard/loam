@@ -17,6 +17,8 @@ export const MAX_CONCURRENT_ASSISTANT_REPLIES = 2;
 
 /** The body an assistant reply is left with when it was cut off (crash/restart mid-stream) before any text. */
 export const INTERRUPTED_ASSISTANT_BODY = "(No response: the assistant was interrupted.)";
+/** What a DM shows when the model backend fails; the backend's own words go to the log, never to a member. */
+export const ASSISTANT_FAILURE_BODY = "(The assistant could not answer this time. Please try again later.)";
 
 /** Build the LLM layer over the runtime view: bot user, backend selection, and the streaming assistant reply. */
 export function createLlmLayer(rt: Runtime) {
@@ -483,10 +485,11 @@ export function createLlmLayer(rt: Runtime) {
         return;
       }
 
-      const message = error instanceof Error ? error.message : "Unknown LLM error.";
-      rt.updateMessage(assistantMessage, `${body}\n\nLLM error: ${message}`.trim(), false);
-      rt.broadcastStreamEvent(audience, { type: "error", messageId: assistantMessage.id, error: message });
-      rt.log.error(error);
+      // The backend's error text (a URL, a model name, an HTTP status, a stack) is operator detail: log it and
+      // show the member one plain sentence. Any partial reply already streamed stays above it.
+      rt.log.error(error, "LLM backend error while answering a direct message");
+      rt.updateMessage(assistantMessage, `${body}\n\n${ASSISTANT_FAILURE_BODY}`.trim(), false);
+      rt.broadcastStreamEvent(audience, { type: "error", messageId: assistantMessage.id, error: ASSISTANT_FAILURE_BODY });
     }
   }
 

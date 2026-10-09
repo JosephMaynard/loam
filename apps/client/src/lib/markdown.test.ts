@@ -69,6 +69,21 @@ describe("renderMarkdown", () => {
     expect(html).toContain("&gt;");
   });
 
+  it("drops the fence language from a code block, so a post can't borrow the app's own CSS classes", () => {
+    const html = renderMarkdown("```dialog\nlooks official\n```");
+    expect(html).toContain("<pre");
+    expect(html).toContain("looks official");
+    expect(html).not.toMatch(/class=/i);
+    expect(html).not.toContain("dialog");
+  });
+
+  it("keeps no id or style attribute either", () => {
+    // snarkdown never emits these itself, but the sanitizer is the only line of defence should it ever do so.
+    const html = renderMarkdown("```btn\nx\n```");
+    expect(html).not.toMatch(/\sid=/i);
+    expect(html).not.toMatch(/style=/i);
+  });
+
   describe("image src XSS vectors", () => {
     // A dangerous `src` is one that can execute script when the browser loads
     // it as an image: a `javascript:`/`vbscript:` URL (in any case/whitespace

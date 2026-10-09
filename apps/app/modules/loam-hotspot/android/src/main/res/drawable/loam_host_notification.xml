@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The foreground host service's status-bar icon (LoamHostService.setSmallIcon): the LOAM squircle as a
+     ring with a bold L inside, white on transparent, as Android's small-icon guidelines want. The launcher
+     icon is a full-colour adaptive icon and would be drawn as an alpha blob here. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+  <path
+      android:strokeColor="#FFFFFFFF"
+      android:strokeWidth="96"
+      android:pathData="M980,512c0,375.9-92.1,468-468,468S44,887.9,44,512,136.1,44,512,44s468,92.1,468,468Z" />
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M380,296h108v326h186v106h-294Z" />
+</vector>

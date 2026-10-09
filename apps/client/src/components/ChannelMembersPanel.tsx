@@ -5,6 +5,7 @@ import { errorText, t } from "../i18n";
 import { fetchJson, parseUserList, requestChannel, requestJson, REQUEST_TIMEOUT_MS } from "../lib/api";
 import { encryptedFetch } from "../lib/transport";
 import { Avatar } from "./Avatar";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 interface ChannelMembersPanelProps {
   channel: Channel;
@@ -33,6 +34,10 @@ export function ChannelMembersPanel({
   const [error, setError] = useState<string>();
   const [inviteId, setInviteId] = useState("");
   const [joinRequests, setJoinRequests] = useState<User[]>([]);
+  // Handing over ownership and leaving both interrupt with a ConfirmDialog (alertdialog), like every other
+  // consequential action in the app: the member a transfer is pending for, and whether leaving is.
+  const [pendingTransferId, setPendingTransferId] = useState<string>();
+  const [confirmingLeave, setConfirmingLeave] = useState(false);
   const canManage = currentUser.isAdmin || channel.ownerUserId === currentUser.id;
   // Roster GROWTH (invite / transfer / approve requests / the join-request toggle) is frozen while
   // the channel is archived — the server 403s these; removals and leaving stay available.
@@ -164,11 +169,8 @@ export function ChannelMembersPanel({
     }
   }
 
+  /** Hand ownership to `userId`; called once the ConfirmDialog has been accepted. */
   async function transfer(userId: string): Promise<void> {
-    if (!window.confirm(t("members.transferConfirm"))) {
-      return;
-    }
-
     setBusy(true);
     setError(undefined);
 
@@ -186,12 +188,9 @@ export function ChannelMembersPanel({
     }
   }
 
+  /** Remove `userId` from the roster (yourself = leave, which the ConfirmDialog has confirmed by now). */
   async function remove(userId: string): Promise<void> {
     const leaving = userId === currentUser.id;
-
-    if (leaving && !window.confirm(t("members.leaveConfirm"))) {
-      return;
-    }
 
     setBusy(true);
     setError(undefined);
@@ -251,9 +250,9 @@ export function ChannelMembersPanel({
                 <div className="member-actions">
                   {canGrow ? (
                     <button
-                      className="btn btn-secondary btn-sm"
+                      className="btn btn-secondary btn-sm member-transfer"
                       disabled={busy}
-                      onClick={() => void transfer(member.id)}
+                      onClick={() => setPendingTransferId(member.id)}
                       type="button"
                     >
                       {t("members.makeOwner")}
@@ -359,11 +358,38 @@ export function ChannelMembersPanel({
         <button
           className="btn btn-danger btn-block members-leave"
           disabled={busy}
-          onClick={() => void remove(currentUser.id)}
+          onClick={() => setConfirmingLeave(true)}
           type="button"
         >
           {t("members.leave")}
         </button>
+      ) : null}
+      {pendingTransferId !== undefined ? (
+        <ConfirmDialog
+          confirmLabel={t("members.makeOwner")}
+          onCancel={() => setPendingTransferId(undefined)}
+          onConfirm={() => {
+            const userId = pendingTransferId;
+            setPendingTransferId(undefined);
+            void transfer(userId);
+          }}
+          title={t("members.makeOwner")}
+        >
+          <p>{t("members.transferConfirm")}</p>
+        </ConfirmDialog>
+      ) : null}
+      {confirmingLeave ? (
+        <ConfirmDialog
+          confirmLabel={t("members.leave")}
+          onCancel={() => setConfirmingLeave(false)}
+          onConfirm={() => {
+            setConfirmingLeave(false);
+            void remove(currentUser.id);
+          }}
+          title={t("members.leave")}
+        >
+          <p>{t("members.leaveConfirm")}</p>
+        </ConfirmDialog>
       ) : null}
     </div>
   );

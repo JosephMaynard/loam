@@ -167,6 +167,7 @@ export function SyncStatusPanel({ onReport }: { onReport?: (report: SyncStatusRe
                 {peer.link === "linking" ? ` · ${t("admin.peerLinking")}` : null}
               </span>
               {peer.link === "refused" ? <span className="row-meta row-meta-danger">{t("admin.peerLinkRefused")}</span> : null}
+              {peer.status?.keyChanged ? <span className="row-meta row-meta-danger">{t("admin.peerKeyChanged")}</span> : null}
             </div>
           </li>
         ))}

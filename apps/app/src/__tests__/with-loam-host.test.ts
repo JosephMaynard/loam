@@ -1,6 +1,6 @@
-// Unit tests for the pure helpers of plugins/with-loam-host.js (pre-release review 2026-09-25):
-// no-backup + no-device-transfer, optional hardware features, the legacy Bluetooth permissions, and the
-// stale-prebuild fingerprint.
+// Unit tests for the pure helpers of plugins/with-loam-host.js: loopback-only cleartext, no-backup +
+// no-device-transfer, the hotspot permission set, optional hardware features, the legacy Bluetooth
+// permissions, and the stale-prebuild fingerprint.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -9,20 +9,50 @@ import { delimiter, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { hotspotPermissionsToRequest } from "@/lib/hotspot-permissions";
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const plugin = require("../../plugins/with-loam-host.js");
 const {
   BACKUP_DOMAINS,
+  CLEARTEXT_HOSTS,
   FINGERPRINT_FILE,
+  HOTSPOT_PERMISSIONS,
   LEGACY_BLUETOOTH_PERMISSIONS,
+  NETWORK_SECURITY_CONFIG_RESOURCE,
   OPTIONAL_FEATURES,
   STALE_GUARD_GRADLE,
   addLegacyBluetoothPermissions,
   addOptionalFeatures,
   applyApplicationAttributes,
+  applyMainActivityAttributes,
   dataExtractionRulesXml,
+  networkSecurityConfigXml,
   prebuildFingerprint,
 } = plugin._internal;
+
+describe("with-loam-host: cleartext only to loopback", () => {
+  it("points the application at a network security config and drops the app-wide usesCleartextTraffic", () => {
+    const application = applyApplicationAttributes({ $: { "android:usesCleartextTraffic": "true" } });
+    expect(application.$["android:networkSecurityConfig"]).toBe("@xml/network_security_config");
+    expect(NETWORK_SECURITY_CONFIG_RESOURCE).toBe("@xml/network_security_config");
+    expect(application.$).not.toHaveProperty("android:usesCleartextTraffic");
+  });
+
+  it("refuses cleartext by default and allows it for exactly localhost and 127.0.0.1", () => {
+    const xml = networkSecurityConfigXml();
+    expect(xml).toContain('<base-config cleartextTrafficPermitted="false" />');
+    const domainConfigs = [...xml.matchAll(/<domain-config cleartextTrafficPermitted="([^"]+)">([\s\S]*?)<\/domain-config>/g)];
+    expect(domainConfigs).toHaveLength(1);
+    expect(domainConfigs[0][1]).toBe("true");
+    const hosts = [...domainConfigs[0][2].matchAll(/<domain includeSubdomains="false">([^<]+)<\/domain>/g)].map((match) => match[1]);
+    expect(hosts.sort()).toEqual(["127.0.0.1", "localhost"]);
+    expect(CLEARTEXT_HOSTS.sort()).toEqual(["127.0.0.1", "localhost"]);
+    // No LAN range, no wildcard, no second permitted block: the joiners' phones never go through this app.
+    expect(xml).not.toMatch(/includeSubdomains="true"|192\.168|10\.0|\*/);
+    expect(xml).not.toContain("<debug-overrides");
+  });
+});
 
 /** The `<exclude domain=…>` values inside one section of the rules XML. */
 function excludedDomains(xml: string, section: "cloud-backup" | "device-transfer"): string[] {
@@ -48,13 +78,50 @@ describe("with-loam-host: backup / device-transfer exclusion", () => {
       "android:allowBackup": "false",
       "android:fullBackupContent": "false",
       "android:dataExtractionRules": "@xml/data_extraction_rules",
-      "android:usesCleartextTraffic": "true",
+      "android:networkSecurityConfig": "@xml/network_security_config",
     });
   });
 });
 
+describe("with-loam-host: hotspot permissions", () => {
+  it("declares fine AND coarse location together, NEARBY_WIFI_DEVICES and the WIFI_STATE pair", () => {
+    // Android 12+ honours a fine-location request only when coarse rides in the same dialog, and a runtime
+    // request for a permission the manifest does not declare auto-denies with no dialog; so a manifest
+    // with fine but not coarse means the hotspot can never start on a fresh Android 12 install.
+    expect(HOTSPOT_PERMISSIONS).toEqual(
+      expect.arrayContaining([
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.NEARBY_WIFI_DEVICES",
+        "android.permission.CHANGE_WIFI_STATE",
+        "android.permission.ACCESS_WIFI_STATE",
+      ]),
+    );
+    expect(new Set(HOTSPOT_PERMISSIONS).size).toBe(HOTSPOT_PERMISSIONS.length);
+  });
+
+  it("declares every permission the runtime request asks for, on every API level", () => {
+    // The manifest side and the JS side (src/lib/hotspot-permissions.ts) must agree, or the request for the
+    // missing one silently auto-denies (the API 33+ regression described in the plugin).
+    for (const apiLevel of [24, 30, 31, 32, 33, 35]) {
+      for (const name of hotspotPermissionsToRequest(apiLevel)) {
+        expect(HOTSPOT_PERMISSIONS, `API ${apiLevel}: ${name}`).toContain(`android.permission.${name}`);
+      }
+    }
+  });
+
+  it("is not undone by app.json's blockedPermissions", () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const appJson = require("../../app.json");
+    const blocked: string[] = appJson.expo.android?.blockedPermissions ?? [];
+    for (const name of HOTSPOT_PERMISSIONS) {
+      expect(blocked).not.toContain(name);
+    }
+  });
+});
+
 describe("with-loam-host: optional hardware features", () => {
-  it("declares wifi/location/bluetooth features optional and forces an existing required one optional", () => {
+  it("declares wifi/location/bluetooth/touch features optional and forces an existing required one optional", () => {
     const manifest = {
       "uses-feature": [{ $: { "android:name": "android.hardware.wifi", "android:required": "true" } }],
     };
@@ -64,9 +131,12 @@ describe("with-loam-host: optional hardware features", () => {
       "android.hardware.wifi",
       "android.hardware.location",
       "android.hardware.location.gps",
-      // Implied by app.json `orientation: "portrait"`; optional so landscape-only devices (Chromebooks)
-      // aren't filtered from Play.
-      "android.hardware.screen.portrait",
+      // ACCESS_COARSE_LOCATION implies this one (fine implies .gps); both optional, like the rest.
+      "android.hardware.location.network",
+      // Every app implies a touchscreen unless it says otherwise; without these two Play hides the listing
+      // from Android laptops and desktops that have only a keyboard and trackpad.
+      "android.hardware.touchscreen",
+      "android.hardware.faketouch",
     ]) {
       const matches = features.filter((feature) => feature.$["android:name"] === name);
       expect(matches).toHaveLength(1);
@@ -75,15 +145,48 @@ describe("with-loam-host: optional hardware features", () => {
     expect(features).toHaveLength(OPTIONAL_FEATURES.length);
   });
 
-  it("covers the portrait feature app.json's orientation implies", () => {
+  it("declares both screen orientations optional, since a merged library activity locks portrait", () => {
+    // app.json locks no orientation, but Google's code scanner (via expo-camera) merges in a portrait-locked
+    // GmsBarcodeScanningDelegateActivity, which makes the built APK imply `android.hardware.screen.portrait`
+    // as required. Declared optional, the host stays listed for landscape-only screens (laptops), and it
+    // runs in both orientations (tablets, foldables; Play's large-screen checks).
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const appJson = require("../../app.json");
-    if (appJson.expo.orientation === "portrait") {
-      expect(OPTIONAL_FEATURES).toContain("android.hardware.screen.portrait");
+    expect(appJson.expo.orientation).toBe("default");
+    expect(OPTIONAL_FEATURES.filter((name: string) => name.startsWith("android.hardware.screen.")).sort()).toEqual([
+      "android.hardware.screen.landscape",
+      "android.hardware.screen.portrait",
+    ]);
+    const manifest = {
+      "uses-feature": [{ $: { "android:name": "android.hardware.screen.portrait", "android:required": "true" } }],
+    };
+    addOptionalFeatures(manifest);
+    const features = manifest["uses-feature"] as { $: Record<string, string> }[];
+    for (const name of ["android.hardware.screen.portrait", "android.hardware.screen.landscape"]) {
+      const matches = features.filter((feature) => feature.$["android:name"] === name);
+      expect(matches).toHaveLength(1);
+      expect(matches[0].$["android:required"]).toBe("false");
     }
-    if (appJson.expo.orientation === "landscape") {
-      expect(OPTIONAL_FEATURES).toContain("android.hardware.screen.landscape");
-    }
+  });
+});
+
+describe("with-loam-host: large screens", () => {
+  it("marks the main activity resizable and leaves its configChanges and orientation alone", () => {
+    const configChanges = "keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize";
+    const activity = applyMainActivityAttributes({
+      $: { "android:name": ".MainActivity", "android:configChanges": configChanges, "android:screenOrientation": "unspecified" },
+    });
+    expect(activity.$).toEqual({
+      "android:name": ".MainActivity",
+      "android:configChanges": configChanges,
+      "android:screenOrientation": "unspecified",
+      "android:resizeableActivity": "true",
+    });
+  });
+
+  it("overrides a non-resizable declaration rather than keeping it", () => {
+    const activity = applyMainActivityAttributes({ $: { "android:name": ".MainActivity", "android:resizeableActivity": "false" } });
+    expect(activity.$["android:resizeableActivity"]).toBe("true");
   });
 });
 

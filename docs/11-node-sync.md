@@ -27,7 +27,19 @@ tens of thousands of records per batch), imported user profiles are stripped of 
 state (a peer's admin is a stranger here), **reserved ids are refused** both as user records and as message
 authors (any `mesh.*` id — a mesh sender's display record — and the whole `llm.*` assistant namespace, not
 just this node's configured bot id); an author whose record in the payload isn't `human` (a peer's bot or
-system account) is refused along with its message, and edits
+system account) is refused along with its message; **a peer may author a new message only as a user sync
+introduced here** (`synced_users`) or as a brand-new author it introduces with the message — a new message
+attributed to any user this node created itself (admin, moderator or ordinary member; local ids are public,
+they're exported as message authors) is refused, so a peer can't post as a local member, into that member's
+owner-only channel included; a peer message's `createdAt`/`editedAt` are **clamped to this node's clock plus
+five minutes** (never refused for skew: off-grid clocks drift; unclamped, a far-future stamp would sort
+newest forever and never expire under retention, and a far-future `editedAt` would win every later edit);
+**channel imports are capped** at 200 new channels a round and 2 000 channels of synced origin in all
+(`synced_channels`; past either, the rest are skipped and the round logs once). The digest lists a message by
+id alone, so a message in a channel the per-round cap put off is still fetched that round; it is *deferred*,
+not remembered as refused, and the round that imports its channel fetches it again. A message in a channel
+beyond the node-wide ceiling, like one in a channel the peer never listed, is refused and remembered (see
+*Refused offers*). Edits
 apply only when
 strictly newer **and only to the same message** — an incoming record that reuses an existing id must match
 its type, author, `createdAt` and routing (channel / parent / target), checked before any attachment is
@@ -64,12 +76,21 @@ batches of **40**, within per-round budgets of **4 000** public / **80** sealed 
 for the next round; sealed offers are taken soonest-expiry first. Responses are capped at 8 MiB of plaintext
 JSON (the sealed-response cap allows for the 4/3 base64 envelope overhead). A batch whose *content* is
 unusable — over the cap, not JSON, failing the schema — is split in half and retried down to the single
-offending id, which is then remembered as refused. Splitting is budgeted per round: at most
-`2 × batches + 16` extra requests and 32 MiB (4 × the cap) of unusable response bytes; past either the peer
-counts as failed for the round (`lastError`) and is retried next round. (A peer answering every batch with
-junk used to cost 2n − 1 requests per n-id batch, about 8 000 a round.) One bad record in a full batch costs
-about 16 extra requests, well inside the budget. A too-large answer also halves that peer's later batch size
-for that kind (floor 10 public / 5 sealed), which doubles back after a clean round. A network-level failure
+offending id, which is then remembered as refused. A single id that answers unusable is **always settled
+before any budget is consulted**: isolating one over-cap record costs a too-large answer at every level on
+the way down (five of them, 40 MiB, from the 10-id floor; nine, 72 MiB, from a full batch), so the byte
+budget alone could never reach it, and the offender would be downloaded again every round while every offer
+after it starved. Splitting is budgeted per round: at most `2 × batches + 16` extra requests and 32 MiB
+(4 × the cap) of unusable response bytes, checked before each further split; past either the peer counts as
+failed for the round (`lastError`) and is retried next round, keeping what was settled. (A peer answering
+every batch with junk used to cost 2n − 1 requests per n-id batch, about 8 000 a round.) One bad record in a
+full batch costs about 16 extra requests, well inside the request budget. A too-large answer also halves
+that peer's later batch size for that kind (floor 10 public / 5 sealed), which doubles back after a clean
+round. Attachment fetches from an encrypted peer (`/api/sync/attachment`) are capped at **2 MiB** of
+plaintext each (the schema caps the base64 at a 1 MiB file) and count toward the same byte budget: an
+over-cap answer costs the cap, an unusable one its bytes; the batch whose fetches spend the budget ends the
+round, and once it is spent no further attachment is fetched (the files are queued for the retry pass; the
+messages themselves still import). A network-level failure
 (peer unreachable, 4xx/5xx) ends the round's fetching without discarding what earlier batches imported.
 
 **Refused offers.** After each batch the puller remembers, per peer, every public offer it fetched and
@@ -81,7 +102,8 @@ sealed id this node fetched or received, whatever became of it, goes into a dura
 either digest list, nor imported as a channel (docs/16 §9). The mark also carries the mail's replay key, so
 the same mail re-offered under a fresh id is fetched but never carried. A round imports its sealed batches
 only after its last request to every peer, so the request timing can't show which batches held local mail. A reply/reaction whose
-parent/target is still on offer this round is deferred, not remembered. Refused replies are cached, not
+parent/target is still on offer this round is deferred, not remembered, and so is a message whose channel the
+per-round channel cap put off to a later round. Refused replies are cached, not
 tombstoned: a tombstone is node-wide and durable, and the id is peer-chosen. The kill switch clears it; a
 restart re-fetches each refused public offer once. A change to the local policy that decided a refusal also
 clears it (`forgetRefusedOffers()`, which keeps the transport sessions and downgrade history): every admin
@@ -111,7 +133,8 @@ shown as text. The new node scans it (Android setup → "Join another LOAM netwo
 accepted, and there is no typed fallback) and starts with that node as a peer, key pinned and the code in
 `linkCode`. On its first sync round it presents the code in `POST /api/sync/link { code, port,
 transportKey, name }`, which must arrive **sealed** (to the pinned key, so nobody on the network can read
-or alter it; an unsealed request is refused before the code is checked). A valid code adds the new node
+or alter it; an unsealed request is refused before the code is checked) and carries no `sync.token` of the
+new node's own (the code is the credential; the answer is what hands a token over). A valid code adds the new node
 as a peer of this one (its address is the request's source address plus the reported port, loopback
 refused; its key pinned) and switches sync on, applied like an admin save; the answer carries this node's
 name and its `sync.token`, which the new node adopts if it has none. The new node then drops the spent
@@ -159,7 +182,13 @@ hotspot running too if the phone's chipset allows it".
   **without** it (so a token-guarded peer 404s it), unless this node itself runs transport `off`
   (Developer Mode), the one case where it is sent as the `x-loam-sync-token` header. A `required` node
   refuses plaintext pulls altogether, and a peer that negotiated encryption this boot is never silently
-  downgraded (docs/08 has the full rules and the first-contact residual). Unset = open (any node that can
+  downgraded (docs/08 has the full rules and the first-contact residual). An **unpinned** peer's transport
+  key is trust-on-first-use per boot: if a later handshake returns a different key, public data is still
+  pulled from it (an ephemeral-key host legitimately changes its key at every reboot, and refusing would
+  strand hotspot hosts) but the token is **no longer sent** to it, a warning naming the peer is logged once,
+  and `GET /api/admin/sync` reports `keyChanged` for it; pin the key (`SyncPeer.transportKey`), or restart
+  this node, to trust the new one. So an unpinned peer can leak the token to an active on-path attacker at
+  first contact only, never afterwards; a pinned peer never can. Unset = open (any node that can
   reach the endpoints may sync public data — the original behaviour).
 - User ids are random enough (`user.<16hex>`, 64 random bits) that cross-node collisions are unlikely; a collision
   would merge two strangers' display identities on one node (cosmetic, not an auth issue — sessions

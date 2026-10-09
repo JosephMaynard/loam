@@ -1,0 +1,54 @@
+name: Bug report
+description: Something is wrong in LOAM
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        LOAM has no analytics or crash reporting, so this report is the only way we hear about a problem. Thank you.
+        For a security problem, please do not use this form: see SECURITY.md.
+  - type: dropdown
+    id: host
+    attributes:
+      label: Where is the network running?
+      options:
+        - Android phone (the LOAM host app)
+        - Computer or Raspberry Pi (npx loamnet)
+        - Development checkout (pnpm dev)
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: LOAM version
+      description: Settings shows it at the bottom of the join card; the host app shows it under About.
+      placeholder: "0.6.0"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start a network as ...
+        2. Join from ...
+        3. ...
+  - type: textarea
+    id: env
+    attributes:
+      label: Devices and browsers
+      description: The host (phone model and Android version, or OS and Node version) and the joining device and browser.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or diagnostics
+      description: The terminal screen's Debug view can write a diagnostics file; the host app has one under its menu. Paste what is relevant and remove anything private.
+      render: text

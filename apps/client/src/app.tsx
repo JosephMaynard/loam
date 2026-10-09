@@ -9,7 +9,6 @@ import {
   type Message,
   type MessageAttachment,
   type MessageCreateRequest,
-  type NetworkConfig,
   type StreamEvent,
   type User,
   type UserUpdateRequest,
@@ -32,7 +31,7 @@ import { MeshView } from "./views/MeshView";
 import { PeopleView } from "./views/PeopleView";
 import { PrivacyView } from "./views/PrivacyView";
 import { RulesView } from "./views/RulesView";
-import { SearchView } from "./views/SearchView";
+import { forgetRememberedSearch, SearchView } from "./views/SearchView";
 import { SettingsView } from "./views/SettingsView";
 import { ApiError, fetchJson, requestJson, REQUEST_TIMEOUT_MS } from "./lib/api";
 import { canModerate } from "./lib/capabilities";
@@ -41,21 +40,25 @@ import { cachedBlockListFor, fetchBlockList, persistBlockList, setUserBlocked, w
 import { confirmIdentity, forgetConfirmedIdentity, listenForIdentityChange, readConfirmedIdentity } from "./lib/identity";
 import { takeAdminClaimCode } from "./lib/admin-link";
 import { takeInviteCode } from "./lib/invite";
+import { linkCodePresentAtStartup } from "./lib/link-code-fragment";
 import {
   compareCreatedAt,
   conversationMessages,
   countUnreadByConversation,
   LiveChangeJournal,
   mergeMessagesInOrder,
+  messageCacheOverflow,
   messageConversationKey,
   newestMessageTimestamp,
   reconcileConversationSnapshot,
+  staleConversationMessageIds,
   type LiveChanges,
 } from "./lib/messages";
 import { dmConversationPeers, inboxUnreadPeers, reconcileInboxEntry, type DmInboxEntry } from "./lib/dm-inbox";
 import {
   clearAllRecords,
   deleteRecord,
+  deleteRecords,
   destroyDatabase,
   getAllRecords,
   markLocalStoreWiped,
@@ -65,7 +68,16 @@ import {
 import { clearRecentReactions } from "./lib/reactions";
 import { reconcileRoster, sortUsers } from "./lib/roster";
 import { createLivenessWatchdog, type LivenessWatchdog } from "./lib/ws-liveness";
-import { parseMessageResponse, parseRoute, parseSocketEvent, type Conversation } from "./lib/protocol";
+import {
+  parseBootstrapResponse,
+  parseConfigResponse,
+  parseMessageResponse,
+  parseRoute,
+  parseSocketEvent,
+  type BootstrapResponse,
+  type ConfigResponse,
+  type Conversation,
+} from "./lib/protocol";
 import {
   announceWipe,
   clearWipeTombstone,
@@ -86,6 +98,7 @@ import {
   handleWsFrame,
   inviteQrHostKey,
   isTunnelActive,
+  joinKeyPresentAtStartup,
   mayFallBackToPlaintext,
   reestablishSession,
   rejectPendingHostKey,
@@ -120,14 +133,8 @@ import {
   t,
 } from "./i18n";
 
-type Config = {
-  /** The node's build version, shown in the join/settings footer. Absent on very old nodes. */
-  version?: string;
-  joinUrl: string;
-  websocketPath: string;
-  currentUser: User;
-  networkConfig: NetworkConfig;
-};
+/** The node's bootstrap plus this browser's confirmed identity (see `lib/protocol.ts`). */
+type Config = ConfigResponse;
 
 const CURRENT_USER_KEY = "loam.currentUserId";
 const CURRENT_USER_CREATED_AT_KEY = "loam.currentUserCreatedAt";
@@ -197,22 +204,14 @@ function rememberCurrentUser(user: User): void {
   localStorage.setItem(CURRENT_USER_CREATED_AT_KEY, String(user.createdAt));
 }
 
-/** The public, cookie-free bootstrap (docs/20): everything `/api/config` returns EXCEPT `currentUser`.
- * A `required`/bound client reads this FIRST — before it has an identity — to learn the transport mode
- * + host key, then handshakes and resumes a sealed identity. */
-type Bootstrap = {
-  version?: string;
-  joinUrl: string;
-  websocketPath: string;
-  networkConfig: NetworkConfig;
-};
-
 /**
  * GET `/api/bootstrap` as a public, cookie-free fetch (docs/20) — mints no identity, sets no cookie, and
  * advertises `transportEncryption`/`transportPublicKey`, so a client can learn how to connect before it
- * has a session. Read FIRST on every boot/reconnect, always bypassing `encryptedFetch`.
+ * has a session. Read FIRST on every boot/reconnect, always bypassing `encryptedFetch`. The body is checked
+ * against the shared schemas (`parseBootstrapResponse`), so a reply of the wrong shape (a captive portal's
+ * page, an incompatible build) is a readable boot error rather than a `TypeError` further down.
  */
-async function fetchBootstrapJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<Bootstrap> {
+async function fetchBootstrapJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<BootstrapResponse> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
 
@@ -221,13 +220,19 @@ async function fetchBootstrapJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<Boots
       credentials: "omit",
       signal: controller.signal,
     });
+    const payload: unknown = await response.json().catch(() => undefined);
 
     if (!response.ok) {
-      const payload: unknown = await response.json().catch(() => undefined);
       throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
     }
 
-    return response.json() as Promise<Bootstrap>;
+    const bootstrap = parseBootstrapResponse(payload);
+
+    if (!bootstrap) {
+      throw new Error(t("app.configUnrecognised"));
+    }
+
+    return bootstrap;
   } finally {
     window.clearTimeout(timeout);
   }
@@ -237,6 +242,7 @@ async function fetchBootstrapJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<Boots
  * GET `/api/config` for the ANONYMOUS (cookie) path — optional/off nodes, where identity is the session
  * cookie and `/api/config` is directly readable and returns `currentUser`. A bound/required client never
  * uses this (its `/api/config` is tunnel-only content and its identity comes from the sealed resume).
+ * Validated like the bootstrap (`parseConfigResponse`, which also checks `currentUser`).
  */
 async function fetchConfigJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<Config> {
   const controller = new AbortController();
@@ -247,13 +253,19 @@ async function fetchConfigJson(timeoutMs = REQUEST_TIMEOUT_MS): Promise<Config> 
       credentials: "include",
       signal: controller.signal,
     });
+    const payload: unknown = await response.json().catch(() => undefined);
 
     if (!response.ok) {
-      const payload: unknown = await response.json().catch(() => undefined);
       throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
     }
 
-    return response.json() as Promise<Config>;
+    const config = parseConfigResponse(payload);
+
+    if (!config) {
+      throw new Error(t("app.configUnrecognised"));
+    }
+
+    return config;
   } finally {
     window.clearTimeout(timeout);
   }
@@ -460,14 +472,17 @@ function LoamApp() {
   const [pinChange, setPinChange] = useState<{ current: string; next: string; matchesNode: boolean }>();
   // Deletes/edits applied by live events, so a history snapshot fetched before them can't undo them.
   const liveChangesRef = useRef(new LiveChangeJournal());
-  // A freshly-scanned join QR (`#k=`) present at THIS load = an explicit rejoin (docs/20 round-4 H2). Read
-  // it before the transport layer consumes the fragment. When a wipe tombstone is outstanding, a rejoin is
-  // the only thing that lifts the boot gate.
-  const rejoinQrPresent = /^#k=[A-Za-z0-9_-]+$/.test(window.location.hash);
+  // A freshly-scanned join QR (`#k=`) present at THIS load = an explicit rejoin (docs/20 round-4 H2). The
+  // transport layer records it in `captureJoinKey()` (main.tsx) before stripping the fragment from the URL,
+  // so it must be read from there, never from `window.location.hash` (the hash is
+  // already gone by the time this renders). Inside the Android host's own WebView the launcher's injected
+  // key counts too: the host has no QR of its own to rescan. When a wipe tombstone is outstanding, a rejoin
+  // is the only thing that lifts the boot gate.
+  const rejoinQrPresent = joinKeyPresentAtStartup();
   // Whether THIS load is a verified-rejoin attempt of a tombstoned device (a scanned QR while the tombstone
-  // is still set). Captured once at mount, before the transport layer consumes the `#k=` fragment. The
-  // tombstone is lifted only AFTER the QR handshake actually succeeds (docs/20 round-5 H2) — not merely
-  // because a syntactically-valid `#k=` is present (a stale/invalid QR, or a crash, must not remove the gate).
+  // is still set). Captured once at mount. The tombstone is lifted only AFTER the QR handshake actually
+  // succeeds (docs/20 round-5 H2) — not merely because a syntactically-valid `#k=` was present (a
+  // stale/invalid QR, or a crash, must not remove the gate).
   const bootRejoinAttempt = useRef(rejoinQrPresent && isWipeTombstoned());
   // BOOT GATE (docs/20 round-4 H2): if a prior device wipe's durable tombstone is still set, do NOT
   // auto-render/reconnect the normal app (a surviving HttpOnly cookie could otherwise rehydrate the wiped
@@ -749,13 +764,105 @@ function LoamApp() {
     void putRecords("channels", incomingChannels);
   }, []);
 
-  const upsertMessages = useCallback((incomingMessages: Message[]) => {
-    // The history is always kept sorted, so merge in order (in-place update / splice) instead of
-    // rebuilding a Map and re-sorting the whole array on every incoming message. Same final ordering
-    // and dedupe-by-id semantics; still returns a new array so state updates are immutable.
-    setMessages((previous) => mergeMessagesInOrder(previous, incomingMessages));
-    void putRecords("messages", incomingMessages);
+  // Ids the on-disk cache has dropped under the per-conversation cap (`messageCacheOverflow`), so each one is
+  // deleted once rather than on every write. Memory keeps the full history; only IndexedDB is capped.
+  const cachePrunedRef = useRef(new Set<string>());
+  // The "that QR code links another node" notice is said once per page load, not again on every reconnect.
+  const linkNoticeShownRef = useRef(false);
+
+  /**
+   * Write `written` to the message cache, less whatever lies past the per-conversation cap given the full
+   * history `all`, and delete from disk what has just crossed it: the newest 500 of each channel or DM stay
+   * cached (plus the root of every cached reply), older ones are the node's to serve again. A message pruned
+   * earlier that the cap keeps again (a reply just arrived under an old root) goes back on disk from `all`.
+   */
+  const persistMessages = useCallback((all: Message[], written: Message[]) => {
+    const overflow = messageCacheOverflow(all, currentUserIdRef.current);
+    const pruned = cachePrunedRef.current;
+    const toWrite: Message[] = [];
+
+    for (const message of written) {
+      if (!overflow.has(message.id)) {
+        pruned.delete(message.id);
+        toWrite.push(message);
+      }
+    }
+
+    const restore = new Set<string>();
+
+    for (const id of pruned) {
+      if (!overflow.has(id)) {
+        restore.add(id);
+      }
+    }
+
+    if (restore.size) {
+      for (const message of all) {
+        if (restore.has(message.id)) {
+          toWrite.push(message);
+        }
+      }
+
+      // Whether found in `all` or long gone from memory, none of these is a pruned record any more.
+      for (const id of restore) {
+        pruned.delete(id);
+      }
+    }
+
+    const toDelete: string[] = [];
+
+    for (const id of overflow) {
+      if (!pruned.has(id)) {
+        pruned.add(id);
+        toDelete.push(id);
+      }
+    }
+
+    void putRecords("messages", toWrite);
+    void deleteRecords("messages", toDelete);
   }, []);
+
+  /**
+   * Drop cached messages whose conversation the node no longer lists for this user (see
+   * `staleConversationMessageIds`), from memory and disk. Only `candidateIds` (what was held before the fetch
+   * began) are judged, so a message that arrived live in the meantime is never taken for a stale one.
+   */
+  const dropStaleConversationMessages = useCallback(
+    (
+      channelIds: ReadonlySet<string> | undefined,
+      dmPeerIds: ReadonlySet<string> | undefined,
+      candidateIds: ReadonlySet<string>,
+    ) => {
+      setMessages((previous) => {
+        const stale = staleConversationMessageIds(previous, channelIds, dmPeerIds, currentUserIdRef.current);
+        const dropped = [...stale].filter((id) => candidateIds.has(id));
+
+        if (!dropped.length) {
+          return previous;
+        }
+
+        const droppedIds = new Set(dropped);
+        void deleteRecords("messages", dropped);
+        return previous.filter((message) => !droppedIds.has(message.id));
+      });
+    },
+    [],
+  );
+
+  const upsertMessages = useCallback(
+    (incomingMessages: Message[]) => {
+      // The history is always kept sorted, so merge in order (in-place update / splice) instead of
+      // rebuilding a Map and re-sorting the whole array on every incoming message. Same final ordering
+      // and dedupe-by-id semantics; still returns a new array so state updates are immutable. The merged
+      // history decides what the cache keeps (`persistMessages`).
+      setMessages((previous) => {
+        const next = mergeMessagesInOrder(previous, incomingMessages);
+        persistMessages(next, incomingMessages);
+        return next;
+      });
+    },
+    [persistMessages],
+  );
 
   /**
    * Apply a conversation's authoritative server message list: upsert everything returned and drop
@@ -778,16 +885,15 @@ function LoamApp() {
           liveChanges,
         );
 
-        for (const id of prunedIds) {
-          void deleteRecord("messages", id);
-        }
+        void deleteRecords("messages", prunedIds);
 
-        // Persist only what the snapshot actually contributed — never a copy a live delete/edit superseded.
-        void putRecords("messages", applied);
+        // Persist only what the snapshot actually contributed (never a copy a live delete/edit superseded), and
+        // only up to the per-conversation cap.
+        persistMessages(next, applied);
         return next;
       });
     },
-    [],
+    [persistMessages],
   );
 
   const removeMessage = useCallback((messageId: string) => {
@@ -796,12 +902,9 @@ function LoamApp() {
     void deleteRecord("messages", messageId);
   }, []);
 
+  /** Delete a message on the node; the ConfirmDialog in `ConversationView` has already asked. */
   const deleteMessage = useCallback(
     async (messageId: string) => {
-      if (!window.confirm(t("confirm.deleteMessage"))) {
-        return;
-      }
-
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
@@ -815,7 +918,7 @@ function LoamApp() {
 
         if (!response.ok) {
           const payload: unknown = await response.json().catch(() => undefined);
-          const message = errorText(payload, `Delete failed: ${response.status}`);
+          const message = errorText(payload, t("common.requestFailed", { status: response.status }));
           throw new Error(message);
         }
 
@@ -852,7 +955,7 @@ function LoamApp() {
         const payload: unknown = await response.json().catch(() => undefined);
 
         if (!response.ok) {
-          const message = errorText(payload, `Edit failed: ${response.status}`);
+          const message = errorText(payload, t("common.requestFailed", { status: response.status }));
           throw new Error(message);
         }
 
@@ -895,7 +998,7 @@ function LoamApp() {
         const payload: unknown = await response.json().catch(() => undefined);
 
         if (!response.ok) {
-          const message = errorText(payload, `Couldn't create the channel: ${response.status}`);
+          const message = errorText(payload, t("common.requestFailed", { status: response.status }));
           throw new Error(message);
         }
 
@@ -967,6 +1070,7 @@ function LoamApp() {
     localStorage.removeItem(CURRENT_USER_CREATED_AT_KEY);
     localStorage.removeItem(LAST_CONVERSATION_KEY);
     clearRecentReactions();
+    forgetRememberedSearch();
     forgetConfirmedIdentity();
     tabIdentityRef.current = undefined;
     // In-memory residue: decrypted avatar/attachment `blob:` URLs and rendered message HTML would
@@ -1022,11 +1126,6 @@ function LoamApp() {
     }
   }, []);
 
-  /**
-   * Drop every piece of cached content — memory and IndexedDB — while staying signed in (unlike
-   * `purgeLocalData`, which is a wipe). Used when the node confirms a different identity than the one this
-   * browser last had: the cache belonged to that previous identity (see the boot effect).
-   */
   /**
    * Drop every piece of cached content, in memory and on disk. REJECTS when the on-disk clear failed (the
    * in-memory half has already happened): the identity-change path must not confirm the new identity over
@@ -1176,7 +1275,8 @@ function LoamApp() {
         });
 
         if (!response.ok) {
-          throw new Error(`Profile update failed: ${response.status}`);
+          const payload: unknown = await response.json().catch(() => undefined);
+          throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
         }
 
         const user = UserSchema.parse(await response.json());
@@ -1232,7 +1332,7 @@ function LoamApp() {
         const payload: unknown = await response.json().catch(() => undefined);
 
         if (!response.ok) {
-          throw new ApiError(response.status, payload, `Request failed: ${response.status}`);
+          throw new ApiError(response.status, payload, t("common.requestFailed", { status: response.status }));
         }
 
         const user = UserSchema.parse(payload);
@@ -1258,7 +1358,7 @@ function LoamApp() {
         const payload: unknown = await response.json().catch(() => undefined);
 
         if (!response.ok) {
-          const message = errorText(payload, `Admin claim failed: ${response.status}`);
+          const message = errorText(payload, t("common.requestFailed", { status: response.status }));
           throw new Error(message);
         }
 
@@ -1315,7 +1415,7 @@ function LoamApp() {
       const payload: unknown = await response.json().catch(() => undefined);
 
       if (!response.ok) {
-        const message = errorText(payload, `Attachment upload failed: ${response.status}`);
+        const message = errorText(payload, t("common.requestFailed", { status: response.status }));
         throw new Error(message);
       }
 
@@ -1347,7 +1447,7 @@ function LoamApp() {
 
         if (!response.ok) {
           const payload: unknown = await response.json().catch(() => undefined);
-          throw new Error(errorText(payload, `Avatar upload failed: ${response.status}`));
+          throw new Error(errorText(payload, t("common.requestFailed", { status: response.status })));
         }
 
         const user = UserSchema.parse(await response.json());
@@ -1525,6 +1625,15 @@ function LoamApp() {
           setChannels(cachedChannels);
           upsertUsers([currentUser, ...cachedUsers]);
           setMessages(cachedMessages.sort(compareCreatedAt));
+          // A cache written before the per-conversation cap existed may hold far more than it allows: trim it
+          // once here, so the next start reads less. What was read stays in memory for this session.
+          const legacyOverflow = messageCacheOverflow(cachedMessages, currentUserIdRef.current);
+          if (legacyOverflow.size) {
+            for (const id of legacyOverflow) {
+              cachePrunedRef.current.add(id);
+            }
+            void deleteRecords("messages", [...legacyOverflow]);
+          }
 
           const reads = cachedSync.find((record) => record.id === CONVERSATION_READS_KEY)?.reads;
 
@@ -1673,6 +1782,9 @@ function LoamApp() {
         }
 
         const preFetchUserIds = new Set(usersRef.current.map((user) => user.id));
+        // What was held before the fetches: only these can turn out to belong to a conversation the node no
+        // longer lists (a message arriving live in the meantime never can).
+        const preFetchMessageIds = new Set(messagesRef.current.map((message) => message.id));
         // The DM inbox loads alongside but never holds up boot: it only decides which people the sidebar
         // lists. Best effort — an older node has no /api/dms, and the sidebar then lists everyone as before.
         invalidateInboxRequests();
@@ -1683,6 +1795,15 @@ function LoamApp() {
           .then((nextInbox) => {
             if (active && inboxEpoch === inboxEpochRef.current) {
               setDmInbox(nextInbox);
+              // The inbox names every DM partner the node still has messages with: a cached DM with anyone
+              // else (deleted, expired) is gone from the node, so it goes from the cache too.
+              if (nextInbox) {
+                dropStaleConversationMessages(
+                  undefined,
+                  new Set(nextInbox.map((entry) => entry.userId)),
+                  preFetchMessageIds,
+                );
+              }
             }
           });
         const [nextChannels, nextUsers, nextBlocks] = await Promise.all([
@@ -1715,6 +1836,18 @@ function LoamApp() {
           if (!keep.has(channel.id)) {
             removeChannel(channel.id);
           }
+        }
+        // Messages of a channel the node no longer lists go too, including any whose channel record is already
+        // gone (the loop above never sees those), and the reactions on them.
+        dropStaleConversationMessages(keep, undefined, preFetchMessageIds);
+
+        // The person opened a "link another node" QR in a browser (lib/link-code-fragment.ts). Its key still
+        // pinned the join, so they are in as a member; the code itself was for another node's setup screen and
+        // did nothing here. Said once per page load, not again on every reconnect, and only now that this boot
+        // pass has carried through (a first visit's identity swap restarts the pass, which clears the banner).
+        if (linkCodePresentAtStartup() && !linkNoticeShownRef.current) {
+          linkNoticeShownRef.current = true;
+          setError(t("join.linkCodeOpened"));
         }
       })
       .catch((nextError: unknown) => {
@@ -1759,6 +1892,7 @@ function LoamApp() {
     currentUser.id,
     currentUser.banned,
     currentUser.pending,
+    dropStaleConversationMessages,
     purgeCachedContent,
     removeChannel,
     replaceRoster,

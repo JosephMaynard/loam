@@ -126,6 +126,21 @@ describe("AdminView", () => {
     expect(host.querySelectorAll("#admin-features input.toggle").length).toBeGreaterThan(0);
   });
 
+  it("labels the admin bootstrap strategies in plain words, not config identifiers", async () => {
+    const host = mount(<AdminView currentUser={admin} onChannelUpsert={() => {}} onWiped={async () => {}} />);
+    await flush();
+
+    const options = Array.from(host.querySelectorAll<HTMLOptionElement>("#admin-access select option"));
+    const labels = Object.fromEntries(options.map((option) => [option.value, option.textContent]));
+    expect(labels).toEqual({
+      firstUser: "First person to join",
+      setupCode: "One-time setup code",
+      passphrase: "Passphrase",
+      hostDevice: "This device (the host)",
+      none: "Nobody",
+    });
+  });
+
   it("confirms the Emergency Reset in an alertdialog that needs the typed word", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

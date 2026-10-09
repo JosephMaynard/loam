@@ -26,6 +26,8 @@ const { installStartFreshMarker } = require('./start-fresh-marker');
 // split out for the same unit-testability reason (injected `fs` — see config-write.js's doc comment).
 const { durableWriteConfig } = require('./config-write');
 const { applyNewNetwork, setupUnfinished } = require('./new-network');
+// The `loam-emergency-reset-result` answer, split out so it is testable (see reset-reply.js).
+const { resetReply } = require('./reset-reply');
 // Sol Fable-round-3 P1: the pure per-attempt boot-env decision (clear-all-then-set-branch), split out so the
 // "every attempt is a FRESH boot configuration — no stale LOAM_DB_KEY leaks across in-process retries" rule
 // is unit-testable (see boot-config.js's doc comment).
@@ -1048,10 +1050,6 @@ function fsyncDir(dir) {
 // and killing the recovered server.
 var startFreshRebootInFlight = false;
 
-// Emergency Reset from the host menu (index.tsx). The server installs `global.__loamEmergencyReset` once it
-// has booted (embedded-main.ts); it runs the same wipe as the admin kill switch, in-process, so there's no
-// HTTP request, no session and nothing on the network involved. Encrypted fixed-key modes then hand back
-// to the launcher for the key-clear restart through the existing `loam-wipe-restart` protocol.
 // A "Link a node" code for the share screen (server sync-links.ts, `POST /api/host/link-code`): the host
 // phone shows it so another LOAM phone can link to this network. Launcher-only, like the other host routes.
 rnBridge.channel.on('loam-link-code', function (payload) {
@@ -1076,6 +1074,12 @@ rnBridge.channel.on('loam-link-code', function (payload) {
   }
 });
 
+// Emergency Reset from the host menu (index.tsx). The server installs `global.__loamEmergencyReset` once it
+// has booted (embedded-main.ts); it runs the same wipe as the admin kill switch, in-process, so there's no
+// HTTP request, no session and nothing on the network involved. Encrypted fixed-key modes then hand back
+// to the launcher for the key-clear restart through the existing `loam-wipe-restart` protocol. The answer
+// (`resetReply`) also says whether an incomplete wipe was journaled, which decides what the host screen tells
+// the operator: reopen to finish, or reopen and run the reset again.
 rnBridge.channel.on('loam-emergency-reset', function (payload) {
   var requestId = payload && payload.requestId;
   function reply(result) {
@@ -1096,12 +1100,7 @@ rnBridge.channel.on('loam-emergency-reset', function (payload) {
     })
     .then(
       function (result) {
-        reply({
-          ok: true,
-          complete: !!(result && result.complete),
-          // The device-key clear was handed to RN (`loam-wipe-restart`): RN closes the app once it's verified.
-          keyClear: !!(result && result.keyClearRequested),
-        });
+        reply(resetReply(result));
       },
       function (err) {
         reply({ ok: false, error: err && err.message ? err.message : String(err) });
@@ -1602,9 +1601,8 @@ notify('starting');
 //                              deletion before serving (persistent: RN still holds the device secret — we do NOT
 //                              clear it here; passphrase: the operator is asked for the passphrase first, since
 //                              the device never keeps it — the resume then continues once they enter it) and,
-//                              once verified,
-//                              serving and, once verified, signals the wipe-restart hook itself. So this is
-//                              still a normal `resolveDbEncryptionAndBoot()` call — the server does the rest.
+//                              once verified, signals the wipe-restart hook itself. So this is still a normal
+//                              `resolveDbEncryptionAndBoot()` call — the server does the rest.
 //   - phase `key-clear-ready`→ artifacts are PROVEN gone; the ONLY step left is clearing the device key.
 //                              Do the wipe-restart dance: re-post `loam-wipe-restart`, wait for
 //                              `loam-wipe-complete` (RN VERIFIED the key is gone), delete the phase file,

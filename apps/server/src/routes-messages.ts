@@ -244,18 +244,20 @@ export function registerMessageRoutes(ctx: AppContext): void {
       return reply.code(404).send(errorBody("Message does not exist"));
     }
 
-    // Only the author may edit — rewriting someone else's words is impersonation, so not even an
-    // admin can (admins moderate by deleting instead).
-    if (target.authorId !== currentUser.id) {
-      return reply.code(403).send(errorBody("You can only edit your own messages"));
-    }
-
-    // Authorship is not enough: the author must still be allowed to write *here, now* — not timed
-    // out, still in the channel's audience, channel not archived (see messageMutationError).
+    // The conversation check comes first, as on DELETE: someone outside a private channel gets the same 404
+    // as for an unknown id, never a 403 that confirms a message exists there. For the author it also means
+    // they must still be allowed to write here, now: not timed out, still in the channel's audience,
+    // channel not archived (see messageMutationError).
     const mutationError = ctx.messageMutationError(currentUser, target);
 
     if (mutationError) {
       return reply.code(mutationError.code).send(errorBody(mutationError.error));
+    }
+
+    // Only the author may edit — rewriting someone else's words is impersonation, so not even an
+    // admin can (admins moderate by deleting instead).
+    if (target.authorId !== currentUser.id) {
+      return reply.code(403).send(errorBody("You can only edit your own messages"));
     }
 
     if (target.type === "reaction") {

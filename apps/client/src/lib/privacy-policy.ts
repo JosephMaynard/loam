@@ -43,8 +43,8 @@ export const PRIVACY_POLICY: PolicySection[] = [
       {
         kind: "p",
         text:
-          "That also means LOAM never tells us when something goes wrong. If you find a problem, please let us " +
-          `know: open an issue at \`${ISSUE_TRACKER}\`, or email Magic Zebra Ltd at \`${CONTACT_EMAIL}\`.`,
+          "That also means LOAM never tells us when something goes wrong. If you find a problem, or want to ask " +
+          `for a feature, please let us know: open an issue at \`${ISSUE_TRACKER}\`, or email Magic Zebra Ltd at \`${CONTACT_EMAIL}\`.`,
       },
     ],
   },

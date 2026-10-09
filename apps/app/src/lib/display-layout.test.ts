@@ -29,6 +29,14 @@ describe('displayCodeSize', () => {
     expect(HEADING_HEIGHT + EXIT_HEIGHT + 48 + size + CODE_CAPTION_HEIGHT).toBeLessThanOrEqual(390 + 1);
   });
 
+  it('puts two codes side by side in a squarish window too, when that leaves them larger (a laptop window)', () => {
+    const { size, sideBySide } = displayCodeSize(2, 500, 500);
+    expect(sideBySide).toBe(true);
+    expect(size).toBe(214); // width-bound: (500 - 3 × 24) / 2; stacked they would be 78 and overflow
+    expect(2 * size + 3 * 24).toBeLessThanOrEqual(500);
+    expect(HEADING_HEIGHT + EXIT_HEIGHT + 48 + size + CODE_CAPTION_HEIGHT).toBeLessThanOrEqual(500);
+  });
+
   it('never goes below a scannable minimum', () => {
     expect(displayCodeSize(2, 240, 320).size).toBe(120);
   });

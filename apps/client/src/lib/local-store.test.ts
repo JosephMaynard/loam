@@ -140,6 +140,51 @@ describe("local-store", () => {
       // Our store latched itself in the versionchange handler → it won't rehydrate the DB the sibling erased.
       expect(await getAllRecords<Channel>("channels")).toEqual([]);
     });
+
+    it("an upgrade from a newer tab closes the connection without latching: reads and writes carry on", async () => {
+      await putRecord<Channel>("channels", { id: "c1", name: "One" }); // opens a connection (with onversionchange)
+
+      // A sibling tab running a newer build bumps the database version. Our connection must close so the
+      // upgrade isn't blocked, but this is not a wipe: nothing may latch.
+      await new Promise<void>((resolve, reject) => {
+        const request = indexedDB.open("loam-poc", 2);
+        request.onupgradeneeded = () => {
+          request.result.createObjectStore("extra", { keyPath: "id" });
+        };
+        request.onsuccess = () => {
+          request.result.close();
+          resolve();
+        };
+        request.onerror = () => reject(request.error);
+        request.onblocked = () => reject(new Error("blocked: the versionchange handler did not close the connection"));
+      });
+
+      // The store re-opens on demand, at the newer version, and keeps working.
+      expect((await getAllRecords<Channel>("channels")).map((channel) => channel.id)).toEqual(["c1"]);
+      await putRecord<Channel>("channels", { id: "c2", name: "Two" });
+      expect((await getAllRecords<Channel>("channels")).map((channel) => channel.id).sort()).toEqual(["c1", "c2"]);
+      expect(localStorage.getItem("loam.wipePending")).toBeNull();
+    });
+
+    it("a database already newer than this build's version opens at its own version", async () => {
+      // The other tab upgraded BEFORE this one ever connected (e.g. it loaded first after a deploy).
+      await new Promise<void>((resolve, reject) => {
+        const request = indexedDB.open("loam-poc", 2);
+        request.onupgradeneeded = () => {
+          for (const name of ["channels", "messages", "sync", "users"]) {
+            request.result.createObjectStore(name, { keyPath: "id" });
+          }
+        };
+        request.onsuccess = () => {
+          request.result.close();
+          resolve();
+        };
+        request.onerror = () => reject(request.error);
+      });
+
+      await putRecord<Channel>("channels", { id: "c1", name: "One" });
+      expect((await getAllRecords<Channel>("channels")).map((channel) => channel.id)).toEqual(["c1"]);
+    });
   });
 
   it("clearAllRecords empties every store but leaves the database usable (identity change, review 2026-09-25)", async () => {

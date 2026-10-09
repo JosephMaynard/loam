@@ -45,6 +45,26 @@ export type WifiStationInfo = {
   address?: string | null;
   /** The network name, or null/absent — Android redacts it unless location permission was already granted. */
   ssid?: string | null;
+  /**
+   * True when the device holds a wired (`TRANSPORT_ETHERNET`) network: an Android laptop docked on Ethernet,
+   * a USB adapter. Absent means false. With no Wi-Fi, Wi-Fi hosting mode advertises that network instead.
+   */
+  wired?: boolean;
+};
+
+/**
+ * The foreground host service's notification text, in the app's language (`src/lib/host-service.ts` builds
+ * it from the catalogs). The Kotlin side falls back to English for a start that carries no labels.
+ */
+export type HostServiceLabels = {
+  /** The notification channel's name, shown in the system's notification settings. */
+  channelName: string;
+  /** The channel's description, shown under its name in the system settings. */
+  channelDescription: string;
+  /** The notification's title. */
+  title: string;
+  /** The notification's body text. */
+  text: string;
 };
 
 /** Native → JS events. `onHotspotStopped` fires when the SYSTEM tears the hotspot down (tethering

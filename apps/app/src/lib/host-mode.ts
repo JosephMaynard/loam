@@ -44,6 +44,24 @@ function isUsableIpv4(address: unknown): address is string {
 const WLAN_NAME = /^wlan(\d+)$/i;
 
 /**
+ * A wired adapter: Android's Ethernet stack names them `eth<N>` (a laptop's own port, a USB-C dock), some
+ * builds use Linux's `en…` names. `usb<N>`/`rndis<N>` are deliberately NOT wired here: on a phone they are the
+ * USB-tethering downstream, reachable only by the tethered computer, so advertising them would mislead. Case-insensitive.
+ */
+const WIRED_NAME = /^(eth|en)/i;
+
+/** Whether an interface name is a wired adapter's, see {@link WIRED_NAME}. */
+export function isWiredName(name: string): boolean {
+  return WIRED_NAME.test(name);
+}
+
+/** The first launcher-reported wired interface with a usable private address, or `undefined`. */
+function wiredAddress(interfaces: HostInterface[]): string | undefined {
+  return interfaces.find((entry) => isWiredName(entry.name) && isUsableIpv4(entry.address) && isPrivateIPv4(entry.address))
+    ?.address;
+}
+
+/**
  * Addresses the launcher reported that could reach a same-network joiner: usable IPv4, private, and not on
  * an interface that is never a LAN (cellular `rmnet*`/`ccmni*`, tunnels, USB/Bluetooth tethers — carriers
  * hand out 10.x addresses too, so "private" alone would let a mobile-data address onto the join QR).
@@ -54,14 +72,21 @@ function lanAddresses(interfaces: HostInterface[], addresses: string[]): string[
 }
 
 /**
- * The address to advertise in Wi-Fi mode, or `undefined` when the phone is on no Wi-Fi network (then the
- * share screen asks the operator to connect first — no QR to a guess). In order:
+ * The address to advertise in Wi-Fi mode, or `undefined` when the device is on no Wi-Fi or wired network
+ * (then the share screen asks the operator to connect first — no QR to a guess). In order:
  *   1. the native station address — WifiManager's DHCP / connection info, the address the router gave
  *      this phone, the most direct answer there is;
- *   2. else — only while Android reports a Wi-Fi network, or before the first native read — a
- *      launcher-reported `wlan<N>` interface with a private address (lowest N first): the embedded Node's
- *      own enumeration, for a ROM where the WifiManager read comes back empty;
- *   3. else {@link preferredLanAddress} over the launcher's private, non-cellular addresses.
+ *   2. else, while Android reports NO Wi-Fi network: a launcher-reported wired adapter (`eth*`, `en*`)
+ *      with a private address — a laptop docked on Ethernet serves the same people a
+ *      Wi-Fi station would; or, when the native read says a wired network exists but the launcher names
+ *      its interface differently, {@link preferredLanAddress} over the launcher's private, non-cellular
+ *      addresses; else nothing (a VPN tunnel, the phone's own tethering hotspot or a dead LocalOnlyHotspot
+ *      interface the launcher hasn't dropped yet must never reach the join QR);
+ *   3. else — on Wi-Fi, or before the first native read — a launcher-reported `wlan<N>` interface with a
+ *      private address (lowest N first): the embedded Node's own enumeration, for a ROM where the
+ *      WifiManager read comes back empty;
+ *   4. else a wired adapter as in 2;
+ *   5. else {@link preferredLanAddress} over the launcher's private, non-cellular addresses.
  */
 export function pickWifiAddress(opts: {
   station: WifiStationInfo | undefined;
@@ -72,10 +97,12 @@ export function pickWifiAddress(opts: {
   if (station && isUsableIpv4(station.address)) {
     return station.address;
   }
-  // Android says the phone is on no Wi-Fi network: nothing below can be a Wi-Fi address (a VPN tunnel, the
-  // phone's own tethering hotspot, a dead LocalOnlyHotspot interface the launcher hasn't dropped yet).
+  const wired = wiredAddress(interfaces);
   if (station && !station.connected) {
-    return undefined;
+    if (wired) {
+      return wired;
+    }
+    return station.wired ? preferredLanAddress(lanAddresses(interfaces, addresses)) : undefined;
   }
   const wlan = interfaces
     .map((entry, index) => ({ entry, index, unit: WLAN_NAME.exec(entry.name)?.[1] }))
@@ -84,16 +111,21 @@ export function pickWifiAddress(opts: {
   if (wlan) {
     return wlan.entry.address;
   }
-  return preferredLanAddress(lanAddresses(interfaces, addresses));
+  return wired ?? preferredLanAddress(lanAddresses(interfaces, addresses));
 }
 
 export type WifiJoinDisplay = {
-  /** The join URL (with the transport `#k=` fragment), or `undefined` when the phone is on no Wi-Fi. */
+  /** The join URL (with the transport `#k=` fragment), or `undefined` when the device is on no network. */
   serverUrl: string | undefined;
   /** The host's other LAN addresses, for the "also at" line. */
   addresses: string[];
-  /** The Wi-Fi network's name when Android let us read it without a prompt. */
+  /** The Wi-Fi network's name when Android let us read it without a prompt (never when `wired`). */
   ssid: string | undefined;
+  /**
+   * Whether the advertised address is a wired adapter's (a laptop docked on Ethernet): the panel then names
+   * the connection as wired instead of showing, or asking for, a Wi-Fi network.
+   */
+  wired: boolean;
   /** Devices connected to the server from off this phone (distinct peer addresses). */
   connectedClients: number;
   /** Whether the native station state has been read at least once since the screen opened. */
@@ -110,10 +142,17 @@ export function deriveWifiJoinDisplay(opts: {
 }): WifiJoinDisplay {
   const { station, interfaces, addresses, connectedClients, fragment } = opts;
   const address = pickWifiAddress({ station, interfaces, addresses });
+  // Wired when the address sits on a wired-named interface, or when Android reports no Wi-Fi network but a
+  // wired one (then whatever the fallback found is the wired network's).
+  const wired =
+    address !== undefined &&
+    (interfaces.some((entry) => entry.address === address && isWiredName(entry.name)) ||
+      (station?.connected === false && station.wired === true));
   return {
     serverUrl: address ? `http://${address}:${SERVER_PORT}${fragment}` : undefined,
     addresses: [...new Set(lanAddresses(interfaces, addresses))].filter((entry) => entry !== address),
-    ssid: typeof station?.ssid === 'string' && station.ssid.length > 0 ? station.ssid : undefined,
+    ssid: !wired && typeof station?.ssid === 'string' && station.ssid.length > 0 ? station.ssid : undefined,
+    wired,
     connectedClients: new Set(connectedClients).size,
     checked: station !== undefined,
   };
@@ -121,10 +160,11 @@ export function deriveWifiJoinDisplay(opts: {
 
 /**
  * Project the Wi-Fi display onto the presentational panel: `starting` until the first station read lands,
- * `running` once there is an address to advertise, `stopped` while the phone is on no Wi-Fi network.
+ * `running` once there is an address to advertise, `stopped` while the device is on no Wi-Fi or wired
+ * network.
  */
 export function toWifiPanelState(display: WifiJoinDisplay): HostState {
-  const { serverUrl, addresses, ssid, connectedClients, checked } = display;
+  const { serverUrl, addresses, ssid, wired, connectedClients, checked } = display;
   const status: HostState['status'] = serverUrl ? 'running' : checked ? 'stopped' : 'starting';
   return {
     mode: 'wifi',
@@ -133,5 +173,6 @@ export function toWifiPanelState(display: WifiJoinDisplay): HostState {
     addresses,
     connectedClients,
     ...(ssid ? { wifiNetwork: ssid } : {}),
+    ...(wired ? { wired: true } : {}),
   };
 }

@@ -452,6 +452,62 @@ describe("user blocking (docs/30 B3)", () => {
     expect((await transfer(bob, bobs, alice.userId)).statusCode).toBe(200);
   });
 
+  it("refuses to approve a join request across a block, generically, both ways", async () => {
+    const app = await makeApp();
+    await newSession(app);
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+    await block(app, alice.cookie, bob.userId);
+
+    /** A private channel owned by `owner` that takes join requests. */
+    const createOpenToRequests = async (owner: { cookie: string }, name: string): Promise<string> => {
+      const created = await app.server.inject({
+        method: "POST",
+        url: "/api/channels",
+        headers: { cookie: owner.cookie },
+        payload: { name, visibility: "private" },
+      });
+      expect(created.statusCode).toBe(201);
+      const id = (created.json() as { id: string }).id;
+      expect(
+        (
+          await app.server.inject({ method: "PATCH", url: `/api/channels/${id}`, headers: { cookie: owner.cookie }, payload: { allowJoinRequests: true } })
+        ).statusCode,
+      ).toBe(200);
+      return id;
+    };
+    const requestJoin = (actor: { cookie: string }, channelId: string) =>
+      app.server.inject({ method: "POST", url: `/api/channels/${channelId}/join-requests`, headers: { cookie: actor.cookie } });
+    const approve = (actor: { cookie: string }, channelId: string, userId: string) =>
+      app.server.inject({ method: "POST", url: `/api/channels/${channelId}/join-requests/${userId}/approve`, headers: { cookie: actor.cookie } });
+    const memberIds = async (actor: { cookie: string }, channelId: string): Promise<string[]> =>
+      (
+        (await app.server.inject({ method: "GET", url: `/api/channels/${channelId}/members`, headers: { cookie: actor.cookie } })).json() as { id: string }[]
+      ).map((user) => user.id);
+
+    // The blocked party (Bob) asks to join Alice's channel: approving gets the invite path's generic answer.
+    const alices = await createOpenToRequests(alice, "Alices Room");
+    expect((await requestJoin(bob, alices)).statusCode).toBe(201);
+    const refused = await approve(alice, alices, bob.userId);
+    expect(refused.statusCode).toBe(403);
+    expect(codeOf(refused)).toBe("channel_member_unavailable");
+    expect(JSON.stringify(refused.json())).not.toMatch(/block/i);
+    expect(await memberIds(alice, alices)).not.toContain(bob.userId);
+
+    // And the other way round: the blocker asks, the blocked owner can't let her in.
+    const bobs = await createOpenToRequests(bob, "Bobs Room");
+    expect((await requestJoin(alice, bobs)).statusCode).toBe(201);
+    const reverse = await approve(bob, bobs, alice.userId);
+    expect(reverse.statusCode).toBe(403);
+    expect(codeOf(reverse)).toBe("channel_member_unavailable");
+
+    // Unblocking restores approval.
+    await unblock(app, alice.cookie, bob.userId);
+    expect((await requestJoin(bob, alices)).statusCode).toBe(201);
+    expect((await approve(alice, alices, bob.userId)).statusCode).toBe(200);
+    expect(await memberIds(alice, alices)).toContain(bob.userId);
+  });
+
   it("changes nothing in the node-sync export", async () => {
     const app = await makeApp({ sync: { enabled: true, peers: [], intervalMs: 3_600_000 } });
     await newSession(app);

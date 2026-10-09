@@ -1,7 +1,11 @@
-// Expo config plugin for the LOAM Android host (docs/04). Applied at `expo prebuild`. Three jobs:
+// Expo config plugin for the LOAM Android host (docs/04). Applied at `expo prebuild`. Its jobs:
 //
-//   1. Allow cleartext HTTP so the WebView can load http://localhost:3000 (the embedded server has
-//      no TLS — there's no CA on a local hotspot). Sets android:usesCleartextTraffic="true".
+//   1. Allow cleartext HTTP to loopback ONLY, through a res/xml/network_security_config.xml: the WebView
+//      loads http://localhost:3000 and the launcher fetches it (the embedded server has no TLS; there's no
+//      CA on a local hotspot), while everything else the app itself fetches (model downloads, the GitHub
+//      update check) is HTTPS and stays refused in the clear. The embedded Node server's own sockets are
+//      not subject to this config (it isn't the Android HTTP stack). Replaces the app-wide
+//      android:usesCleartextTraffic="true" that Play's pre-launch report flagged.
 //
 //   2. Restrict native ABIs to arm64-v8a only. nodejs-mobile's x86/x86_64 CMake build is broken
 //      upstream (#78/#88), and if the app leaves ndk.abiFilters unset the module defaults to a list
@@ -11,19 +15,29 @@
 //      armeabi-v7a support needs its own prebuild and the per-ABI gradle path — a follow-up.
 //
 //   3. Declare the WiFi + location permissions the LocalOnlyHotspot native module needs (see
-//      modules/loam-hotspot). LocalOnlyHotspot is location-gated, so ACCESS_FINE_LOCATION is
-//      mandatory; NEARBY_WIFI_DEVICES covers API 33+, and CHANGE/ACCESS_WIFI_STATE are needed to
-//      start and read the hotspot. The runtime grant is requested from JS before starting.
-//      ACCESS_FINE_LOCATION is declared on ALL supported API levels (no `maxSdkVersion` cap) — see
-//      the "REGRESSION NOTE" comment below for why capping it at API 32 silently breaks the hotspot
-//      on API 33+.
+//      modules/loam-hotspot). LocalOnlyHotspot is location-gated below API 33, so ACCESS_FINE_LOCATION
+//      is mandatory there, and ACCESS_COARSE_LOCATION is declared beside it because Android 12+ requires
+//      a fine request to carry coarse in the same dialog (a fine-only request is ignored on some Android
+//      12 releases, and a runtime request for an undeclared permission auto-denies). NEARBY_WIFI_DEVICES
+//      gates the call on API 33+, and CHANGE/ACCESS_WIFI_STATE are needed to start and read the hotspot.
+//      The runtime grant is requested from JS before starting (src/lib/hotspot-permissions.ts holds the
+//      list + grant rule). ACCESS_FINE_LOCATION is declared on ALL supported API levels (no
+//      `maxSdkVersion` cap); the "REGRESSION NOTE" comment below says why capping it at API 32
+//      silently broke the hotspot on API 33+.
 //
 //   4. Keep the on-device data off every backup/transfer path (allowBackup=false + fullBackupContent=false
 //      below API 31, and a data_extraction_rules.xml excluding every domain for BOTH cloud backup and
 //      Android 12+ device-to-device transfer, which allowBackup=false alone does NOT stop at targetSdk 31+).
 //
-//   5. Declare the implied hardware features (Wi-Fi, location/GPS, Bluetooth) as optional so Play doesn't
-//      hide the listing from tablets/Chromebooks without them — the app degrades (no hotspot / no mesh).
+//   5. Declare the implied hardware features (Wi-Fi, location/GPS, Bluetooth, camera) as optional so Play
+//      doesn't hide the listing from tablets/Chromebooks without them — the app degrades (no hotspot / no
+//      mesh / no scanner) — and declare the touchscreen (and faketouch) optional too, or Play hides the app
+//      from Android laptops with only a keyboard and trackpad. With it, `android:resizeableActivity="true"`
+//      on the main activity: the host runs in any orientation and any window size (tablets, foldables,
+//      laptops), which is what app.json `orientation: "default"` means and what Play's large-screen
+//      guidelines ask for (docs/04 "Large screens", docs/30). Both screen orientations are declared optional
+//      as well: Google's code scanner, merged in through expo-camera, brings a portrait-locked activity, and
+//      Play would otherwise read the built APK as requiring a portrait screen.
 //
 //   6. Stamp the generated android/ project with a fingerprint of app.json + these plugins, and make the
 //      Gradle build fail when they no longer match — so a direct `./gradlew` on a STALE prebuild (old
@@ -44,10 +58,13 @@ const ABIS = "arm64-v8a";
 const MARKER = "// loam-host: arm-only ABIs";
 
 // Manifest permissions the hotspot module requires (docs/04). ACCESS_FINE_LOCATION is mandatory for
-// LocalOnlyHotspot; NEARBY_WIFI_DEVICES is the API 33+ companion; the WIFI_STATE pair lets the app
-// start and query the hotspot.
+// LocalOnlyHotspot below API 33, and ACCESS_COARSE_LOCATION must be declared with it: Android 12+ only
+// honours a fine request that asks for coarse in the same dialog, and the JS side requests both on every
+// API level (src/lib/hotspot-permissions.ts). NEARBY_WIFI_DEVICES is what gates the call on API 33+; the
+// WIFI_STATE pair lets the app start and query the hotspot.
 const HOTSPOT_PERMISSIONS = [
   "android.permission.ACCESS_FINE_LOCATION",
+  "android.permission.ACCESS_COARSE_LOCATION",
   "android.permission.NEARBY_WIFI_DEVICES",
   "android.permission.CHANGE_WIFI_STATE",
   "android.permission.ACCESS_WIFI_STATE",
@@ -148,9 +165,36 @@ function dataExtractionRulesXml() {
   ].join("\n");
 }
 
-/** Apply cleartext + the no-backup attributes to a parsed `<application>` element (pure, tested). */
+// Cleartext HTTP is permitted to these hosts only (see networkSecurityConfigXml): the embedded server's
+// loopback origin, which the host's own WebView loads and the launcher fetches. A LAN joiner's phone talks to
+// the server from its own browser, not through this app, so the LAN never needs an exception here.
+const CLEARTEXT_HOSTS = ["localhost", "127.0.0.1"];
+const NETWORK_SECURITY_CONFIG_RESOURCE = "@xml/network_security_config";
+
+/** The res/xml/network_security_config.xml body: cleartext refused everywhere except CLEARTEXT_HOSTS. */
+function networkSecurityConfigXml() {
+  const domains = CLEARTEXT_HOSTS.map((host) => `    <domain includeSubdomains="false">${host}</domain>`).join("\n");
+  return [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    "<!-- Generated by plugins/with-loam-host.js. Cleartext HTTP only to the embedded server's loopback origin",
+    "     (the host's own WebView and the launcher); every other connection the app makes must be HTTPS. -->",
+    "<network-security-config>",
+    '  <base-config cleartextTrafficPermitted="false" />',
+    '  <domain-config cleartextTrafficPermitted="true">',
+    domains,
+    "  </domain-config>",
+    "</network-security-config>",
+    "",
+  ].join("\n");
+}
+
+/** Apply the network security config + the no-backup attributes to a parsed `<application>` element (pure, tested). */
 function applyApplicationAttributes(application) {
-  application.$["android:usesCleartextTraffic"] = "true";
+  // Loopback-only cleartext (networkSecurityConfigXml). `usesCleartextTraffic` is dropped rather than set to
+  // false: when a networkSecurityConfig is present Android ignores that attribute, and leaving it behind
+  // would keep the app-wide "true" a scanner reads.
+  application.$["android:networkSecurityConfig"] = NETWORK_SECURITY_CONFIG_RESOURCE;
+  delete application.$["android:usesCleartextTraffic"];
   // Disable OS backup: the on-device `.loam` dir holds the message history, avatars, attachments and
   // config (plaintext unless on-device encryption is on). Expo defaults allowBackup to true, which would
   // let Google Auto Backup and `adb backup` copy that off the device — wrong for a privacy app whose whole
@@ -163,26 +207,51 @@ function applyApplicationAttributes(application) {
   return application;
 }
 
-/** Force cleartext + no-backup attributes on the <application> element. */
-function withCleartextTraffic(config) {
+/** Force the network security config + no-backup attributes on the <application> element. */
+function withApplicationAttributes(config) {
   return withAndroidManifest(config, (cfg) => {
     const application = cfg.modResults.manifest.application?.[0];
     if (!application) {
       // Silently skipping would ship an APK whose WebView can't reach http://localhost:3000.
-      throw new Error("with-loam-host: no <application> element in AndroidManifest.xml to set usesCleartextTraffic on.");
+      throw new Error("with-loam-host: no <application> element in AndroidManifest.xml to set networkSecurityConfig on.");
     }
     applyApplicationAttributes(application);
     return cfg;
   });
 }
 
-/** Write res/xml/data_extraction_rules.xml into the generated project (referenced by the manifest above). */
-function withDataExtractionRules(config) {
+/**
+ * Apply the large-screen attributes to a parsed main `<activity>` element (pure, tested): the host declares
+ * itself resizable, so it fills a tablet in either orientation and runs in a freeform or split window on a
+ * foldable or an Android laptop. Android 16 already ignores a fixed orientation and a non-resizable flag on
+ * displays of 600dp and up for apps targeting API 36, so this only makes explicit what those devices do
+ * anyway; Play's large-screen checks read the attribute. `configChanges` (orientation, screenSize,
+ * screenLayout, smallestScreenSize…) is Expo's template value and is left as it is: the activity handles a
+ * rotation or a resize without being recreated. `screenOrientation` is left to app.json (`"default"` →
+ * `unspecified`), never forced here.
+ */
+function applyMainActivityAttributes(activity) {
+  activity.$["android:resizeableActivity"] = "true";
+  return activity;
+}
+
+/** Force the large-screen attributes on the main activity. */
+function withMainActivityAttributes(config) {
+  return withAndroidManifest(config, (cfg) => {
+    applyMainActivityAttributes(AndroidConfig.Manifest.getMainActivityOrThrow(cfg.modResults));
+    return cfg;
+  });
+}
+
+/** Write res/xml/network_security_config.xml + data_extraction_rules.xml into the generated project (both
+ * referenced from the manifest attributes above). */
+function withXmlResources(config) {
   return withDangerousMod(config, [
     "android",
     (cfg) => {
       const xmlDir = join(cfg.modRequest.platformProjectRoot, "app", "src", "main", "res", "xml");
       mkdirSync(xmlDir, { recursive: true });
+      writeFileSync(join(xmlDir, "network_security_config.xml"), networkSecurityConfigXml());
       writeFileSync(join(xmlDir, "data_extraction_rules.xml"), dataExtractionRulesXml());
       return cfg;
     },
@@ -229,12 +298,27 @@ function withArmOnlyReactNativeArchitectures(config) {
 }
 
 // Hardware the declared permissions IMPLY as required (CHANGE_WIFI_STATE → wifi, ACCESS_FINE_LOCATION →
-// location + location.gps, BLUETOOTH_* → bluetooth), plus the mesh radios. All optional: without Wi-Fi the
-// hotspot just can't start (the LAN join path remains), without BLE/Aware there is no mesh. Also the
-// portrait screen that app.json `orientation: "portrait"` implies — landscape-only devices (Chromebooks,
-// some TVs/tablets) would otherwise be filtered from Play; the app still runs there, letterboxed.
+// location + location.gps, ACCESS_COARSE_LOCATION → location + location.network, BLUETOOTH_* →
+// bluetooth), plus the mesh radios. All optional: without Wi-Fi the
+// hotspot just can't start (the LAN join path remains), without BLE/Aware there is no mesh. The touchscreen
+// is the one Play assumes REQUIRED unless told otherwise (every app implies `android.hardware.touchscreen`),
+// which hides the listing from Android laptops and desktops that have only a keyboard and trackpad; declared
+// optional (with `faketouch`, the pointer-only form) because every native control here is a Pressable or a
+// TextInput, which take mouse clicks and keyboard focus, and the WebView handles both itself.
+// Both screen orientations, because a library activity locks one even though app.json locks none
+// (`orientation: "default"`, MainActivity `screenOrientation="unspecified"`): Google's code scanner
+// (play-services-code-scanner, a dependency of expo-camera's barcode scanner) merges in
+// `com.google.mlkit.vision.codescanner.internal.GmsBarcodeScanningDelegateActivity` with
+// `android:screenOrientation="portrait"` (an invisible delegate that starts Google's scanner UI). One
+// portrait-locked activity makes the APK imply `android.hardware.screen.portrait` as REQUIRED, which lets
+// Play exclude devices with a landscape-only screen, Android laptops among them. The host runs in either
+// orientation, so both are declared optional (landscape too, so a library locking that one can't do the
+// same).
 const OPTIONAL_FEATURES = [
+  "android.hardware.touchscreen",
+  "android.hardware.faketouch",
   "android.hardware.screen.portrait",
+  "android.hardware.screen.landscape",
   "android.hardware.bluetooth",
   "android.hardware.bluetooth_le",
   "android.hardware.wifi",
@@ -334,11 +418,16 @@ function withMeshManifest(config) {
 // Fix: declare ACCESS_FINE_LOCATION on ALL supported API levels (no cap), so the JS side's existing
 // (unconditional) request is satisfiable again. This restores the exact configuration that was
 // verified working on an arm64 API-35 emulator (docs/04, "Emulator-verified... tapping it prompts
-// for ACCESS_FINE_LOCATION then NEARBY_WIFI_DEVICES, and startHotspot() runs"). The cleaner long-term
-// fix — matching what NEARBY_WIFI_DEVICES's `neverForLocation` flag is actually for — is to update
-// `use-hotspot.ts` to request ONLY NEARBY_WIFI_DEVICES on API 33+ and drop ACCESS_FINE_LOCATION
-// there, which would let this manifest cap come back. That's a JS-side change outside this module's
-// scope for this fix; left as a follow-up (see docs/04).
+// for ACCESS_FINE_LOCATION then NEARBY_WIFI_DEVICES, and startHotspot() runs").
+//
+// Since then the JS side (src/lib/hotspot-permissions.ts, used by use-hotspot.ts) has changed in two
+// ways. It requests ACCESS_COARSE_LOCATION together with ACCESS_FINE_LOCATION on every API level,
+// because Android 12+ ignores a fine-only request on some releases (hence the coarse entry in
+// HOTSPOT_PERMISSIONS above: an undeclared permission in a request auto-denies, exactly the failure
+// described here). And on API 33+ it now gates the start on NEARBY_WIFI_DEVICES alone, as Android
+// does, so a denied location answer there no longer blocks the hotspot. The location request itself
+// is still issued on API 33+, so ACCESS_FINE_LOCATION stays uncapped; dropping that request on 33+
+// (and letting the cap come back) remains the follow-up noted in docs/04.
 // -------------------------------------------------------------------------------------------------
 
 // --- Stale-prebuild guard ------------------------------------------------------------------------
@@ -434,8 +523,9 @@ function withPrebuildFingerprint(config) {
 }
 
 module.exports = function withLoamHost(config) {
-  config = withCleartextTraffic(config);
-  config = withDataExtractionRules(config);
+  config = withApplicationAttributes(config);
+  config = withMainActivityAttributes(config);
+  config = withXmlResources(config);
   config = withArmOnlyAbiFilters(config);
   config = withArmOnlyReactNativeArchitectures(config);
   // Merge (de-duped) the hotspot + foreground-service + mesh-transport permissions into the manifest.
@@ -451,13 +541,18 @@ module.exports = function withLoamHost(config) {
 // Pure helpers, exported for the unit tests in src/__tests__/with-loam-host.test.ts.
 module.exports._internal = {
   BACKUP_DOMAINS,
+  CLEARTEXT_HOSTS,
   FINGERPRINT_FILE,
+  HOTSPOT_PERMISSIONS,
   LEGACY_BLUETOOTH_PERMISSIONS,
+  NETWORK_SECURITY_CONFIG_RESOURCE,
   OPTIONAL_FEATURES,
   STALE_GUARD_GRADLE,
   addLegacyBluetoothPermissions,
   addOptionalFeatures,
   applyApplicationAttributes,
+  applyMainActivityAttributes,
   dataExtractionRulesXml,
+  networkSecurityConfigXml,
   prebuildFingerprint,
 };

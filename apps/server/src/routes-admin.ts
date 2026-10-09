@@ -7,7 +7,24 @@ import type { AppContext } from "./app-context.js";
 import { mergeConfig } from "./config.js";
 import { errorBody } from "./errors.js";
 import { makeAdminSetupCode } from "./identity.js";
+import type { KillSwitchResult } from "./kill-switch.js";
 import { timingSafeEqualStrings, verifySecret } from "./secrets.js";
+
+/**
+ * The 503 body for an Emergency Reset that could not finish. With the wipe journal on disk the next boot
+ * deletes everything before it serves, so a restart finishes the wipe (`wipe_incomplete`); without it (the
+ * journal write itself failed) a restart would serve whatever survived, so the admin has to fire the reset
+ * again (`wipe_unrecorded`). The two codes keep a client that translates by code from promising the wrong
+ * one, and `journaled` carries the same fact for a caller that reads the body itself (the host launcher).
+ */
+function incompleteWipeBody(result: KillSwitchResult): { error: string; code?: string; journaled: boolean } {
+  const body = result.journaled
+    ? errorBody("The emergency wipe could not be completed; the node is locked down. Restart it to finish the wipe.")
+    : errorBody(
+        "The emergency wipe could not be completed and could not be recorded; the node is locked down. Restart it and fire the Emergency Reset again.",
+      );
+  return { ...body, journaled: result.journaled };
+}
 
 /**
  * Keep config.json authoritative for the launcher-owned `llm.onDevice` block. When config.json carries it,
@@ -166,9 +183,7 @@ export function registerAdminRoutes(ctx: AppContext): void {
     // incomplete/unverifiable → the node is 503-locked and the wipe is retried on the next boot).
     const result = await ctx.executeKillSwitch();
     if (!result.complete) {
-      return reply
-        .code(503)
-        .send(errorBody("The emergency wipe could not be completed; the node is locked down. Reopen it to retry."));
+      return reply.code(503).send(incompleteWipeBody(result));
     }
     return { ok: true };
   });
@@ -221,9 +236,7 @@ export function registerAdminRoutes(ctx: AppContext): void {
     // not as a false `{ ok: true }`. Only genuine probing (bad/absent token, above) stays a uniform 404.
     const result = await ctx.executeKillSwitch();
     if (!result.complete) {
-      return reply
-        .code(503)
-        .send(errorBody("The emergency wipe could not be completed; the node is locked down. Reopen it to retry."));
+      return reply.code(503).send(incompleteWipeBody(result));
     }
     return { ok: true };
   });

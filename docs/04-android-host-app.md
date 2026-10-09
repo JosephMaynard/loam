@@ -168,7 +168,8 @@ join:
   places without infrastructure.
 - **Wi-Fi** hosts on the Wi-Fi network the phone has already joined (home, office, an event's router).
   No hotspot starts, and anyone on the same network scans a single URL QR ("Join on this Wi-Fi"); there
-  is no Step 1.
+  is no Step 1. On an Android laptop docked on Ethernet with no Wi-Fi, the same mode hosts on the wired
+  network: the card then reads "Join on this network" and names the connection as wired.
 
 The choice is persisted in `expo-secure-store` under `loam.hostMode` (`src/hooks/use-host-mode.ts` over
 the pure, tested `src/lib/host-mode-store.ts`), beside the DB-encryption mode selection; a missing or
@@ -180,12 +181,13 @@ service (`ensureHostService`) runs in both modes: in Wi-Fi mode it is asserted a
 opens or the mode switches, since there is no hotspot start to wait for.
 
 **No location permission in Wi-Fi mode.** Nothing in this mode asks for one. The overlay reads the
-phone's Wi-Fi state with a new native call, `wifiStationInfo()` → `{ connected, address, ssid }`
+phone's Wi-Fi state with a new native call, `wifiStationInfo()` → `{ connected, address, ssid, wired }`
 (`LoamHotspotModule.kt`; `readWifiStationInfo()` in `modules/loam-hotspot/index.ts` resolves
 `{ connected: false }` on any failure and never rejects), on open and every 5 s while the overlay is
 showing. `connected` is true when *any* network the phone holds has `TRANSPORT_WIFI` (not only the default
 one: on a router with no uplink Android keeps mobile data as the default network while Wi-Fi stays up), or
-WifiManager reports a DHCP address. The network name is best effort: Android redacts it to
+WifiManager reports a DHCP address; `wired` is true when any network it holds has `TRANSPORT_ETHERNET` (a
+laptop's own port, a USB adapter). The network name is best effort: Android redacts it to
 `<unknown ssid>` unless location permission was already granted (say, by an earlier hotspot start), so
 the panel shows "Network: <name>" only when it can, and otherwise says "the Wi-Fi network this phone is
 on".
@@ -194,15 +196,22 @@ on".
 
 1. the native station address, the one the router's DHCP gave this phone (`WifiManager.dhcpInfo` /
    `connectionInfo`, the same `stationAddresses()` the hotspot picker uses to rule the station out);
-2. else a launcher-reported `wlan<N>` interface with an RFC 1918 address (lowest N first), from
-   `loam-hostinfo`'s `interfaces`;
-3. else `preferredLanAddress` over the launcher's private addresses, skipping any on a cellular, tunnel or
+2. else, while Android reports **no** Wi-Fi network: a launcher-reported wired adapter (`eth*` or `en*`;
+   `usb*` and `rndis*` are deliberately excluded, since on a phone they are the USB-tethering downstream,
+   reachable only by the tethered computer) with an RFC 1918 address, or, when the native read says a wired
+   network exists but the launcher names its interface differently, `preferredLanAddress` over the
+   launcher's private, non-cellular addresses; else nothing;
+3. else (on Wi-Fi, or before the first native read) a launcher-reported `wlan<N>` interface with an
+   RFC 1918 address (lowest N first), from `loam-hostinfo`'s `interfaces`;
+4. else a wired adapter as in 2;
+5. else `preferredLanAddress` over the launcher's private addresses, skipping any on a cellular, tunnel or
    tethering interface (carriers hand out 10.x addresses too, so "private" alone isn't enough).
 
-Steps 2 and 3 run only while Android reports a Wi-Fi network (or before the first native read): with Wi-Fi
-off — even with a VPN tunnel (`ipsec<N>`, `tun*`…), the phone's own tethering hotspot or a stale AP
-interface around — there is no URL and no QR: the card says "Connect this phone
-to a Wi-Fi network first", plus any other addresses as "also at". "N phones connected" works in both modes
+With Wi-Fi off and no wired adapter — even with a VPN tunnel (`ipsec<N>`, `tun*`…), the phone's own
+tethering hotspot or a stale AP interface around — there is no URL and no QR: the card says "Connect this
+phone to Wi-Fi or a wired network first", plus any other addresses as "also at". When the address is a
+wired adapter's (`WifiJoinDisplay.wired`), the status pill reads "Hosting on a wired network" and the card
+names the connection as wired instead of showing a Wi-Fi name. "N phones connected" works in both modes
 and remains the proof that the path works.
 
 **Client isolation.** Guest, hotel, café and campus networks often stop devices from reaching each other,
@@ -212,7 +221,8 @@ line and points to Hotspot, which doesn't depend on the network's policy.
 **Verification status.** The Kotlin compiles (`:loam-hotspot:compileReleaseKotlin`), and the JS side's
 parsing, address choice, panel projection and persistence are covered by `host-mode.test.ts` and
 `host-mode-store.test.ts`. It has not yet been run on a physical phone: the station read, the SSID
-redaction behaviour and the no-internet-router case all need a device test.
+redaction behaviour, the wired flag (a laptop on Ethernet) and the no-internet-router case all need a
+device test.
 
 ### Setup screens
 
@@ -334,10 +344,18 @@ vendored tarball before installing it. Each JS-wrapper npm version and its
   `<device-transfer>`. At targetSdk 31+ `allowBackup=false` alone does **not** stop Android 12+
   device-to-device transfer, which would otherwise copy `loam.db`, avatars, attachments and
   `config.json` to a new phone.
-- **Optional hardware.** Wi-Fi, Wi-Fi Aware, location (+ GPS/network), Bluetooth/BLE and the portrait
-  screen (implied by `orientation: "portrait"`) are declared `uses-feature required="false"`, so Play
-  doesn't hide the listing from devices without them (Chromebooks included); the app degrades (no
-  hotspot, no mesh, letterboxed on a landscape-only screen).
+- **Optional hardware.** Wi-Fi, Wi-Fi Aware, location (+ GPS/network), Bluetooth/BLE, the camera and the
+  touchscreen (`android.hardware.touchscreen` + `faketouch`, which every app otherwise implies as required)
+  are declared `uses-feature required="false"`, so Play doesn't hide the listing from devices without
+  them: tablets and Chromebooks without a radio, Android laptops with only a keyboard and trackpad. The app
+  degrades (no hotspot, no mesh, no scanner). Both screen orientations (`android.hardware.screen.portrait` +
+  `screen.landscape`) are declared optional too. `app.json` locks none (see "Large screens" below), but
+  Google's code scanner, merged in through expo-camera, brings
+  `com.google.mlkit.vision.codescanner.internal.GmsBarcodeScanningDelegateActivity` with
+  `android:screenOrientation="portrait"`, and that alone makes the built APK imply a required portrait
+  screen, which lets Play exclude landscape-only devices such as Android laptops. Check it in the merged
+  manifest (`apps/app/android/app/build/intermediates/merged_manifests/release/`), not the generated
+  source one.
 - **Unused template permissions blocked** (`SYSTEM_ALERT_WINDOW`, `READ/WRITE_EXTERNAL_STORAGE`, via
   `android.blockedPermissions`), and `CHANGE_NETWORK_STATE` declared for the Wi-Fi Aware data path.
 - **Deep links ignored.** `app.json` keeps the `loam://` scheme (Expo Router resolves its root URL
@@ -345,6 +363,30 @@ vendored tarball before installing it. Each JS-wrapper npm version and its
   filter. `src/app/+native-intent.tsx` rewrites every incoming URL to the host screen on launch and
   ignores it afterwards.
 - **Themed icon.** `android.adaptiveIcon.monochromeImage` (a white wordmark on transparent).
+
+### Large screens
+
+The host runs on tablets, foldables and Android laptops (Google's Android-based laptops run Android apps
+natively, with a keyboard, a trackpad, windowed apps and often no touchscreen) as well as phones. What is
+declared: `app.json` `orientation: "default"` (no portrait lock; Expo writes
+`android:screenOrientation="unspecified"`), `android:resizeableActivity="true"` on the main activity
+(`plugins/with-loam-host.js`, `applyMainActivityAttributes`, tested) with Expo's `configChanges` kept so a
+rotation or a resize never recreates the activity, and the touchscreen and both screen orientations as
+optional (above; the code scanner's portrait-locked delegate activity would otherwise make portrait
+required). Android 16
+already ignores an orientation lock and a non-resizable flag on displays of 600dp and up for apps targeting
+API 36, so this makes explicit what those devices do anyway and is what Play's large-screen checks read.
+Every native screen is a scrolling column centred at `MaxContentWidth` (800dp), the boot/recovery screen
+and the host menu's card included, so a short landscape window or a narrow split-screen pane scrolls
+rather than clips; display mode puts its two codes side by side whenever that leaves them larger
+(`displayCodeSize`), which covers landscape and a squarish laptop window. Every control is a `Pressable`
+or `TextInput` with an accessibility role, so a mouse, a trackpad and a hardware keyboard reach it (Enter
+submits the network-name, passphrase and model-URL fields); the hold-to-confirm controls work from
+press-in to press-out, so a mouse press-and-hold fires them while a keyboard activation alone does not
+(deliberate: the hold is the safeguard). The WebView shows the web client's desktop layout at laptop
+widths (the client's own breakpoints) and handles keyboard and mouse itself. Whether a LocalOnlyHotspot
+can start on a laptop depends on its Wi-Fi hardware and firmware, so there **Wi-Fi mode is the expected
+path**: it hosts on the network the laptop is on, a wired one included (see "Hosting modes").
 
 ## Goal
 
@@ -455,10 +497,24 @@ readable reason on `onFailed`, a `SecurityException` (missing permission), or an
 emulator's no-WiFi failure surfaces cleanly instead of hanging. The JS wrapper
 (`modules/loam-hotspot/index.ts`) loads the module with `requireOptionalNativeModule`, so importing it
 off-Android yields `null` rather than a crash. `src/hooks/use-hotspot.ts` requests the runtime
-permissions (`ACCESS_FINE_LOCATION`, plus `NEARBY_WIFI_DEVICES` on API 33+) via
-`PermissionsAndroid.requestMultiple` **before** starting, tracks a module-scope singleton state
-(Android allows one hotspot per process), and never throws — denial/failure lands in an `error` phase.
-The permissions are declared in the manifest by the config plugin (`with-loam-host.js`).
+permissions via one `PermissionsAndroid.requestMultiple` call **before** starting, tracks a module-scope
+singleton state (Android allows one hotspot per process), and never throws: denial/failure lands in an
+`error` phase. The request list and the grant rule are the pure, unit-tested
+`src/lib/hotspot-permissions.ts`:
+
+- `ACCESS_FINE_LOCATION` and `ACCESS_COARSE_LOCATION` are requested **together on every API level**.
+  Android 12+ requires a fine request to carry coarse in the same dialog, and on some Android 12 releases
+  a fine-only request is ignored outright (no dialog, a logcat "ACCESS_FINE_LOCATION must be requested
+  with ACCESS_COARSE_LOCATION"), which left a fresh install there unable to start the hotspot at all.
+- `NEARBY_WIFI_DEVICES` is added from API 33.
+- Below API 33 the start needs **fine** location (LocalOnlyHotspot is location-gated there): a user who
+  picks "Approximate" on the dialog has denied the hotspot and sees the location message. From API 33
+  `NEARBY_WIFI_DEVICES` is what gates `startLocalOnlyHotspot` (the manifest marks it `neverForLocation`),
+  so its grant decides and the location answer is not consulted.
+
+The permissions are declared in the manifest by the config plugin (`with-loam-host.js`), coarse beside
+fine; a test checks the manifest list covers the runtime request on every API level, since a request for a
+permission the manifest does not declare auto-denies with no dialog.
 
 > **Correction (fix/device-feedback-round1):** an earlier hardening pass ("A10") capped
 > `ACCESS_FINE_LOCATION` with `android:maxSdkVersion="32"` in the plugin, reasoning that
@@ -472,9 +528,11 @@ The permissions are declared in the manifest by the config plugin (`with-loam-ho
 > hotspot could never start on **any** device running API 33+ — confirmed as the cause of a "Host
 > stopped / location permission is needed" regression on a Galaxy S25 Ultra (API 35). Fixed by
 > removing the `maxSdkVersion` cap, restoring the exact configuration verified in the emulator run
-> quoted above. A cleaner long-term fix is updating `use-hotspot.ts` to request only
-> `NEARBY_WIFI_DEVICES` on API 33+ — left as a follow-up, since the emulator behaviour above shows the
-> current unconditional-`ACCESS_FINE_LOCATION` request is at least a working baseline.
+> quoted above. Since then the grant rule has moved to `src/lib/hotspot-permissions.ts` and, on API 33+,
+> keys on `NEARBY_WIFI_DEVICES` alone (see the list above), so a denied location answer there no longer
+> blocks the hotspot; the location request is still issued on every API level, which is why
+> `ACCESS_FINE_LOCATION` stays uncapped. Requesting only `NEARBY_WIFI_DEVICES` on API 33+ (and letting
+> the cap come back) remains the follow-up.
 
 **Host UI:** `src/app/index.tsx` renders a compact host bar above the LOAM WebView with a **"Share ·
 Host"** button (a top bar, not a floating overlay — an Android WebView swallows touches on any native
@@ -488,14 +546,18 @@ found; Step 2 says "Finding the hotspot's address…" meanwhile, and gives the m
 never is). When the hotspot can't start, `HostPanel` shows the error in Step 1 while keeping Step 2 with
 the launcher-reported LAN address (graceful degradation).
 
-**Left-on-display controls** (both optional, both in the overlay): **Keep screen on** holds an
-`expo-keep-awake` lock while enabled — for a host taped to a wall showing the join QRs. **Kiosk mode**
-enters Android **screen pinning** (`Activity.startLockTask()`, exposed from `LoamHotspotModule` as
-`startKiosk`/`stopKiosk` and driven by an effect in `index.tsx`) so a passer-by can't wander into
-other apps. Without device-owner provisioning, leaving a pinned app uses the system exit gesture
-(**swipe up and hold** on gesture nav, or hold **Back + Recents** on 3-button nav), which demands the
-phone's own screen-lock PIN when one is set — so the host must set a device PIN first. Both native calls are best-effort no-ops when unsupported and never throw; the pin is
-released on unmount. The overlay also shows the app **version** (`Constants.expoConfig?.version`).
+**Display mode** (one button on the share screen; it replaced the earlier separate "Keep screen on" and
+"Kiosk mode" switches in 0.6.0): shows the join codes full screen, as large as the screen allows with no
+scrolling (one code in Wi-Fi mode; two on a hotspot, side by side whenever that leaves them larger:
+landscape, or a squarish window), holds an
+`expo-keep-awake` lock so the screen stays on, and pins LOAM in front with Android **screen pinning**
+(`Activity.startLockTask()`, exposed from `LoamHotspotModule` as `startKiosk`/`stopKiosk`). Leaving it
+takes a press-and-hold; without device-owner provisioning Android also offers its own exit gesture
+(**swipe up and hold** on gesture nav, or hold **Back + Recents** on 3-button nav), which asks for the
+phone's screen-lock PIN when one is set, so a host left out in public should set a device PIN first. The
+network keeps running with the screen off either way; the screen only stays on so the codes can be seen.
+Both native calls are best-effort no-ops when unsupported and never throw; the pin is released on
+unmount. The overlay also shows the app **version** (`Constants.expoConfig?.version`).
 
 ## QR codes (mostly already solved)
 
@@ -538,10 +600,13 @@ support it); avoid Android-only Easy Connect for v1.
   launcher stuck ("Couldn't finish starting LOAM"), so the next launch is a fresh process that opens on the
   setup screens. Setup never mentions the erased network, and doesn't highlight the last choice. Only then,
   though (`resetOutcome`, `src/lib/emergency-reset.ts`): an erase the server couldn't verify complete
-  (`complete: false`, the node stays 503-locked) stays on screen saying so, with a Close button (reopening
-  retries the erase); and on a fixed-key node the screen waits for the device-key clear the server handed
-  off (`keyClearRequested`), which `attemptWipeKeyClear` closes the app after, or shows the failure of
-  with a retry.
+  (`complete: false`, the node stays 503-locked) stays on screen saying so, with a Close button. What it
+  says follows the kill switch's `journaled` (forwarded by main.js through `reset-reply.js`; an answer
+  without it counts as journaled): with the wipe journal on disk, reopening LOAM finishes the erase; without
+  it a restart doesn't, so the screen says the reset couldn't be recorded and didn't finish, and asks for
+  it to be run again after reopening. On a fixed-key node the screen waits for the device-key clear the
+  server handed off (`keyClearRequested`), which `attemptWipeKeyClear` closes the app after, or shows the
+  failure of with a retry.
 - **The host token and key reach the WebView only by injection** (`injectedJavaScriptBeforeContentLoaded`),
   never in the start URL: the client trusts those globals over a pin, and a URL is something anyone can
   craft (review 2026-10-03 #1).
@@ -589,7 +654,8 @@ Only after those pass is the QR/host UI mostly glue over `packages/qr`.
 ### Physical-device test (owner)
 The emulator can't create a real hotspot (no WiFi radio), so the end-to-end join is a two-phone test:
 1. Install + launch the APK; wait for LOAM to load, open the host menu, tap **Invite people**, and grant the permission
-   prompt(s) — location always, plus a nearby-WiFi-devices prompt on Android 13+ (API 33+).
+   prompt(s): location always (choose **Precise** below Android 13, where the hotspot needs it), plus a
+   nearby-WiFi-devices prompt on Android 13+ (API 33+), which is the one that counts there.
 2. Confirm **Step 1** shows a real SSID + password. On a second phone, scan the Step-1 WiFi QR (or type
    the creds) to join the hotspot.
 3. Wait for Step 2 to show a QR (it reads "Finding the hotspot's address…" for a few seconds), then

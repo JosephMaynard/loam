@@ -176,6 +176,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const maxNewIdentitiesPerWindow = options.maxNewIdentitiesPerWindow ?? 60;
   const requireRulesAcceptance = options.requireRulesAcceptance ?? true;
   const identityWindowMs = options.identityWindowMs ?? 10 * 60_000;
+  // How long an identity nobody ever used may linger before `reapUnusedIdentities` removes it.
+  const unusedIdentityMaxAgeMs = options.unusedIdentityMaxAgeMs ?? 24 * 3_600_000;
   const tombstoneHorizonMs = options.tombstoneHorizonMs ?? defaultTombstoneHorizonMs;
   // Uploaded-but-unattached attachment ids → uploader + upload time. A message may only reference
   // the uploader's own pending uploads; each id is consumed on first use. RAM-only: entries a
@@ -259,7 +261,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     messages: [],
   };
 
-  await mkdir(dataDir, { recursive: true });
+  // Private to the node's user when this call creates it (an existing dir keeps its mode): the database
+  // inside holds every message and the raw session tokens.
+  await mkdir(dataDir, { recursive: true, mode: 0o700 });
 
   const lifecycle = createStoreLifecycle({
     dataDir,
@@ -311,12 +315,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     broadcast: (event) => broadcast(event),
     sendEventToUsers: (audience, event) => sendEventToUsers(audience, event),
     broadcastStreamEvent: (audience, event) => broadcastStreamEvent(audience, event),
-    createMessage: (input, authorId) => createMessage(input, authorId),
     updateMessage: (message, nextBody, streaming) => updateMessage(message, nextBody, streaming),
     ensureChannel: (id) => ensureChannel(id),
-    ensureUser: (id, isAdmin, pending) => ensureUser(id, isAdmin, pending),
     publicUser: (user) => publicUser(user),
-    visibleUsers: (viewer) => visibleUsers(viewer),
     channelPostingError: (channel, authorId, isReply) => channelPostingError(channel, authorId, isReply),
     isLocallyAuthoritative: (userId) => isLocallyAuthoritative(userId),
     messageAudienceUserIds: (message) => messageAudienceUserIds(message),
@@ -1257,10 +1258,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   /**
    * Derives a stable, collision-free channel id from a display name: a URL-friendly slug (so routes
-   * read `/channel/general`), with a short random suffix appended only when the slug is already
-   * taken or empty (e.g. a name made entirely of emoji or punctuation).
+   * read `/channel/general`), with a short random suffix appended when the slug is already taken or
+   * empty (e.g. a name made entirely of emoji or punctuation). A channel that isn't public ALWAYS gets
+   * the suffix: if a private "Secret" took the bare `secret`, the next person to
+   * create a "Secret" would be handed `secret-<hex>` and learn a hidden channel of that name exists.
    */
-  function uniqueChannelId(name: string): string {
+  function uniqueChannelId(name: string, visibility: Channel["visibility"] = "public"): string {
     const slug = name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
@@ -1275,7 +1278,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // taken too: a new channel under it would inherit that row's retained messages.
     const taken = (id: string) => !!ensureChannel(id) || store.quarantine().channels.has(id);
 
-    if (slug && !taken(slug) && !tombstones.has(slug)) {
+    if (visibility === "public" && slug && !taken(slug) && !tombstones.has(slug)) {
       return slug;
     }
 
@@ -1320,7 +1323,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   function createChannelFromRequest(input: ChannelCreateRequest, ownerId: string): Channel {
     const visibility = input.visibility ?? "public";
     const channel: Channel = {
-      id: uniqueChannelId(input.name),
+      id: uniqueChannelId(input.name, visibility),
       name: input.name,
       description: input.description,
       ownerUserId: ownerId,
@@ -1505,10 +1508,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * content to the whole network, making the WS-level concealment cosmetic.
    */
   function withoutShadowBanned(messages: Message[], viewerId: string): Message[] {
-    return messages.filter((message) => {
-      const author = data.users.find((candidate) => candidate.id === message.authorId);
-      return !author?.shadowBanned || message.authorId === viewerId;
-    });
+    // One pass over the roster per call, not one per message: this runs on every history read.
+    const shadowBanned = new Set(data.users.filter((user) => user.shadowBanned).map((user) => user.id));
+    if (!shadowBanned.size) {
+      return messages;
+    }
+    return messages.filter((message) => !shadowBanned.has(message.authorId) || message.authorId === viewerId);
   }
 
   /** A channel's history as `viewerId` may see it: shadow-banned authors hidden, reactions only on visible roots. */
@@ -1673,7 +1678,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     if (input.type === "channelReply") {
       const parent = data.messages.find((message) => message.id === input.parentMessageId);
 
-      if (!parent || !("channelId" in parent)) {
+      // Threads are one level deep: a reply hangs off a channel POST. A reply to a reply is never rendered
+      // by any client and would be orphaned when the middle reply is deleted, so it is refused like a
+      // missing parent (the sync importer applies the same rule to a peer's replies).
+      if (!parent || parent.type !== "channelPost") {
         return { error: "Parent message does not exist" };
       }
 
@@ -1772,6 +1780,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // Someone who can't read DMs (banned, or still awaiting approval) can't receive one. The same generic
       // answer a sender the recipient has BLOCKED gets (dmBlockError): it doesn't state the reason.
       if (recipient.banned || recipient.pending) {
+        return { error: "Direct messages to this person aren't available", forbidden: true };
+      }
+
+      // Nor can a record nobody reads: a mesh sender's display artifact (sealed mail goes through
+      // `/api/mesh/messages`, not here) or a bot that isn't the configured, enabled assistant. Such a DM
+      // would be stored and delivered to no one.
+      const unreachableBot = recipient.type === "bot" && (!llmEnabled() || recipient.id !== appConfig.llm.ollama.botId);
+
+      if (isMeshSentinelUser(recipient.id) || unreachableBot) {
         return { error: "Direct messages to this person aren't available", forbidden: true };
       }
 
@@ -2113,18 +2130,22 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const now = Date.now();
     // Index channels once per cycle so the per-message TTL lookup is O(1), not an O(channels) find each.
     const channelsById = new Map(data.channels.map((channel) => [channel.id, channel]));
-    /** The retention TTL that applies to a message: its channel's override if set, else the node default. */
-    const ttlForMessage = (message: Message): number | undefined => {
-      const channelId =
-        message.type === "channelPost" || message.type === "channelReply" ? message.channelId : undefined;
-      const channelTtl = channelId ? channelsById.get(channelId)?.messageTtlMs : undefined;
-      // `|| undefined` (not `??`) so a zero/NaN global TTL is treated as OFF, never as "expire everything
-      // now" — a 0 would make `createdAt < now - 0` true for every message in a non-TTL channel.
-      return channelTtl ?? (globalTtl || undefined);
+    /**
+     * The retention TTL that applies to a channel: the shorter of its own `messageTtlMs` and the node default.
+     * A channel TTL may only SHORTEN retention: the node-wide TTL is the
+     * operator's ceiling, so a channel setting above it never keeps messages past it. With the node default
+     * off, the channel TTL stands alone (P12). `|| undefined` (not `??`) so a zero/NaN TTL is treated as
+     * OFF, never as "expire everything now" — a 0 would make `createdAt < now - 0` true for every message.
+     */
+    const ttlForChannel = (channelId: string | null | undefined): number | undefined => {
+      const channelTtl = (channelId ? channelsById.get(channelId)?.messageTtlMs : undefined) || undefined;
+      const nodeTtl = globalTtl || undefined;
+      return channelTtl !== undefined && nodeTtl !== undefined ? Math.min(channelTtl, nodeTtl) : (channelTtl ?? nodeTtl);
     };
-    reapExpiredQuarantinedMessages(now, (channelId) =>
-      (channelId ? channelsById.get(channelId)?.messageTtlMs : undefined) ?? (globalTtl || undefined),
-    );
+    /** The retention TTL that applies to a message: its channel's (DMs and reactions follow the node default). */
+    const ttlForMessage = (message: Message): number | undefined =>
+      ttlForChannel(message.type === "channelPost" || message.type === "channelReply" ? message.channelId : undefined);
+    reapExpiredQuarantinedMessages(now, ttlForChannel);
 
     const expired = data.messages.filter((message) => {
       if (message.meta?.streaming) {
@@ -2314,21 +2335,28 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   /**
    * Collects a message together with everything that deleting it would orphan: reactions targeting
-   * it, and — for a channel post that roots a thread — its replies plus the reactions on those.
+   * it, and (for a channel message that roots a thread) its replies plus the reactions on those. New
+   * replies only ever hang off a channel post (`createMessage`), but a database written before that rule
+   * may hold a reply under a reply, so the cascade follows `parentMessageId` chains to any depth rather
+   * than leaving such a reply pointing at a deleted parent.
    */
   function collectDeletionSet(target: Message): Message[] {
     const set = new Map<string, Message>([[target.id, target]]);
-    const reactionTargets = new Set<string>([target.id]);
 
-    if (target.type === "channelPost") {
-      for (const message of data.messages) {
-        if (message.type === "channelReply" && message.parentMessageId === target.id) {
-          set.set(message.id, message);
-          reactionTargets.add(message.id);
+    if (target.type === "channelPost" || target.type === "channelReply") {
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const message of data.messages) {
+          if (message.type === "channelReply" && set.has(message.parentMessageId) && !set.has(message.id)) {
+            set.set(message.id, message);
+            grew = true;
+          }
         }
       }
     }
 
+    const reactionTargets = new Set(set.keys());
     for (const message of data.messages) {
       if (message.type === "reaction" && reactionTargets.has(message.targetMessageId)) {
         set.set(message.id, message);
@@ -2336,6 +2364,105 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     return Array.from(set.values());
+  }
+
+  /**
+   * Remove identities nobody ever used. Every cookie-less request to `/api/config` (a monitoring probe, a
+   * curl, a HEAD) mints and persists a user record, which then sits on the People list and in the DM picker
+   * for ever. A human record older than `unusedIdentityMaxAgeMs` that never agreed to the member rules,
+   * neither wrote nor received a message, owns or belongs to no channel, holds no admin flag, role or
+   * moderation state, is not waiting in a greeter's queue (`pending`: such a person cannot agree to the rules
+   * until admitted), has no report still open in the moderators' queue (reporting, like reading and
+   * blocking, is allowed before agreeing), and has no socket open or mid-challenge is such a ghost. Its row,
+   * sessions, identity tokens and mesh keypair go, with the rows that exist only for it (`deleteUser`: its
+   * block-list rows, private-channel join requests and mesh address book), all in one transaction; a
+   * returning cookie mints afresh, and clients drop it when they next reconcile the roster from
+   * `GET /api/users`. Nothing is broadcast: nobody ever saw it do anything. Only meaningful while the rules
+   * gate is on, since agreeing is the signal that a person is behind the record.
+   */
+  function reapUnusedIdentities(): void {
+    if (!requireRulesAcceptance) {
+      return;
+    }
+
+    const cutoff = Date.now() - unusedIdentityMaxAgeMs;
+    const connected = new Set<string>();
+    for (const session of sockets) {
+      connected.add(session.userId);
+    }
+    for (const pending of pendingSockets) {
+      connected.add(pending.userId);
+    }
+    const referenced = new Set<string>();
+    for (const message of data.messages) {
+      referenced.add(message.authorId);
+      if (message.type === "dm") {
+        referenced.add(message.recipientUserId);
+      }
+    }
+    for (const channel of data.channels) {
+      if (channel.ownerUserId) {
+        referenced.add(channel.ownerUserId);
+      }
+      for (const memberId of channel.memberUserIds ?? []) {
+        referenced.add(memberId);
+      }
+    }
+
+    const ghosts = data.users.filter(
+      (user) =>
+        user.type === "human" &&
+        !isMeshSentinelUser(user.id) &&
+        user.rulesVersion === undefined &&
+        !user.isAdmin &&
+        !user.roles?.length &&
+        !user.pending &&
+        !user.banned &&
+        !user.shadowBanned &&
+        user.timeoutUntil === undefined &&
+        user.createdAt < cutoff &&
+        !connected.has(user.id) &&
+        !referenced.has(user.id) &&
+        // Last, so only the few records that are otherwise ghosts cost a query (the indexed reporter column).
+        store.countOpenReports(user.id) === 0,
+    );
+
+    if (!ghosts.length) {
+      return;
+    }
+
+    const ids = new Set(ghosts.map((user) => user.id));
+    const doomedTokens = [...sessions].filter(([, userId]) => ids.has(userId)).map(([token]) => token);
+    // Persist first, then mirror in memory, like every other mutator.
+    store.transaction(() => {
+      for (const id of ids) {
+        store.deleteUser(id); // with its block-list rows, join requests and mesh address book
+        store.deleteIdentityTokensForUser(id);
+        store.deleteMeshIdentity(id);
+      }
+      for (const token of doomedTokens) {
+        store.deleteSession(token);
+      }
+    });
+    data.users = data.users.filter((user) => !ids.has(user.id));
+    for (const token of doomedTokens) {
+      sessions.delete(token);
+    }
+    for (const [tokenHash, userId] of [...identityTokens]) {
+      if (ids.has(userId)) {
+        identityTokens.delete(tokenHash);
+      }
+    }
+    for (const [sid, session] of [...transportSessions]) {
+      if (session.userId !== undefined && ids.has(session.userId)) {
+        transportSessions.delete(sid);
+      }
+    }
+    for (const id of ids) {
+      meshIdentities.delete(id);
+      meshContacts.delete(id);
+    }
+    server.log.info(`Removed ${ids.size} identit${ids.size === 1 ? "y" : "ies"} nobody ever used`);
   }
 
   /**
@@ -2406,6 +2533,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   try {
     await loadAppConfig();
+    if (lifecycle.consumeSyncDisabledByResetNotice()) {
+      server.log.warn(
+        "Sync was turned off by the Emergency Reset because its token is not carried across a restart; set a token and turn sync on again.",
+      );
+    }
     loadData();
     reapExpiredMessages();
   } catch (error) {
@@ -2439,6 +2571,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       server.log.error(error);
     }
 
+    try {
+      reapUnusedIdentities();
+    } catch (error) {
+      server.log.error(error);
+    }
+
     // Drop expired per-IP rate-limit entries (identity budget + claim/panic attempt limiters) so the
     // maps can't grow unbounded across many source IPs (docs/15 #9).
     pruneExpiredRateLimiters();
@@ -2458,11 +2596,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     void runSyncLoop().catch((error: unknown) => server.log.error(error));
   }, 5_000);
 
-  await registerTransportHooks(ctx);
-
   // `maxPayload` bounds what `ws` will buffer per inbound frame (see WS_MAX_INBOUND_FRAME_BYTES); a
-  // larger frame closes the socket with 1009 before any handler sees it.
+  // larger frame closes the socket with 1009 before any handler sees it. Registered BEFORE the transport
+  // hooks: the plugin's own `onRequest` hook marks an upgrade request, and only a marked one has its socket
+  // closed after the answer. A `/ws` upgrade that the global hook refuses first (421 for a foreign Host, 503
+  // while a wipe restart is pending) would otherwise keep its socket open for ever, since an upgrade socket
+  // has none of the HTTP server's timeouts.
   await server.register(fastifyWebsocket, { options: { maxPayload: WS_MAX_INBOUND_FRAME_BYTES } });
+  await registerTransportHooks(ctx);
   await registerStaticFiles();
 
   registerSessionRoutes(ctx);
@@ -2501,9 +2642,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     getAdminSetupCode: () => adminSetupCode,
     emergencyReset: async () => {
       const result = await killSwitch.executeKillSwitch();
-      return { complete: result.complete, keyClearRequested: result.keyClearRequested === true };
+      return {
+        complete: result.complete,
+        keyClearRequested: result.keyClearRequested === true,
+        journaled: result.journaled,
+      };
     },
     reapExpiredMessages,
+    reapUnusedIdentities,
     reapOrphanedAttachments,
     reapOrphanedAvatars,
     retryMissingAttachments,
@@ -2522,7 +2668,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       },
       async emergencyReset() {
         const result = await killSwitch.executeKillSwitch();
-        return { complete: result.complete };
+        return { complete: result.complete, journaled: result.journaled };
       },
     }),
     async close() {

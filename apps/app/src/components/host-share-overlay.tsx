@@ -108,7 +108,9 @@ export function HostShareOverlay({
   }, [visible, loaded, mode]);
 
   // Once the hotspot is up, make sure the foreground host service is too (idempotent) — joiners are now
-  // depending on this phone staying reachable with the screen off.
+  // depending on this phone staying reachable with the screen off. This is also where the one-time
+  // notification prompt is finally offered: index.tsx skips it on `ready` and on open, so it can never
+  // overlap the hotspot's own permission dialog.
   useEffect(() => {
     if (hotspot.phase === 'running') {
       void ensureHostService();

@@ -109,7 +109,8 @@ ranked within each group. Each entry names the file and the concrete change.
 12. ~~**Service worker is cache-first, not "network-first-ish" as documented.**~~ **RESOLVED**
     (`feat/deploy-hardening`): navigations/document requests are now **network-first** (fall back to
     the cached shell only when offline), immutable hashed assets stay cache-first; cache bumped to
-    `loam-poc-v2` so the stale-shell cache is evicted on activate.
+    `loam-poc-v2` so the stale-shell cache is evicted on activate. (Since 0.6.x the worker is generated per
+    build as `loam-shell-<hash>` and every navigation is served from the single shell path; see CLAUDE.md.)
 
 ## Dependencies
 

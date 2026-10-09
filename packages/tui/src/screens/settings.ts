@@ -303,6 +303,20 @@ function showLinkCode(view: View): void {
   });
 }
 
+/**
+ * What the host is told after an Emergency Reset. An unfinished one is finished by a restart only when the
+ * node managed to record it first (`journaled`); otherwise a restart serves whatever survived, so the host
+ * has to run the reset again.
+ */
+function resetOutcome(result: { complete: boolean; journaled: boolean }): string {
+  if (result.complete) {
+    return "Emergency Reset done";
+  }
+  return result.journaled
+    ? "The reset didn't finish. Restart loam to complete it."
+    : "The reset could not be recorded and did not finish. Restart loam and run the Emergency Reset again.";
+}
+
 function confirmEmergencyReset(view: View): void {
   view.open({
     kind: "input",
@@ -317,10 +331,7 @@ function confirmEmergencyReset(view: View): void {
         return "Type wipe to confirm, or press Esc.";
       }
       const result = await view.options.host.emergencyReset();
-      view.toast(
-        result.complete ? "Emergency Reset done" : "The reset didn't finish. Restart loam to complete it.",
-        result.complete ? "ok" : "error",
-      );
+      view.toast(resetOutcome(result), result.complete ? "ok" : "error");
       return undefined;
     },
   });

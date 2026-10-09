@@ -256,8 +256,10 @@ export interface SealedFetchOptions {
    * never as a wire header — so a bearer credential can't be read off the wire, and so a request that
    * presents it proves possession of the session key (docs/08). Added to the envelope as `tok` when set;
    * every sealed request is a POST regardless (see the module header), so a token always rides sealed.
+   * A function is asked again for every attempt: the retry after a re-handshake must decide on the key
+   * that re-handshake returned, not on the one the first attempt was sealed to.
    */
-  syncToken?: string;
+  syncToken?: string | (() => string | undefined);
   /** Extra headers merged onto the sealed request. */
   headers?: Record<string, string>;
   fetchImpl?: typeof fetch;
@@ -328,13 +330,15 @@ async function attemptSealed(
   // `s` is computed per attempt, so the retry path (after a re-handshake reset `seq` to 0) sends a fresh
   // in-window sequence on the new session.
   const seq = ++session.seq;
+  // Decided per attempt too (see `SealedFetchOptions.syncToken`).
+  const syncToken = typeof options.syncToken === "function" ? options.syncToken() : options.syncToken;
   const sealedBody = JSON.stringify({
     enc: sealTransport(
       key,
       JSON.stringify({
         s: seq,
         ...(hasBody ? { b: options.body } : {}),
-        ...(options.syncToken !== undefined ? { tok: options.syncToken } : {}),
+        ...(syncToken !== undefined ? { tok: syncToken } : {}),
       }),
       requestAad,
     ),

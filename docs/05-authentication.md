@@ -1,5 +1,9 @@
 # 05 — Optional authentication (Better Auth / atproto)
 
+> **Status: not built.** An exploration of how accounts could be added as an optional deployment mode.
+> Nothing in this document is implemented; the shipped product has no accounts (docs/20 describes the
+> identity model that exists).
+
 ## Goal
 
 Let LOAM optionally run with **real accounts** so it can be hosted as a public/website deployment with

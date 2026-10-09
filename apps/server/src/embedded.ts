@@ -66,6 +66,27 @@ export function parseDbEncryptionMode(value: string | undefined): DbEncryptionMo
 }
 
 /**
+ * The at-rest key mode `buildApp` is told about. A declared mode wins. Without one, the key itself says what
+ * it is: the `"ephemeral"` literal is a per-boot random key, and any other key is a fixed one this process
+ * cannot replace, so it is reported and treated as `passphrase`. Before this, a fixed key with no declared
+ * mode (the `loamnet --encrypt` CLI never sets `LOAM_DB_ENCRYPTION_MODE`) took the Emergency Reset's
+ * unjournaled ephemeral branch, so a crash mid-wipe left media and no record of the interrupted wipe; the
+ * fixed-key branch journals the wipe and resumes it on the next boot (docs/02). No key means no mode.
+ */
+export function resolveDbEncryptionMode(
+  declared: DbEncryptionMode | undefined,
+  dbKeyEnv: string | undefined,
+): DbEncryptionMode | undefined {
+  if (declared !== undefined) {
+    return declared;
+  }
+  if (resolveEphemeralDbKey(dbKeyEnv)) {
+    return "ephemeral";
+  }
+  return dbKeyEnv ? "passphrase" : undefined;
+}
+
+/**
  * Resolve whether the server should generate its own RAM-only ephemeral key (P1-3, docs/15, Sol round
  * 3). Honours ONLY the literal `LOAM_DB_KEY === "ephemeral"` contract — main.js's `ephemeral` branch
  * always sets exactly this literal (never a real hex key) before requiring the server bundle, so the
@@ -118,10 +139,12 @@ export async function startEmbeddedServer(launcher: EmbeddedServerOptions = {}):
   const host = process.env.HOST ?? "0.0.0.0";
   const clientPort = parsePort(process.env.CLIENT_PORT, port);
 
-  const dbEncryptionMode = parseDbEncryptionMode(process.env.LOAM_DB_ENCRYPTION_MODE);
+  // A declared mode wins; a real key with none declared is a fixed key (`passphrase`), see resolveDbEncryptionMode.
+  const dbEncryptionMode = resolveDbEncryptionMode(parseDbEncryptionMode(process.env.LOAM_DB_ENCRYPTION_MODE), process.env.LOAM_DB_KEY);
   // See `resolveEphemeralDbKey` (P1-3): the literal LOAM_DB_KEY="ephemeral" contract only. Any other
   // LOAM_DB_KEY value → passphrase/persistent key; unset → no encryption. `dbEncryptionMode` is passed
-  // to `buildApp` below for POSTURE REPORTING only — it never feeds this decision. See docs/02-kill-switch.md.
+  // to `buildApp` below for posture reporting and the kill switch's fixed-key branch; it never feeds this
+  // decision. See docs/02-kill-switch.md.
   const ephemeralDbKey = resolveEphemeralDbKey(process.env.LOAM_DB_KEY);
 
   const app = await buildApp({
