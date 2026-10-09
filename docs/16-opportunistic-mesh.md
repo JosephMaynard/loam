@@ -244,18 +244,30 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
      the operator configured less: two hops are what one carrier between sender and recipient needs, and a
      configured 1 or 2 is kept as it is.
    - The stated send time behind `createdAt` and `ttlExpiresAt` moves back by a uniform 0 … min(`ttlMs`/5,
-     12 h, retention TTL/5) ms. The retention bound is there because retention ages sealed rows by
-     `createdAt`, so a larger step could let the reaper take fresh mail before anyone carried it.
-     `ttlExpiresAt − createdAt` is still exactly `ttlMs`, so mail lives up to a fifth less. The routing tag
-     is still derived for the real send day.
+     1 h, retention TTL/5) ms. The retention bound is there because retention ages sealed rows by
+     `createdAt`, so a larger step could let the reaper take the origin's own copy before anyone carried
+     it. `ttlExpiresAt − createdAt` is still exactly `ttlMs` on the origin's copy, so mail lives up to a
+     fifth less (at most an hour). The routing tag is still derived for the real send day. The cap was
+     12 h in 0.6.0 and is an hour now: where a sealed id first appears in a digest already dates a
+     send to within a poll interval (below), so a long backdate hid little, while it cost relays mail
+     (next point).
 
-   Relays are unchanged: they take one hop off and copy the other fields. Both fields are fixed once at
-   origination, so the AAD, the replay key (`sealed.<sha256(sealed | toTag | ttlExpiresAt)>`) and
-   carried-mail dedupe see one value per message, exactly as before, and older builds carry and open this
-   mail unchanged (no wire change). What this hides, and what it doesn't:
-   - *A single blob no longer dates its send.* The fields place it only within a window of up to 12 h (with
-     the default 72 h TTL), so mail first seen freshly sealed looks like mail carried in from a neighbour
-     within that window, and no carrier further down the path can date the send to the second either.
+   Relays take one hop off, copy `toTag`, `sealed` and `ttlExpiresAt`, and stamp `createdAt` with their
+   own intake time (the sync round's clock, or the moment the radio bridge took the blob in) rather than
+   the peer's value. The seal covers neither `createdAt` nor anything derived from it (the AAD is
+   `toTag|ttlExpiresAt` and the replay key is `sealed.<sha256(sealed | toTag | ttlExpiresAt)>`), so dedupe
+   and delivery see one value per message as before, and older builds carry and open this mail unchanged
+   (no wire change). Retention ages a carried row from when this relay took it in: before, a relay with a
+   retention TTL (the hardened profile keeps an hour) aged carried mail by the origin's stated, backdated
+   time and deleted most fresh mail on its next tick, then never took it back because it had marked the id
+   seen. A relay still running 0.6.0 or earlier keeps the peer's `createdAt`, so with a retention TTL it
+   still ages carried mail by the origin's stated time; the one-hour cap is what bounds that loss. A
+   restamped `createdAt` also tells the next carrier when the previous hop took the mail in, not when it
+   was sent. What this hides, and what it doesn't:
+   - *A single blob no longer dates its send.* On the first hop the fields place it only within a window
+     of up to an hour, so mail first seen freshly sealed looks like mail carried in from a neighbour within
+     that window. Past the first hop `createdAt` dates the previous relay's intake, and only
+     `ttlExpiresAt` (send time, backdated, plus the origin's `ttlMs`) still points at the send.
    - *The hop budget mostly stops marking origin.* With the default 6, a blob at 4 or 5 could have started
      on the node advertising it or one hop away. A blob at the configured maximum still did start there
      (when every node keeps the same maximum, no relay produces that value), and that is a third of the
@@ -268,8 +280,9 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
      In a sparse mesh that is most of the time.
    - *A relay-off node (the default) gains nothing.* Its digest holds only mail its own users sealed, so
      everything it advertises started there.
-   - *Configuration still fingerprints.* `ttlExpiresAt − createdAt` is the origin node's `mesh.ttlMs`,
-     visible to every carrier, so a non-default value points to the nodes configured with it (as before).
+   - *Configuration still fingerprints.* On the first hop `ttlExpiresAt − createdAt` is the origin node's
+     `mesh.ttlMs`, so a non-default value points to the nodes configured with it (as before). Further on,
+     a carrier sees it only blurred by the time the mail spent on earlier hops, plus the backdate.
    - None of this says who on the node sent the mail or to whom; that stays sealed.
 
    Hiding the rest would need relaying on by default, so that a node's digest mixes its own mail with

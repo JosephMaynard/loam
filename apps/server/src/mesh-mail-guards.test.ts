@@ -188,6 +188,52 @@ describe("a re-offered copy with a larger hop budget", () => {
   });
 });
 
+describe("a relay with a retention TTL", () => {
+  it("dates carried mail by its own intake, so the reaper doesn't take mail the origin backdated", async () => {
+    let records: SealedRecord[] = [];
+    const peer = await fakePeer((path, body) => {
+      if (path === "/api/sync/digest") {
+        return { channels: [], messages: [], sealed: records.map(({ id, toTag, ttlExpiresAt, hopLimit }) => ({ id, toTag, ttlExpiresAt, hopLimit })) };
+      }
+      if (path === "/api/sync/messages") {
+        const ids = new Set((body as { ids: string[] }).ids);
+        return { messages: records.filter((record) => ids.has(record.id)), users: [] };
+      }
+      return undefined;
+    });
+    // The hardened profile's one-hour retention.
+    const { app } = await makeApp({
+      sync: { enabled: true, peers: [{ url: peer.url }], intervalMs: 3_600_000 },
+      mesh: { ...MESH, ttlMs: 72 * 3_600_000 },
+      retention: { messageTtlMs: 3_600_000 },
+    });
+    const { cookie } = await newSession(app);
+
+    // Fresh mail whose stated send time an origin pushed back (an older build: up to 12 hours), or that a
+    // peer misstates outright. Neither is covered by the seal.
+    const backdated = { ...strangerMail("seal_backdated", Date.now() + 60 * 3_600_000, 4), createdAt: Date.now() - 12 * 3_600_000 };
+    const future = { ...strangerMail("seal_future", Date.now() + 60 * 3_600_000, 4), createdAt: Date.now() + 30 * DAY_MS };
+    records = [backdated, future];
+    const before = Date.now();
+    await syncRound(app, cookie);
+    const after = Date.now();
+
+    for (const id of ["seal_backdated", "seal_future"]) {
+      const held = app.store.loadMessages().find((message) => message.id === id);
+      expect(held?.createdAt).toBeGreaterThanOrEqual(before);
+      expect(held?.createdAt).toBeLessThanOrEqual(after);
+    }
+    // The retention reaper keeps both, and a pulling peer is told the relay's intake time.
+    app.reapExpiredMessages();
+    expect(heldHop(app, "seal_backdated")).toBe(3);
+    expect(heldHop(app, "seal_future")).toBe(3);
+    const served = await app.server.inject({ method: "POST", url: "/api/sync/messages", payload: { ids: ["seal_backdated"] } });
+    const [carried] = (served.json() as { messages: SealedRecord[] }).messages;
+    expect(carried?.createdAt).toBeGreaterThanOrEqual(before);
+    expect(carried?.createdAt).toBeLessThanOrEqual(after);
+  });
+});
+
 describe("a contact card with a wrong-length key", () => {
   it("is refused when added, even though its id and binding signature verify", async () => {
     const card = shortKxCard();
@@ -271,6 +317,16 @@ describe("origination blurs the fields that marked mail as sealed here (docs/16 
     // The stated send times spread over the window rather than sitting at the real one.
     const stated = sealed.map((message) => message.createdAt);
     expect(Math.max(...stated) - Math.min(...stated)).toBeGreaterThan(60_000);
+  });
+
+  it("backdates by at most an hour, however long the lifetime", async () => {
+    const { app } = await makeApp({ mesh: { ...MESH, ttlMs: 72 * 3_600_000 } });
+    const { cookie } = await newSession(app);
+    const before = Date.now();
+    const sealed = await sealToStrangers(app, cookie, 40);
+    for (const message of sealed) {
+      expect(message.createdAt).toBeGreaterThanOrEqual(before - 3_600_000);
+    }
   });
 
   it("keeps a hop budget of 2 as it is, and backdates by at most a fifth of the node's retention TTL", async () => {
