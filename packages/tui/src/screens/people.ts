@@ -9,7 +9,7 @@
  */
 import type { HostUser } from "@loam/schema";
 
-import { type Line, padEnd, text } from "../ansi.js";
+import { clean, type Line, padEnd, text } from "../ansi.js";
 import { isChar } from "../keys.js";
 import type { Screen, View } from "../types.js";
 import { clock } from "./activity.js";
@@ -19,12 +19,28 @@ export function shortId(id: string): string {
   return id.slice(-6);
 }
 
-/** Display names used by more than one person. */
-function sharedNames(users: HostUser[]): Set<string> {
+/**
+ * The form of a display name compared to tell whether two people share one. Two names that look the same
+ * must compare equal: so the name is cleaned, NFKC-normalised (a fullwidth or ligature letter becomes its
+ * plain one), stripped of every invisible character (a zero-width space or joiner slipped into a copied
+ * name, the joiners and selectors that clean() keeps for emoji included), its spaces collapsed, and
+ * lower-cased.
+ */
+export function nameKey(displayName: string): string {
+  return clean(displayName)
+    .normalize("NFKC")
+    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/** Display names (as {@link nameKey}s) used by more than one person. */
+export function sharedNames(users: HostUser[]): Set<string> {
   const seen = new Set<string>();
   const shared = new Set<string>();
   for (const user of users) {
-    const name = user.displayName.trim().toLowerCase();
+    const name = nameKey(user.displayName);
     (seen.has(name) ? shared : seen).add(name);
   }
   return shared;
@@ -73,7 +89,7 @@ export const peopleScreen: Screen = {
         { text: padEnd(user.displayName, nameWidth), style: chosen ? { inverse: true } : undefined },
         { text: `  …${shortId(user.id)}  joined ${clock(user.createdAt)}  `, style: { dim: true } },
         ...badges(user),
-        ...(shared.has(user.displayName.trim().toLowerCase())
+        ...(shared.has(nameKey(user.displayName))
           ? [{ text: "same name as someone else", style: { fg: "yellow" as const } }]
           : []),
       ]);
@@ -106,9 +122,8 @@ function makeAdmin(view: View, user: HostUser): void {
     view.toast(`${user.displayName} is already an admin`);
     return;
   }
-  const sameName = view.options.host
-    .users()
-    .filter((other) => other.id !== user.id && other.displayName.trim().toLowerCase() === user.displayName.trim().toLowerCase()).length;
+  const key = nameKey(user.displayName);
+  const sameName = view.options.host.users().filter((other) => other.id !== user.id && nameKey(other.displayName) === key).length;
   view.open({
     kind: "confirm",
     title: `Make ${user.displayName} an admin?`,

@@ -62,9 +62,16 @@ run). Output lands in `cli/dist/` and `cli/client/`, both gitignored.
 
 | Flag | Env it sets | Default |
 |------|-------------|---------|
-| `--port <n>` | `PORT` | `3000` (or `$PORT`) |
-| `--data-dir <dir>` | `LOAM_DATA_DIR` | `$XDG_DATA_HOME/loam` or `~/.loam` — **user-writable, never inside the global package** |
+| `--port <n>` (or `--port=<n>`) | `PORT` | `3000` (or `$PORT`) |
+| `--data-dir <dir>` (or `--data-dir=<dir>`) | `LOAM_DATA_DIR` | `$XDG_DATA_HOME/loam` or `~/.loam` — **user-writable, never inside the global package** |
 | `--encrypt` | `LOAM_DB_KEY` | off. Bare `--encrypt` takes `$LOAM_DB_KEY` if set, else prompts without echo (asked twice for a new database, and an empty answer = `ephemeral`; for an existing `loam.db` an empty answer is refused and it asks again, since a fresh ephemeral key can't open it). Pasting both lines at once works. With no terminal and no env it uses `ephemeral`. `--encrypt ephemeral` skips the prompt. `--encrypt <value>` still works but warns — an argv passphrase shows in `ps` and shell history. |
+
+Arguments are parsed by `bin/args.js`: a value goes after a space or an equals sign, and an option `loam`
+doesn't know (or a stray argument, or a missing value) stops it with a one-line message naming the known
+options, so a typo can't start a node on defaults the operator never meant. In `--plain` mode the server's
+log reaches the console only as `[warn] message` lines for warnings and errors (every line with
+`--verbose`), never as raw JSON with the hostname and pid; the QR is painted black on white on a colour
+terminal (bare blocks invert on a dark theme) and drawn bare under `NO_COLOR` or when output isn't a terminal.
 
 A `LOAM_DB_KEY` already in the environment encrypts the node even without the flag (the server reads it
 directly). It also sets `LOAM_CLIENT_DIST` to the packaged `client/` dir and `LOAM_JOIN_HOST` to the

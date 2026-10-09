@@ -13,43 +13,25 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { parseArgs } from "./args.js";
 import { createLineBuffer } from "./line-buffer.js";
 import { SUPPORTED_NODE_RANGE, nodeVersionProblem } from "./node-version.js";
+import { createPlainLogPrinter } from "./plain-log.js";
 import { findFreePort, isPortFree } from "./port.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = join(here, "..");
-const args = process.argv.slice(2);
 
-function optionValue(name) {
-  const index = args.indexOf(name);
-  if (index < 0) {
-    return undefined;
-  }
-  const next = args[index + 1];
-  return next && !next.startsWith("-") ? next : undefined;
+// Every option is checked up front (args.js): a flag loam doesn't know, a stray argument or a missing value
+// stops it with one line, instead of starting with a default the operator never meant.
+const parsed = parseArgs(process.argv.slice(2));
+if (parsed.error) {
+  console.error(parsed.error);
+  process.exit(1);
 }
+const flags = parsed.flags;
 
-// Like optionValue, but errors when the flag is present without a value instead of silently falling
-// back to a default (e.g. `loam --data-dir -bad` would otherwise use the default dir with no warning).
-function requiredValue(name) {
-  const index = args.indexOf(name);
-  if (index < 0) {
-    return undefined;
-  }
-  if (index !== args.lastIndexOf(name)) {
-    console.error(`${name} was given more than once.`);
-    process.exit(1);
-  }
-  const next = args[index + 1];
-  if (!next || next.startsWith("-")) {
-    console.error(`${name} requires a value. See \`loam --help\`.`);
-    process.exit(1);
-  }
-  return next;
-}
-
-if (args.includes("--help") || args.includes("-h")) {
+if (flags.help) {
   console.log(`loam: run a local LOAM node (off-grid messaging over your LAN)
 
 Usage: loam [options]
@@ -77,6 +59,9 @@ Options:
   --verbose         In plain mode, also print a log line for every request
   -h, --help        Show this help
 
+A value goes after a space or an equals sign: --port 4000 or --port=4000. An
+option loam doesn't know stops it.
+
 In a terminal, loam shows its full-screen UI: the join QR, activity, people,
 settings and debug screens (press ? there for the keys). Scan the QR from
 another device on the same network to join. Settings you change in the UI that
@@ -99,7 +84,7 @@ if (nodeProblem) {
 const defaultDataDir = process.env.XDG_DATA_HOME
   ? join(process.env.XDG_DATA_HOME, "loam")
   : join(homedir(), ".loam");
-const dataDir = requiredValue("--data-dir") ?? process.env.LOAM_DATA_DIR ?? defaultDataDir;
+const dataDir = flags.dataDir ?? process.env.LOAM_DATA_DIR ?? defaultDataDir;
 // Private to this user: the database holds every message and the raw session tokens (0700 applies only when
 // this call creates the directory; an existing one keeps the mode its owner gave it).
 mkdirSync(dataDir, { recursive: true, mode: 0o700 });
@@ -112,8 +97,8 @@ if (!existsSync(bundlePath)) {
 const bundle = await import(pathToFileURL(bundlePath).href);
 
 // The full-screen UI needs a terminal on both ends; a service or piped output gets the plain print-out.
-const useTui = !args.includes("--plain") && process.stdin.isTTY && process.stdout.isTTY;
-if (args.includes("--kiosk") && !useTui) {
+const useTui = !flags.plain && process.stdin.isTTY && process.stdout.isTTY;
+if (flags.kiosk && !useTui) {
   console.error("--kiosk needs the terminal UI: run loam in a terminal, without --plain.");
   process.exit(1);
 }
@@ -121,7 +106,7 @@ if (args.includes("--kiosk") && !useTui) {
 // What the terminal UI saved for the next start (cli.json). Flags and environment variables win over it.
 const saved = bundle.readCliSettings(dataDir);
 
-const requestedPort = requiredValue("--port") ?? process.env.PORT;
+const requestedPort = flags.port ?? process.env.PORT;
 if (
   requestedPort !== undefined &&
   (!/^\d+$/.test(String(requestedPort)) || Number(requestedPort) < 1 || Number(requestedPort) > 65535)
@@ -243,7 +228,7 @@ function promptHidden(question) {
  * one (the server would just stop on an unreadable-database error), so there it asks again.
  */
 async function resolveEncryptionKey() {
-  const fromArgs = optionValue("--encrypt");
+  const fromArgs = typeof flags.encrypt === "string" ? flags.encrypt : undefined;
   if (fromArgs !== undefined) {
     if (fromArgs !== "ephemeral") {
       console.warn(
@@ -337,7 +322,7 @@ function nodeSupportsDriver() {
   return Number(process.versions.napi) >= 10;
 }
 
-if (args.includes("--encrypt") || process.env.LOAM_DB_KEY) {
+if (flags.encrypt !== undefined || process.env.LOAM_DB_KEY) {
   if (!nodeSupportsDriver()) {
     console.error(
       `\nEncryption needs Node.js 22.14+ (or 23.6+); this is ${process.version} (Node-API ${process.versions.napi}).\n` +
@@ -352,7 +337,7 @@ if (args.includes("--encrypt") || process.env.LOAM_DB_KEY) {
   }
 }
 
-if (args.includes("--encrypt")) {
+if (flags.encrypt !== undefined) {
   // A passphrase, or "ephemeral" → a random RAM-only key (lost on reboot). Either way the store must
   // live on disk (not :memory:), which it does (dataDir above). See docs/02.
   process.env.LOAM_DB_KEY = await resolveEncryptionKey();
@@ -384,19 +369,11 @@ process.env.LOAM_JOIN_HOST = joinHost;
 // or, in plain mode, the one-time admin link printed below. It never leaves this process.
 const hostToken = randomBytes(32).toString("base64url");
 
-// The server's log. The terminal UI shows it on its Activity and Debug screens; plain mode prints it, minus
-// the two lines per request unless --verbose.
+// The server's log. The terminal UI shows it on its Activity and Debug screens; plain mode prints warnings
+// and errors as `[warn] message` (every line, requests included, with --verbose) and keeps the rest off the
+// console, so the addresses and the QR aren't buried in JSON.
 const logBook = createLogBook();
-const verbose = args.includes("--verbose");
-const plainLogStream = {
-  write(line) {
-    if (verbose || !/"msg":"(incoming request|request completed)"/.test(line)) {
-      // JSON escapes C0 control characters but not C1 ones (a request path can carry them); a terminal reading
-      // this output must never receive one.
-      process.stdout.write(line.replace(/[\u0080-\u009f]/g, ""));
-    }
-  },
-};
+const plainLogStream = createPlainLogPrinter((text) => process.stdout.write(text), { verbose: flags.verbose });
 
 console.log("");
 console.log(`LOAM node: data in ${dataDir}`);
@@ -481,7 +458,7 @@ if (useTui) {
     settings: saved,
     saveSettings: (next) => writeCliSettings(dataDir, next),
     writeFile: (path, contents) => writeFileSync(path, contents, { mode: 0o600 }),
-    startLocked: args.includes("--kiosk") || saved.kiosk?.startLocked === true,
+    startLocked: flags.kiosk || saved.kiosk?.startLocked === true,
     quit: () => shutdown(0),
   });
   // Put the terminal back before any crash report is printed.
@@ -517,9 +494,12 @@ function printPlain(app) {
   console.log("More: https://loamnet.com/child-safety");
   console.log("");
   // A QR that won't fit (the encoder caps at ~106 bytes; a long LOAM_JOIN_HOST can exceed it) must
-  // never take down a server that is already listening — degrade to the printed URL instead.
+  // never take down a server that is already listening — degrade to the printed URL instead. On a colour
+  // terminal the code is painted black on white, as the terminal UI draws it: bare blocks come out inverted
+  // on a dark theme, which many scanners refuse. A file, a pipe or NO_COLOR gets the bare blocks.
+  const colour = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
   try {
-    console.log(renderQRToTerminal(encodeQR(qrUrl), { quietZone: 2 }));
+    console.log(renderQRToTerminal(encodeQR(qrUrl), { quietZone: 2, colour }));
     console.log("");
     if (transportKey) {
       console.log("Scan the QR to join: it carries this node's encryption key, so scanned joins are");

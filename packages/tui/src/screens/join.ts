@@ -165,30 +165,34 @@ export async function openAsAdmin(view: View): Promise<void> {
       return phone ? "Esc to close (the phone's code stops working)" : "p make a phone admin instead · Esc to close";
     },
     lines: (width, height) => {
-      const intro = opened
+      // The link is always shown: an opener can report success and still show nothing (the wrong default
+      // browser, a desktop that swallowed it), and the operator must never be left with no way in.
+      const note = opened
         ? paragraph("LOAM is opening in your browser, signed in as admin. The link works once, for 10 minutes.", width, { fg: "green" })
-        : [
-            ...paragraph("Couldn't open a browser on this computer. Open this on this computer instead (it works once, for 10 minutes):", width, { fg: "yellow" }),
-            ...breakLink(local, width).map((piece) => text(piece, { fg: "cyan" })),
-          ];
+        : paragraph("Couldn't open a browser on this computer. Open this on this computer instead (it works once, for 10 minutes):", width, {
+            fg: "yellow",
+          });
+      const link = [
+        ...(opened ? paragraph("If no browser window appeared, open this on this computer:", width, { dim: true }) : []),
+        ...breakLink(local, width).map((piece) => text(piece, { fg: "cyan" })),
+      ];
       if (!phone) {
-        return [...intro, [], ...paragraph("Or press p to show a QR code that makes a phone admin.", width, { dim: true })];
+        return [...note, ...link, [], ...paragraph("Or press p to show a QR code that makes a phone admin.", width, { dim: true })];
       }
-      return withQrIfItFits(
-        [
-          ...intro,
-          [],
-          ...paragraph(
-            "Anyone who scans this becomes an admin, and an admin can't be removed. It works once, and stops working when you close this.",
-            width,
-            { fg: "yellow", bold: true },
-          ),
-        ],
-        phone.qr,
-        phone.link,
-        width,
-        height,
-      );
+      const warning = [
+        [],
+        ...paragraph(
+          "Anyone who scans this becomes an admin, and an admin can't be removed. It works once, and stops working when you close this.",
+          width,
+          { fg: "yellow", bold: true },
+        ),
+      ];
+      // With the phone's QR up, the local link gives way to it when the window can't hold both (the operator
+      // asked for the phone; o on the Join screen makes a fresh link). Neither fitting shows both as text.
+      const whole = [...note, ...link, ...warning];
+      const withoutLink = [...note, ...warning];
+      const before = qrFits(whole, phone.qr, width, height) || !qrFits(withoutLink, phone.qr, width, height) ? whole : withoutLink;
+      return withQrIfItFits(before, phone.qr, phone.link, width, height);
     },
     onKey(pressed) {
       if (phone || !isChar(pressed, "p")) {
@@ -214,9 +218,14 @@ export function paragraph(value: string, width: number, style?: Style): Line[] {
   return wrap(value, width).map((line) => text(line, style));
 }
 
+/** Whether `qr` fits whole under `before` in `width` by `height`. */
+function qrFits(before: Line[], qr: QrBlock | undefined, width: number, height: number): qr is QrBlock {
+  return qr !== undefined && qr.width <= width && before.length + 1 + qr.lines.length <= height;
+}
+
 /** `before`, then the QR when it fits whole in the room left, else the link as text. */
 export function withQrIfItFits(before: Line[], qr: QrBlock | undefined, link: string, width: number, height: number): Line[] {
-  if (qr && qr.width <= width && before.length + 1 + qr.lines.length <= height) {
+  if (qrFits(before, qr, width, height)) {
     return [...before, [], ...qr.lines];
   }
   return [

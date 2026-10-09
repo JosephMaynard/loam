@@ -1,8 +1,19 @@
 import type { QRMatrix } from "./types.js";
 
-type TerminalOptions = {
+export type TerminalOptions = {
+  /** Blank modules around the code (the quiet zone scanners need), in modules per side. Default 2. */
   quietZone?: number;
+  /**
+   * Paint every line black on white with ANSI colours. Bare block characters take the terminal's own colours,
+   * so on a dark theme the code comes out inverted (light modules on dark), which many scanners refuse. Off
+   * by default: a caller knows whether its output is a colour terminal (not a file, not under NO_COLOR).
+   */
+  colour?: boolean;
 };
+
+/** Black text on a white background, then reset: the same colours `@loam/tui` draws its QR in. */
+const BLACK_ON_WHITE = "\u001b[30;47m";
+const RESET = "\u001b[0m";
 
 function normalizeQuietZone(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) {
@@ -50,7 +61,7 @@ export function renderQRToTerminal(matrix: QRMatrix, opts: TerminalOptions = {})
       }
     }
 
-    lines.push(line);
+    lines.push(opts.colour ? `${BLACK_ON_WHITE}${line}${RESET}` : line);
   }
 
   return lines.join("\n");

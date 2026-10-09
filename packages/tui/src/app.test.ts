@@ -224,6 +224,10 @@ describe("the Join screen", () => {
     expect(system.openUrl).toHaveBeenCalledWith(`http://localhost:3000#k=${KEY}&a=code000000000000000001`);
     expect(host.adminClaimCode).toHaveBeenCalledTimes(1);
     expect(screenText()).toContain("signed in as admin");
+    // The link stays on screen even when the opener claims success: a browser that never showed up is no dead end.
+    expect(screenText()).toContain("If no browser window appeared");
+    const dialogText = screenText().split("\n").map((line) => line.replace(/^.*│ /, "").replace(/ *│.*$/, "")).join("");
+    expect(dialogText).toContain(`http://localhost:3000#k=${KEY}&a=code000000000000000001`);
     expect(qrRows(screenText())).toBe(0);
 
     await tui.input("p");
@@ -413,10 +417,10 @@ describe("kiosk mode", () => {
     const { tui, saved, quit, screenText } = setup();
     await tui.input("k");
     expect(screenText()).toContain("locks this screen, not the computer");
-    await tui.input("abc\r");
-    expect(screenText()).toContain("at least 4 characters");
-    await tui.input("d\r");
-    await tui.input("abcd\r");
+    await tui.input("abcdefg\r");
+    expect(screenText()).toContain("at least 8 characters");
+    await tui.input("h\r");
+    await tui.input("abcdefgh\r");
     expect(tui.locked).toBe(true);
     expect(saved.at(-1)?.kiosk?.passwordHash).toMatch(/^scrypt:/);
     expect(screenText()).toContain("Locked. Press Enter to unlock.");
@@ -431,7 +435,7 @@ describe("kiosk mode", () => {
     await tui.input("wrong\r");
     expect(screenText()).toContain("That isn't the password.");
     expect(tui.locked).toBe(true);
-    await tui.input("\x7f".repeat(5) + "abcd\r");
+    await tui.input("\x7f".repeat(5) + "abcdefgh\r");
     expect(tui.locked).toBe(false);
   });
 
@@ -486,8 +490,8 @@ describe("kiosk mode, the edges", () => {
     expect(tui.screen).toBe("join");
     await tui.input("\r");
     expect(screenText()).toContain("Choose a password");
-    await tui.input("wxyz\r");
-    await tui.input("wxyz\r");
+    await tui.input("wxyzwxyz\r");
+    await tui.input("wxyzwxyz\r");
     expect(saved.at(-1)?.kiosk?.passwordHash).toMatch(/^scrypt:/);
     expect(saved.at(-1)?.kiosk?.startLocked).toBe(false);
     expect(tui.locked).toBe(true);
@@ -644,8 +648,8 @@ describe("findings from the second review", () => {
     expect(screenText()).toMatch(/Port\s+3000/);
 
     await tui.input("k");
-    await tui.input("abcd\r");
-    await tui.input("abcd\r");
+    await tui.input("abcdefgh\r");
+    await tui.input("abcdefgh\r");
     expect(tui.locked).toBe(false);
     expect(screenText()).toContain("kiosk mode isn't on");
   });
