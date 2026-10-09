@@ -15,12 +15,15 @@
 //      armeabi-v7a support needs its own prebuild and the per-ABI gradle path — a follow-up.
 //
 //   3. Declare the WiFi + location permissions the LocalOnlyHotspot native module needs (see
-//      modules/loam-hotspot). LocalOnlyHotspot is location-gated, so ACCESS_FINE_LOCATION is
-//      mandatory; NEARBY_WIFI_DEVICES covers API 33+, and CHANGE/ACCESS_WIFI_STATE are needed to
-//      start and read the hotspot. The runtime grant is requested from JS before starting.
-//      ACCESS_FINE_LOCATION is declared on ALL supported API levels (no `maxSdkVersion` cap) — see
-//      the "REGRESSION NOTE" comment below for why capping it at API 32 silently breaks the hotspot
-//      on API 33+.
+//      modules/loam-hotspot). LocalOnlyHotspot is location-gated below API 33, so ACCESS_FINE_LOCATION
+//      is mandatory there, and ACCESS_COARSE_LOCATION is declared beside it because Android 12+ requires
+//      a fine request to carry coarse in the same dialog (a fine-only request is ignored on some Android
+//      12 releases, and a runtime request for an undeclared permission auto-denies). NEARBY_WIFI_DEVICES
+//      gates the call on API 33+, and CHANGE/ACCESS_WIFI_STATE are needed to start and read the hotspot.
+//      The runtime grant is requested from JS before starting (src/lib/hotspot-permissions.ts holds the
+//      list + grant rule). ACCESS_FINE_LOCATION is declared on ALL supported API levels (no
+//      `maxSdkVersion` cap); the "REGRESSION NOTE" comment below says why capping it at API 32
+//      silently broke the hotspot on API 33+.
 //
 //   4. Keep the on-device data off every backup/transfer path (allowBackup=false + fullBackupContent=false
 //      below API 31, and a data_extraction_rules.xml excluding every domain for BOTH cloud backup and
@@ -48,10 +51,13 @@ const ABIS = "arm64-v8a";
 const MARKER = "// loam-host: arm-only ABIs";
 
 // Manifest permissions the hotspot module requires (docs/04). ACCESS_FINE_LOCATION is mandatory for
-// LocalOnlyHotspot; NEARBY_WIFI_DEVICES is the API 33+ companion; the WIFI_STATE pair lets the app
-// start and query the hotspot.
+// LocalOnlyHotspot below API 33, and ACCESS_COARSE_LOCATION must be declared with it: Android 12+ only
+// honours a fine request that asks for coarse in the same dialog, and the JS side requests both on every
+// API level (src/lib/hotspot-permissions.ts). NEARBY_WIFI_DEVICES is what gates the call on API 33+; the
+// WIFI_STATE pair lets the app start and query the hotspot.
 const HOTSPOT_PERMISSIONS = [
   "android.permission.ACCESS_FINE_LOCATION",
+  "android.permission.ACCESS_COARSE_LOCATION",
   "android.permission.NEARBY_WIFI_DEVICES",
   "android.permission.CHANGE_WIFI_STATE",
   "android.permission.ACCESS_WIFI_STATE",
@@ -262,7 +268,8 @@ function withArmOnlyReactNativeArchitectures(config) {
 }
 
 // Hardware the declared permissions IMPLY as required (CHANGE_WIFI_STATE → wifi, ACCESS_FINE_LOCATION →
-// location + location.gps, BLUETOOTH_* → bluetooth), plus the mesh radios. All optional: without Wi-Fi the
+// location + location.gps, ACCESS_COARSE_LOCATION → location + location.network, BLUETOOTH_* →
+// bluetooth), plus the mesh radios. All optional: without Wi-Fi the
 // hotspot just can't start (the LAN join path remains), without BLE/Aware there is no mesh. Also the
 // portrait screen that app.json `orientation: "portrait"` implies — landscape-only devices (Chromebooks,
 // some TVs/tablets) would otherwise be filtered from Play; the app still runs there, letterboxed.
@@ -367,11 +374,16 @@ function withMeshManifest(config) {
 // Fix: declare ACCESS_FINE_LOCATION on ALL supported API levels (no cap), so the JS side's existing
 // (unconditional) request is satisfiable again. This restores the exact configuration that was
 // verified working on an arm64 API-35 emulator (docs/04, "Emulator-verified... tapping it prompts
-// for ACCESS_FINE_LOCATION then NEARBY_WIFI_DEVICES, and startHotspot() runs"). The cleaner long-term
-// fix — matching what NEARBY_WIFI_DEVICES's `neverForLocation` flag is actually for — is to update
-// `use-hotspot.ts` to request ONLY NEARBY_WIFI_DEVICES on API 33+ and drop ACCESS_FINE_LOCATION
-// there, which would let this manifest cap come back. That's a JS-side change outside this module's
-// scope for this fix; left as a follow-up (see docs/04).
+// for ACCESS_FINE_LOCATION then NEARBY_WIFI_DEVICES, and startHotspot() runs").
+//
+// Since then the JS side (src/lib/hotspot-permissions.ts, used by use-hotspot.ts) has changed in two
+// ways. It requests ACCESS_COARSE_LOCATION together with ACCESS_FINE_LOCATION on every API level,
+// because Android 12+ ignores a fine-only request on some releases (hence the coarse entry in
+// HOTSPOT_PERMISSIONS above: an undeclared permission in a request auto-denies, exactly the failure
+// described here). And on API 33+ it now gates the start on NEARBY_WIFI_DEVICES alone, as Android
+// does, so a denied location answer there no longer blocks the hotspot. The location request itself
+// is still issued on API 33+, so ACCESS_FINE_LOCATION stays uncapped; dropping that request on 33+
+// (and letting the cap come back) remains the follow-up noted in docs/04.
 // -------------------------------------------------------------------------------------------------
 
 // --- Stale-prebuild guard ------------------------------------------------------------------------
@@ -486,6 +498,7 @@ module.exports._internal = {
   BACKUP_DOMAINS,
   CLEARTEXT_HOSTS,
   FINGERPRINT_FILE,
+  HOTSPOT_PERMISSIONS,
   LEGACY_BLUETOOTH_PERMISSIONS,
   NETWORK_SECURITY_CONFIG_RESOURCE,
   OPTIONAL_FEATURES,

@@ -1,6 +1,6 @@
 // Unit tests for the pure helpers of plugins/with-loam-host.js: loopback-only cleartext, no-backup +
-// no-device-transfer, optional hardware features, the legacy Bluetooth permissions, and the stale-prebuild
-// fingerprint.
+// no-device-transfer, the hotspot permission set, optional hardware features, the legacy Bluetooth
+// permissions, and the stale-prebuild fingerprint.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -9,12 +9,15 @@ import { delimiter, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { hotspotPermissionsToRequest } from "@/lib/hotspot-permissions";
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const plugin = require("../../plugins/with-loam-host.js");
 const {
   BACKUP_DOMAINS,
   CLEARTEXT_HOSTS,
   FINGERPRINT_FILE,
+  HOTSPOT_PERMISSIONS,
   LEGACY_BLUETOOTH_PERMISSIONS,
   NETWORK_SECURITY_CONFIG_RESOURCE,
   OPTIONAL_FEATURES,
@@ -79,6 +82,43 @@ describe("with-loam-host: backup / device-transfer exclusion", () => {
   });
 });
 
+describe("with-loam-host: hotspot permissions", () => {
+  it("declares fine AND coarse location together, NEARBY_WIFI_DEVICES and the WIFI_STATE pair", () => {
+    // Android 12+ honours a fine-location request only when coarse rides in the same dialog, and a runtime
+    // request for a permission the manifest does not declare auto-denies with no dialog; so a manifest
+    // with fine but not coarse means the hotspot can never start on a fresh Android 12 install.
+    expect(HOTSPOT_PERMISSIONS).toEqual(
+      expect.arrayContaining([
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.NEARBY_WIFI_DEVICES",
+        "android.permission.CHANGE_WIFI_STATE",
+        "android.permission.ACCESS_WIFI_STATE",
+      ]),
+    );
+    expect(new Set(HOTSPOT_PERMISSIONS).size).toBe(HOTSPOT_PERMISSIONS.length);
+  });
+
+  it("declares every permission the runtime request asks for, on every API level", () => {
+    // The manifest side and the JS side (src/lib/hotspot-permissions.ts) must agree, or the request for the
+    // missing one silently auto-denies (the API 33+ regression described in the plugin).
+    for (const apiLevel of [24, 30, 31, 32, 33, 35]) {
+      for (const name of hotspotPermissionsToRequest(apiLevel)) {
+        expect(HOTSPOT_PERMISSIONS, `API ${apiLevel}: ${name}`).toContain(`android.permission.${name}`);
+      }
+    }
+  });
+
+  it("is not undone by app.json's blockedPermissions", () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const appJson = require("../../app.json");
+    const blocked: string[] = appJson.expo.android?.blockedPermissions ?? [];
+    for (const name of HOTSPOT_PERMISSIONS) {
+      expect(blocked).not.toContain(name);
+    }
+  });
+});
+
 describe("with-loam-host: optional hardware features", () => {
   it("declares wifi/location/bluetooth features optional and forces an existing required one optional", () => {
     const manifest = {
@@ -90,6 +130,8 @@ describe("with-loam-host: optional hardware features", () => {
       "android.hardware.wifi",
       "android.hardware.location",
       "android.hardware.location.gps",
+      // ACCESS_COARSE_LOCATION implies this one (fine implies .gps); both optional, like the rest.
+      "android.hardware.location.network",
       // Implied by app.json `orientation: "portrait"`; optional so landscape-only devices (Chromebooks)
       // aren't filtered from Play.
       "android.hardware.screen.portrait",

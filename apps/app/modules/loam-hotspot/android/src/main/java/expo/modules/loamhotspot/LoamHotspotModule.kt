@@ -26,9 +26,11 @@ private class HotspotException(message: String, cause: Throwable? = null) :
  * renders as the "Step 1" WiFi-join QR. Exactly one local-only hotspot may exist per device, so the
  * active reservation is held here and reused across `startHotspot` calls.
  *
- * Requires `ACCESS_FINE_LOCATION` (LocalOnlyHotspot is location-gated) plus `CHANGE_WIFI_STATE` /
- * `ACCESS_WIFI_STATE` (and `NEARBY_WIFI_DEVICES` on API 33+). Runtime permission is requested from
- * JS before `startHotspot`; a missing grant surfaces here as a `SecurityException`.
+ * Requires `ACCESS_FINE_LOCATION` below API 33 (LocalOnlyHotspot is location-gated there; the JS side
+ * requests it together with `ACCESS_COARSE_LOCATION`, as Android 12+ demands) and `NEARBY_WIFI_DEVICES`
+ * from API 33, plus `CHANGE_WIFI_STATE` / `ACCESS_WIFI_STATE`. Runtime permission is requested from JS
+ * before `startHotspot` (src/lib/hotspot-permissions.ts); a missing grant surfaces here as a
+ * `SecurityException`.
  */
 class LoamHotspotModule : Module() {
   // Touched from both the JS/module thread (start/stopHotspot) and the main-thread hotspot callback;

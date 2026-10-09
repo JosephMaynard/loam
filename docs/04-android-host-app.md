@@ -455,10 +455,24 @@ readable reason on `onFailed`, a `SecurityException` (missing permission), or an
 emulator's no-WiFi failure surfaces cleanly instead of hanging. The JS wrapper
 (`modules/loam-hotspot/index.ts`) loads the module with `requireOptionalNativeModule`, so importing it
 off-Android yields `null` rather than a crash. `src/hooks/use-hotspot.ts` requests the runtime
-permissions (`ACCESS_FINE_LOCATION`, plus `NEARBY_WIFI_DEVICES` on API 33+) via
-`PermissionsAndroid.requestMultiple` **before** starting, tracks a module-scope singleton state
-(Android allows one hotspot per process), and never throws — denial/failure lands in an `error` phase.
-The permissions are declared in the manifest by the config plugin (`with-loam-host.js`).
+permissions via one `PermissionsAndroid.requestMultiple` call **before** starting, tracks a module-scope
+singleton state (Android allows one hotspot per process), and never throws: denial/failure lands in an
+`error` phase. The request list and the grant rule are the pure, unit-tested
+`src/lib/hotspot-permissions.ts`:
+
+- `ACCESS_FINE_LOCATION` and `ACCESS_COARSE_LOCATION` are requested **together on every API level**.
+  Android 12+ requires a fine request to carry coarse in the same dialog, and on some Android 12 releases
+  a fine-only request is ignored outright (no dialog, a logcat "ACCESS_FINE_LOCATION must be requested
+  with ACCESS_COARSE_LOCATION"), which left a fresh install there unable to start the hotspot at all.
+- `NEARBY_WIFI_DEVICES` is added from API 33.
+- Below API 33 the start needs **fine** location (LocalOnlyHotspot is location-gated there): a user who
+  picks "Approximate" on the dialog has denied the hotspot and sees the location message. From API 33
+  `NEARBY_WIFI_DEVICES` is what gates `startLocalOnlyHotspot` (the manifest marks it `neverForLocation`),
+  so its grant decides and the location answer is not consulted.
+
+The permissions are declared in the manifest by the config plugin (`with-loam-host.js`), coarse beside
+fine; a test checks the manifest list covers the runtime request on every API level, since a request for a
+permission the manifest does not declare auto-denies with no dialog.
 
 > **Correction (fix/device-feedback-round1):** an earlier hardening pass ("A10") capped
 > `ACCESS_FINE_LOCATION` with `android:maxSdkVersion="32"` in the plugin, reasoning that
@@ -472,9 +486,11 @@ The permissions are declared in the manifest by the config plugin (`with-loam-ho
 > hotspot could never start on **any** device running API 33+ — confirmed as the cause of a "Host
 > stopped / location permission is needed" regression on a Galaxy S25 Ultra (API 35). Fixed by
 > removing the `maxSdkVersion` cap, restoring the exact configuration verified in the emulator run
-> quoted above. A cleaner long-term fix is updating `use-hotspot.ts` to request only
-> `NEARBY_WIFI_DEVICES` on API 33+ — left as a follow-up, since the emulator behaviour above shows the
-> current unconditional-`ACCESS_FINE_LOCATION` request is at least a working baseline.
+> quoted above. Since then the grant rule has moved to `src/lib/hotspot-permissions.ts` and, on API 33+,
+> keys on `NEARBY_WIFI_DEVICES` alone (see the list above), so a denied location answer there no longer
+> blocks the hotspot; the location request is still issued on every API level, which is why
+> `ACCESS_FINE_LOCATION` stays uncapped. Requesting only `NEARBY_WIFI_DEVICES` on API 33+ (and letting
+> the cap come back) remains the follow-up.
 
 **Host UI:** `src/app/index.tsx` renders a compact host bar above the LOAM WebView with a **"Share ·
 Host"** button (a top bar, not a floating overlay — an Android WebView swallows touches on any native
@@ -592,7 +608,8 @@ Only after those pass is the QR/host UI mostly glue over `packages/qr`.
 ### Physical-device test (owner)
 The emulator can't create a real hotspot (no WiFi radio), so the end-to-end join is a two-phone test:
 1. Install + launch the APK; wait for LOAM to load, open the host menu, tap **Invite people**, and grant the permission
-   prompt(s) — location always, plus a nearby-WiFi-devices prompt on Android 13+ (API 33+).
+   prompt(s): location always (choose **Precise** below Android 13, where the hotspot needs it), plus a
+   nearby-WiFi-devices prompt on Android 13+ (API 33+), which is the one that counts there.
 2. Confirm **Step 1** shows a real SSID + password. On a second phone, scan the Step-1 WiFi QR (or type
    the creds) to join the hotspot.
 3. Wait for Step 2 to show a QR (it reads "Finding the hotspot's address…" for a few seconds), then

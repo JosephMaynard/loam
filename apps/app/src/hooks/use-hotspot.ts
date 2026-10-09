@@ -17,6 +17,7 @@ import {
   pickHotspotAddress,
   type HostInterface,
 } from '@/lib/hotspot-address';
+import { hotspotPermissionsToRequest, hotspotStartPermitted, type HotspotPermission } from '@/lib/hotspot-permissions';
 import { t } from '@/lib/i18n';
 
 /**
@@ -153,26 +154,29 @@ const PERMISSION_TIMEOUT_MS = 60_000;
 type PermissionOutcome = 'granted' | 'denied' | 'timeout';
 
 /**
- * Request the runtime permissions LocalOnlyHotspot needs. ACCESS_FINE_LOCATION is always required;
- * API 33+ also gates it behind NEARBY_WIFI_DEVICES. `granted` only if every requested permission was.
+ * Request the runtime permissions LocalOnlyHotspot needs, in one dialog flow. The list and the grant rule
+ * are `src/lib/hotspot-permissions.ts` (pure, tested): ACCESS_FINE_LOCATION and ACCESS_COARSE_LOCATION
+ * are always requested together (Android 12+ ignores a fine-only request on some releases), plus
+ * NEARBY_WIFI_DEVICES from API 33. `granted` means the start can proceed: below API 33 that needs fine
+ * location (a user who picks "Approximate" has denied the hotspot, and gets the location message); from
+ * API 33 it needs NEARBY_WIFI_DEVICES, which the manifest marks `neverForLocation`, so the location
+ * answer is not consulted there.
  */
 async function requestHotspotPermissions(): Promise<PermissionOutcome> {
   if (Platform.OS !== 'android') {
     return 'denied';
   }
-  const wanted: (keyof typeof PermissionsAndroid.PERMISSIONS)[] = ['ACCESS_FINE_LOCATION'];
   const apiLevel = typeof Platform.Version === 'number' ? Platform.Version : 0;
-  if (apiLevel >= 33) {
-    wanted.push('NEARBY_WIFI_DEVICES');
-  }
-  const permissions = wanted.map((name) => PermissionsAndroid.PERMISSIONS[name]);
-  const answer = await awaitWithin(PermissionsAndroid.requestMultiple(permissions), PERMISSION_TIMEOUT_MS);
+  const wanted = hotspotPermissionsToRequest(apiLevel);
+  const permissionId = (name: HotspotPermission) => PermissionsAndroid.PERMISSIONS[name];
+  const answer = await awaitWithin(PermissionsAndroid.requestMultiple(wanted.map(permissionId)), PERMISSION_TIMEOUT_MS);
   if (answer.timedOut) {
     return 'timeout';
   }
-  return permissions.every((permission) => answer.value[permission] === PermissionsAndroid.RESULTS.GRANTED)
-    ? 'granted'
-    : 'denied';
+  const granted = new Set<HotspotPermission>(
+    wanted.filter((name) => answer.value[permissionId(name)] === PermissionsAndroid.RESULTS.GRANTED),
+  );
+  return hotspotStartPermitted(apiLevel, granted) ? 'granted' : 'denied';
 }
 
 /**
