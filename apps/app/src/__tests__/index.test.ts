@@ -30,6 +30,9 @@ vi.mock('@/hooks/use-app-locale', () => ({ useAppLocale: () => 'en' }));
 vi.mock('@/components/host-share-overlay', () => ({ HostShareOverlay: () => null }));
 vi.mock('@/components/model-manager', () => ({ ModelManagerOverlay: () => null }));
 vi.mock('@/components/setup-wizard', () => ({ SetupWizard: () => null }));
+vi.mock('@/components/host-menu', () => ({ HostMenu: () => null }));
+vi.mock('@/components/about-overlay', () => ({ AboutOverlay: () => null }));
+vi.mock('expo-symbols', () => ({ SymbolView: () => null }));
 vi.mock('@/components/themed-text', () => ({ ThemedText: () => null }));
 vi.mock('@/components/themed-view', () => ({ ThemedView: () => null }));
 vi.mock('@/constants/theme', () => ({
@@ -38,6 +41,7 @@ vi.mock('@/constants/theme', () => ({
 }));
 vi.mock('@/hooks/use-theme', () => ({ useTheme: () => ({}) }));
 vi.mock('@/lib/on-device-llm', () => ({ registerOnDeviceLlm: () => () => undefined }));
+vi.mock('@/lib/save-file', () => ({ clearSharedFiles: async () => undefined, parseSaveFileMessage: () => undefined, shareReceivedFile: async () => undefined }));
 vi.mock('@/mesh/mesh-courier', () => ({ registerMeshCourier: () => () => undefined }));
 vi.mock('../../modules/loam-hotspot', () => ({
   closeApp: vi.fn(),

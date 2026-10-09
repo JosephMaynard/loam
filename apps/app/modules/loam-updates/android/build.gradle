@@ -1,0 +1,52 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.loamupdates'
+version = '0.1.0'
+
+// Which store this build is for: `play` (the Google Play bundle) or `github` (the sideload APK, and the
+// default for any local build). scripts/build-apk.mjs passes -PloamDistribution for each pass. The Play
+// build alone compiles src/play and links Google's app-update library; the GitHub build compiles a stub
+// in src/github and contains no Play code at all.
+def loamDistribution = (project.findProperty('loamDistribution') ?: 'github').toString()
+if (!['github', 'play'].contains(loamDistribution)) {
+  throw new GradleException("loamDistribution must be 'github' or 'play', not '${loamDistribution}'")
+}
+
+// The release tag this build was made for (vX.Y.Z, or vX.Y.Z-rc.N / -beta.N for a pre-release), so the
+// GitHub build's update check can tell an RC from the final release of the same X.Y.Z (app.json carries
+// only X.Y.Z). scripts/build-apk.mjs passes -PloamReleaseTag when LOAM_RELEASE_TAG is set (CI tag builds);
+// absent, it is empty and the check falls back to app.json's version. Anything else fails the build.
+def loamReleaseTag = (project.findProperty('loamReleaseTag') ?: '').toString()
+if (!loamReleaseTag.isEmpty() && !(loamReleaseTag ==~ '^v\\d+\\.\\d+\\.\\d+(-(rc|beta)\\.\\d+)?$')) {
+  throw new GradleException("loamReleaseTag must be vX.Y.Z, vX.Y.Z-rc.N or vX.Y.Z-beta.N, not '${loamReleaseTag}'")
+}
+
+android {
+  namespace "expo.modules.loamupdates"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+    buildConfigField "String", "LOAM_DISTRIBUTION", "\"${loamDistribution}\""
+    buildConfigField "String", "LOAM_RELEASE_TAG", "\"${loamReleaseTag}\""
+  }
+  buildFeatures {
+    buildConfig true
+  }
+  sourceSets {
+    main {
+      java.srcDirs += "src/${loamDistribution}/java"
+    }
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
+
+dependencies {
+  if (loamDistribution == 'play') {
+    implementation 'com.google.android.play:app-update:2.1.0'
+  }
+}

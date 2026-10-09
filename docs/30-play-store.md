@@ -18,6 +18,31 @@ device checks below, and size headroom before a production track.
   `libreactnative.so`) and both vendored `better_sqlite3.node` prebuilds report LOAD `p_align 0x4000`;
   `zipalign -c -P 16` passes. The only `0x1000` files are Hexagon **DSP** blobs under `assets/`, outside the
   check. **Re-verify after any llama.rn, nodejs-mobile or SQLite-prebuild bump.**
+- **Update notice, not self-updating.** The AAB (`-PloamDistribution=play`, `modules/loam-updates`) links
+  Google's `app-update` library and, on the opening setup screen only, asks the Play Store app whether a newer
+  version exists; "Update" opens the Play listing. The APK on GitHub Releases (`github`) contains no Play code
+  and has a tap-only "Check for updates" (GitHub's latest-release API, version tag only; "Download" opens the
+  releases page). Neither downloads or installs anything, so Play's rule against updating outside Play holds.
+- **Member rules (UGC policy: "accept the terms before creating content").** A person's first view of a
+  network is the client's Welcome screen (`components/WelcomeScreen.tsx`): their random name and avatar ("Try
+  another name" until they first agree), the rules in one sentence, a link to `/rules` (served by the node,
+  offline, in the network's language) and one button, "I'm 18 or over, and I agree". The server records
+  `user.rulesVersion` (`POST /api/users/me/rules`, `MEMBER_RULES_VERSION`) and refuses posts, reactions,
+  uploads, typed names and new channels without it (`rules_not_accepted`); reading, reporting and blocking stay
+  open. The rules name the prohibited content (harassment, threats, hate, sexual content involving anyone
+  under 18, non-consensual intimate images, private details, scams, malware, spam) without a blanket "obey
+  local law".
+- **Moderation that works.** A message report shows moderators the reported message (text, attachment names,
+  author, where), read live so it never outlives the network's own deletion/retention; the report dialog says
+  moderators will see it. "Escalate" keeps the report open for admins (`status: "escalated"`). Moderators and
+  admins get a live count on People (`reportsChanged`).
+- **Adults only + child safety standards.** LOAM targets 18+: block minors with the Play Console tools (the
+  Anonymous/Random Chat policy), and members confirm 18+ on the Welcome screen (browser joiners never pass
+  Play). Child Safety Standards (they apply regardless of age gating): published at
+  `loamnet.com/child-safety` (`apps/site/child-safety.html`); in-app concern route = the Settings email line;
+  point of contact = Joseph Maynard, opensource@magiczebra.co.uk; hosts are told once (Android setup, the
+  `loamnet` terminal UI, every plain-mode start) that they're responsible for their network and must remove
+  and report child abuse material. **Owner:** complete the Console declarations.
 - **No dynamic code.** expo-updates absent; the server bundle is built at build time; no `eval`. The on-device
   model download is *data* (GGUF), which policy allows.
 - **No telemetry** in the app or server (PostHog is marketing-site only). For Data safety, "No data
@@ -40,6 +65,10 @@ device checks below, and size headroom before a production track.
   `dataExtractionRules` resource that excludes every domain from cloud backup **and** Android 12+
   device-to-device transfer (which `allowBackup=false` alone doesn't stop at targetSdk 36). Verified in
   the generated manifest; the transfer exclusion itself hasn't been exercised on a phone.
+- **No payments in the app.** No in-app purchases and no donation link (Play's Payments policy forbids
+  pointing to outside payment from inside an app). Donations go through Ko-fi
+  (`ko-fi.com/magiczebra`), linked only from the website, the README and `.github/FUNDING.yml`; the app's
+  About screen and Settings link to loamnet.com, never to Ko-fi.
 
 ## Blockers
 
@@ -108,7 +137,11 @@ build if that lands.
 1. Take the `loam-host-aab` artifact from a tag build (or run `pnpm --filter app aab` locally) and upload
    it to **internal testing** (this also reserves the package name — `com.loamnet.host` is permanent after
    the first upload; be sure the identity is the one you want).
-2. Console paperwork: Play App Signing, Data safety, content rating (user interaction + unmoderated chat →
-   expect Teen/16+), FGS declaration + video (H1), location declaration or the device-verified cap (H2).
-3. Closed testing, then production. (Newer *personal* developer accounts must run a closed test before
-   production access; an organisation account is exempt — check which applies.)
+2. Console paperwork: Play App Signing, Data safety, **Target audience = 18 and over only** (LOAM is
+   adults-only: the Welcome screen's "I'm 18 or over" and ACCEPTABLE_USE.md), content rating (users
+   interact, unmoderated chat), the **Child Safety Standards** declaration (the published standards page
+   `loamnet.com/child-safety` and its point of contact), FGS declaration + video (H1), location
+   declaration or the device-verified cap (H2).
+3. Closed testing, then production. Magic Zebra Ltd's developer account (set up 2026-10-08) is an
+   **organisation** account, so the 12-tester / 14-day closed test that newer personal accounts need doesn't
+   apply: internal testing can go straight to production once the device run passes.

@@ -7,7 +7,7 @@
 > `POST /api/messages` → 201 with read-back, and the client rendered live (channels, DMs, avatars,
 > "live" WS badge). DB uses plain **better-sqlite3** (unencrypted) via the digidem ABI-108
 > android-arm64 prebuild (now vendored in-repo; SQLCipher encryption at rest ships too — see below). Then on `feat/android-hotspot-join`: a **`LocalOnlyHotspot` native module**
-> (`apps/app/modules/loam-hotspot`, Kotlin via the Expo Modules API) plus a **"Share · Host" host bar**
+> (`apps/app/modules/loam-hotspot`, Kotlin via the Expo Modules API) plus a **host menu** (Invite people, Encryption, AI assistant, rules, privacy, About, Emergency reset)
 > above the WebView that opens a modal rendering the two-step QR join flow (`HostShareOverlay` →
 > `HostPanel`). Emulator-verified (arm64 API-35): LOAM still loads, the bar's button opens the modal,
 > tapping it prompts for `ACCESS_FINE_LOCATION` then `NEARBY_WIFI_DEVICES`, and `startHotspot()` runs.
@@ -160,7 +160,7 @@ The host runs a `WifiManager.LocalOnlyHotspot`. Joiners **Step 1** scan the WiFi
   address fails despite a good WiFi connection, that's the likely cause (device-dependent).
 
 ### Hosting modes: hotspot or the phone's Wi-Fi
-The Share · Host overlay opens with a two-option control, **Hotspot** / **Wi-Fi**, that picks how people
+The Invite people overlay opens with a two-option control, **Hotspot** / **Wi-Fi**, that picks how people
 join:
 
 - **Hotspot** (the default) is everything described above: the phone brings up its own
@@ -315,7 +315,7 @@ vendored tarball before installing it. Each JS-wrapper npm version and its
   hotspot/WiFi/FGS permissions + `data_extraction_rules.xml` + optional `uses-feature` + the
   stale-prebuild fingerprint), `apps/app/plugins/with-release-signing.js`, `apps/app/nodejs-assets/BUILD_NATIVE_MODULES.txt` (`0`),
   `apps/app/app.json` (package `com.loamnet.host`, `loam://` scheme, plugin), `apps/app/src/app/index.tsx` (host WebView
-  screen + "Share · Host" button + overlay), `apps/app/src/app/+native-intent.tsx` (incoming-URL policy), `apps/app/src/components/{host-panel,host-share-overlay,
+  screen + host menu + overlays), `apps/app/src/app/+native-intent.tsx` (incoming-URL policy), `apps/app/src/components/{host-panel,host-share-overlay,
   qr-code}.tsx`, `apps/app/src/hooks/use-hotspot.ts`, **`apps/app/modules/loam-hotspot/`** (the local
   Expo module: `expo-module.config.json`, `index.ts`, `src/*.ts`, `android/build.gradle` +
   `LoamHotspotModule.kt`, `LoamHostService.kt`), `package.json` deps, **`apps/app/native-prebuilds/multiple-ciphers/`** (the
@@ -588,7 +588,7 @@ Only after those pass is the QR/host UI mostly glue over `packages/qr`.
 
 ### Physical-device test (owner)
 The emulator can't create a real hotspot (no WiFi radio), so the end-to-end join is a two-phone test:
-1. Install + launch the APK; wait for LOAM to load, tap **Share · Host**, and grant the permission
+1. Install + launch the APK; wait for LOAM to load, open the host menu, tap **Invite people**, and grant the permission
    prompt(s) — location always, plus a nearby-WiFi-devices prompt on Android 13+ (API 33+).
 2. Confirm **Step 1** shows a real SSID + password. On a second phone, scan the Step-1 WiFi QR (or type
    the creds) to join the hotspot.

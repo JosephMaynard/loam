@@ -55,7 +55,7 @@ Anything that must look the same in both themes (QR tiles, the theme preview swa
 | `--fg-muted` | `#5b6862` | `#a3aca6` | Secondary text |
 | `--fg-faint` | `#75817b` | `#7a847e` | Timestamps, ids, hints. **Never body text** (3.9:1 / 4.5:1) |
 | `--border` / `--border-strong` | `#e1dcd1` / `#c6bfb0` | `#2a302c` / `#3b433e` | Dividers / control outlines |
-| `--accent` (+ `-hover`, `-fg`, `-soft`) | `#f26b1d` | same | Brand orange: mark, send, unread, mentions, focus |
+| `--accent` (+ `-hover`, `-fg`, `-soft`) | `#d84000` (the logo's orange) | same | Brand orange: mark, send, unread, mentions, focus |
 | `--primary` (+ `-hover`, `-fg`, `-soft`) | `#2f5f4c` | `#3a745b` | Moss: primary buttons, active states. White on it 7.3 / 5.5 |
 | `--link` | `#2f5f4c` | `#7cb79e` | Links and link-coloured text on tinted fills |
 | `--bubble-theirs` (+ `-fg`, `-border`) | `#ffffff` + border | `#232925` | Other people's bubbles |
@@ -68,9 +68,9 @@ Anything that must look the same in both themes (QR tiles, the theme preview swa
 | `--shadow-1` / `--shadow-2` | | | Resting surfaces / floating layers |
 | `--code-bg` / `--code-fg` | `#16271f` / `#dce8dd` | same | Code blocks stay dark in both themes |
 
-**Contrast.** Every text pair above passes WCAG AA. The orange with white on it is 3.05:1: fine for icons,
-badges, focus rings and bold large text, **not** for body-size text. So `.btn-accent` carries an icon or a
-one-word label; primary text buttons are moss. `--fg-faint` is for metadata only.
+**Contrast.** Every text pair above passes WCAG AA. White on the orange is 4.51:1, AA but only just, and the
+orange as text on the surfaces is 3.5 to 4.3:1: keep it to icons, badges, focus rings and bold or large
+text. So `.btn-accent` carries an icon or a one-word label; primary text buttons are moss. `--fg-faint` is for metadata only.
 
 ## Type, space, radii, motion
 

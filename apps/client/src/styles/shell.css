@@ -53,6 +53,11 @@
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--thread-w);
 }
 
+/* A screen shown with no sidebar (the rules, opened from the Welcome screen). */
+.app-shell.app-shell-solo {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 /* Every pane is a flex column that fills its cell; inner areas scroll, never the pane or the page. */
 .sidebar,
 .conversation,
@@ -450,6 +455,43 @@
 
 .gate-status {
   margin-top: var(--space-1);
+}
+
+/* The Welcome screen (components/WelcomeScreen.tsx): a gate card with who you are and one big button. */
+.welcome-identity {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-1);
+  margin: var(--space-2) 0;
+}
+
+.welcome-name-label {
+  margin-top: var(--space-2);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.welcome-name {
+  font-size: var(--text-xl);
+  overflow-wrap: anywhere;
+}
+
+.welcome-card .welcome-note,
+.welcome-card .welcome-rules {
+  font-size: var(--text-md);
+  line-height: var(--leading);
+}
+
+.welcome-rules a {
+  color: var(--link);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.welcome-agree {
+  margin-top: var(--space-2);
+  min-height: 48px;
+  font-size: var(--text-lg);
 }
 
 /* PinChangePrompt, rendered inside the rescan gate's card. */

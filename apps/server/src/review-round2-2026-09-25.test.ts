@@ -37,7 +37,7 @@ function tempDataDir(config?: unknown): string {
 
 /** Boot an app on `dataDir` (closed after the test; closing twice is harmless). */
 async function boot(dataDir: string, opts?: Partial<AppOptions>): Promise<LoamApp> {
-  const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...opts });
+  const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...opts });
   cleanups.push(() => app.close());
   return app;
 }

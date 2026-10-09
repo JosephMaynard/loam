@@ -8,7 +8,13 @@
 export type PolicyBlock = { kind: "p"; text: string } | { kind: "list"; items: string[] };
 export type PolicySection = { heading: string; blocks: PolicyBlock[] };
 
-export const PRIVACY_POLICY_UPDATED = "5 October 2026";
+export const PRIVACY_POLICY_UPDATED = "7 October 2026";
+
+/** Where people report problems: LOAM has no telemetry, so these are the only way we hear of one. */
+export const ISSUE_TRACKER = "github.com/MagicZebraLtd/loam/issues";
+/** LOAM's website, where people report problems (its "Report a problem" section) and find ways to support it. */
+export const WEBSITE = "loamnet.com";
+export const CONTACT_EMAIL = "opensource@magiczebra.co.uk";
 
 export const PRIVACY_POLICY: PolicySection[] = [
   {
@@ -34,6 +40,25 @@ export const PRIVACY_POLICY: PolicySection[] = [
           "LOAM has no sign-up, and it never asks for an email address, phone number or real name. It contains " +
           "no analytics, advertising, crash reporting or third-party tracking code.",
       },
+      {
+        kind: "p",
+        text:
+          "That also means LOAM never tells us when something goes wrong. If you find a problem, please let us " +
+          `know: open an issue at \`${ISSUE_TRACKER}\`, or email Magic Zebra Ltd at \`${CONTACT_EMAIL}\`.`,
+      },
+    ],
+  },
+  {
+    heading: "Checking for updates",
+    blocks: [
+      {
+        kind: "p",
+        text:
+          "The Android app from Google Play asks the Play Store app on the phone whether a newer LOAM exists, " +
+          "when LOAM opens. The Android app from GitHub checks only when you tap **Check for updates**: it asks " +
+          "GitHub for LOAM's latest version number, and GitHub sees your phone's internet address. Neither " +
+          "check sends anything from your LOAM network, and neither downloads or installs anything by itself.",
+      },
     ],
   },
   {
@@ -47,8 +72,10 @@ export const PRIVACY_POLICY: PolicySection[] = [
             "your browser to that id.",
           "**What you post:** channel messages, replies, direct messages, reactions, and any pictures or files " +
             "you attach. A location appears only if you add it to a message yourself.",
+          "**That you agreed to the network rules**, and which version of them.",
           "**Moderation records:** reports you make, and actions the host or moderators take (bans, timeouts, " +
-            "removed messages, join approvals).",
+            "removed messages, join approvals). When you report a message, the network's moderators can read " +
+            "that message and see its pictures and files, even in a direct message, while your report is open.",
           "**Your block list:** the people you have blocked. Only you see it; it isn't shared with them, with " +
             "moderators, or with other networks.",
           "**Network settings** chosen by the host.",
@@ -137,7 +164,9 @@ export const PRIVACY_POLICY: PolicySection[] = [
     blocks: [
       {
         kind: "p",
-        text: "LOAM is not directed at children under 13 and collects no information that would identify a child.",
+        text:
+          "LOAM is for adults: everyone confirms they are 18 or over before they post. Its rules prohibit any sexual " +
+          "content involving anyone under 18, and LOAM collects no information that would identify a child.",
       },
     ],
   },
@@ -148,7 +177,8 @@ export const PRIVACY_POLICY: PolicySection[] = [
         kind: "p",
         text:
           "Questions about data on this network go to its host, who holds it. Questions about this policy go to " +
-          "Magic Zebra Ltd through the LOAM project's issue tracker (`github.com/JosephMaynard/loam`). Changes " +
+          "Magic Zebra Ltd through the LOAM project's issue tracker (`github.com/MagicZebraLtd/loam`) or by email " +
+          `(\`${CONTACT_EMAIL}\`). Changes ` +
           "are published with a new date.",
       },
     ],

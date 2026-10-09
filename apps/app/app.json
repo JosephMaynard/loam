@@ -2,7 +2,7 @@
   "expo": {
     "name": "LOAM",
     "slug": "loam",
-    "version": "0.5.0",
+    "version": "0.6.0",
     "orientation": "portrait",
     "icon": "./assets/images/loam-icon.png",
     "scheme": "loam",
@@ -12,9 +12,9 @@
     },
     "android": {
       "package": "com.loamnet.host",
-      "versionCode": 7,
+      "versionCode": 8,
       "adaptiveIcon": {
-        "backgroundColor": "#d14900",
+        "backgroundColor": "#d84000",
         "foregroundImage": "./assets/images/loam-icon.png",
         "monochromeImage": "./assets/images/loam-icon-monochrome.png"
       },
@@ -36,7 +36,7 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#d14900",
+          "backgroundColor": "#d84000",
           "image": "./assets/images/loam-splash.png",
           "imageWidth": 200
         }

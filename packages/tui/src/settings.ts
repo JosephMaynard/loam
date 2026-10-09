@@ -19,6 +19,8 @@ export type CliSettings = {
   /** A pinned join address; absent means "pick automatically". */
   joinHost?: string;
   kiosk?: KioskSettings;
+  /** The version of the host's "You run this network" note last acknowledged (`HOST_ACK_VERSION`). */
+  hostAck?: number;
 };
 
 export const CLI_SETTINGS_FILE = "cli.json";
@@ -39,6 +41,9 @@ export function parseCliSettings(raw: unknown): CliSettings {
   }
   if (typeof value.joinHost === "string" && /^[A-Za-z0-9.:[\]-]{1,253}$/.test(value.joinHost)) {
     settings.joinHost = value.joinHost;
+  }
+  if (typeof value.hostAck === "number" && Number.isInteger(value.hostAck) && value.hostAck >= 1) {
+    settings.hostAck = value.hostAck;
   }
   const kiosk = value.kiosk as Record<string, unknown> | undefined;
   if (kiosk && typeof kiosk.passwordHash === "string" && kiosk.passwordHash.startsWith("scrypt:")) {

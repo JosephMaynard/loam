@@ -487,6 +487,13 @@ function printPlain(app) {
   console.log(`Open on this device:  http://localhost:${port}`);
   console.log(`Join from your phone: ${joinUrl}`);
   console.log("");
+  // The host's responsibilities (the terminal UI and the Android app show the same note once). A print-out has
+  // nobody to acknowledge it, so it's printed on every start: short, and it only goes to this host's log.
+  console.log("You run this network: what people post is stored on this computer, and you're responsible");
+  console.log("for it. Check reports in the web app, remove anything that breaks LOAM's rules, and if you find");
+  console.log("sexual content involving a child, remove it and report it to the police.");
+  console.log("More: https://loamnet.com/child-safety");
+  console.log("");
   // A QR that won't fit (the encoder caps at ~106 bytes; a long LOAM_JOIN_HOST can exceed it) must
   // never take down a server that is already listening — degrade to the printed URL instead.
   try {

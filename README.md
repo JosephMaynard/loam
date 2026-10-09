@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/JosephMaynard/loam/actions/workflows/ci.yml"><img src="https://github.com/JosephMaynard/loam/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
+  <a href="https://github.com/MagicZebraLtd/loam/actions/workflows/ci.yml"><img src="https://github.com/MagicZebraLtd/loam/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0" />
   <a href="https://www.npmjs.com/package/loamnet"><img src="https://img.shields.io/npm/v/loamnet?label=npx%20loamnet" alt="loamnet on npm" /></a>
 </p>
@@ -64,8 +64,8 @@ soil. We picked the word first and worked out the letters afterwards.)*
 
 ### On an Android phone
 
-1. **Download [`loam-host.apk`](https://github.com/JosephMaynard/loam/releases/latest/download/loam-host.apk)**
-   from the [latest release](https://github.com/JosephMaynard/loam/releases/latest) and open it to
+1. **Download [`loam-host.apk`](https://github.com/MagicZebraLtd/loam/releases/latest/download/loam-host.apk)**
+   from the [latest release](https://github.com/MagicZebraLtd/loam/releases/latest) and open it to
    install. Your phone may ask you to allow installs from your browser.
 2. **Answer four questions:** your language, the kind of network (see [below](#kinds-of-network)),
    its name, and how people connect: **Hotspot** (the phone makes its own Wi-Fi, no router needed) or
@@ -165,7 +165,10 @@ computer, the same settings live in the admin area as **security profiles**
 ## Privacy and security
 
 - **Nothing to collect.** No accounts, no analytics, no advertising, no crash reporting. Messages stay
-  on the host and on the phones that received them.
+  on the host and on the phones that received them. That also means LOAM never tells us when something
+  goes wrong, so if you find a problem, please
+  [open an issue](https://github.com/MagicZebraLtd/loam/issues) or email Magic Zebra Ltd at
+  opensource@magiczebra.co.uk.
 - **Encrypted connections.** Joining by the code sets up an encrypted connection to the host (an X25519
   handshake and XChaCha20-Poly1305), so nobody else on the Wi-Fi can read the messages. By default,
   pictures and files are downloaded unencrypted, so someone on the same Wi-Fi could see them; a network
@@ -184,6 +187,15 @@ running, with the key in memory, can give up what it holds. LOAM raises the bar;
 If your safety depends on it, get a professional review first. [`SECURITY.md`](SECURITY.md) has the full
 threat model, and every network serves its own privacy policy at `/privacy` (also on
 [loamnet.com](https://loamnet.com/privacy)).
+
+## Why LOAM is for adults
+
+LOAM is for people 18 and over. That isn't because of anything in it: LOAM is a plain messaging tool
+with no content of its own, nothing to browse and no feed, so people only see what others on their
+network write. It's because of how it works. There are no accounts, names are anonymous, and each
+network is run by whoever starts it, with no company in the middle, so nobody can check ages or look out
+for children the way an app made for them has to. Rather than pretend otherwise, LOAM is for adults. Our
+[child safety standards](https://loamnet.com/child-safety) say how abuse is handled.
 
 ## How it works
 
@@ -264,7 +276,13 @@ packed CLI on every push and pull request to `master`.
 - [Languages](docs/13-i18n.md) · [The assistant](docs/06-llm.md)
 - [Mission](MISSION.md) · [Acceptable use](ACCEPTABLE_USE.md) · [Roadmap](docs/roadmap.md)
 
+## Support LOAM
+
+LOAM is free, with no ads and no in-app purchases. If it helped you, you can support its development on
+[Ko-fi](https://ko-fi.com/magiczebra), or star the repo and tell people about it.
+
 ## License
 
-LOAM is licensed under the [GNU Affero General Public License v3.0](LICENSE). Copyright © Magic Zebra
-Ltd. If you run a modified LOAM as a service, the AGPL asks you to offer its users the source.
+LOAM is licensed under the [GNU Affero General Public License v3.0](LICENSE). Copyright ©
+[Magic Zebra Ltd](https://www.magiczebra.co.uk). If you run a modified LOAM as a service, the AGPL asks you
+to offer its users the source.

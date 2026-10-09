@@ -445,6 +445,13 @@ export function registerChannelRoutes(ctx: AppContext): void {
       return reply.code(403).send(errorBody(channelTimeoutError));
     }
 
+    // A channel's name is published content: not before the member rules are agreed.
+    const channelRulesError = ctx.rulesError(currentUser);
+
+    if (channelRulesError) {
+      return reply.code(403).send(errorBody(channelRulesError));
+    }
+
     if (!currentUser.isAdmin && !ctx.appConfig.features.enableUserChannels) {
       return reply.code(403).send(errorBody("Creating channels is disabled on this LOAM node"));
     }
@@ -496,6 +503,15 @@ export function registerChannelRoutes(ctx: AppContext): void {
 
     if (!body.success) {
       return reply.code(400).send(errorBody("Invalid channel update request"));
+    }
+
+    // A new name or description is published text: it needs the member rules agreed. Settings like
+    // archiving or posting rules stay open, so an admin can still manage a channel before agreeing.
+    const textRulesError =
+      body.data.name !== undefined || body.data.description !== undefined ? ctx.rulesError(currentUser) : undefined;
+
+    if (textRulesError) {
+      return reply.code(403).send(errorBody(textRulesError));
     }
 
     return ctx.applyChannelUpdate(channel, body.data);

@@ -1,7 +1,7 @@
 import {
-  ReportSchema,
+  ModerationReportSchema,
   UserSchema,
-  type Report,
+  type ModerationReport,
   type ReportResolution,
   type Role,
   type User,
@@ -9,12 +9,15 @@ import {
 import { generateDisplayName } from "@loam/display-name";
 import { useCallback, useEffect, useState } from "preact/hooks";
 
+import { AttachmentFile } from "../components/AttachmentFile";
+import { AttachmentImage } from "../components/AttachmentImage";
 import { Avatar } from "../components/Avatar";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CardHeader } from "../components/ScreenParts";
 import { ScreenHeader } from "../components/ScreenHeader";
 import { errorText, t } from "../i18n";
 import { fetchJson, parseUserList, requestJson, REQUEST_TIMEOUT_MS } from "../lib/api";
+import { isImageAttachment } from "../lib/attachments";
 import { canGreet, canManageRoles, canModerate, isProtectedTarget } from "../lib/capabilities";
 import { useIsTimedOut } from "../lib/timeout";
 import { encryptedFetch } from "../lib/transport";
@@ -62,9 +65,12 @@ async function requestUser(method: "POST" | "PATCH", path: string, body?: unknow
 export function PeopleView({
   currentUser,
   onUsersChanged,
+  reportsVersion = 0,
 }: {
   currentUser: User;
   onUsersChanged: (users: User[]) => void;
+  /** Bumped whenever the node says the report queue changed (`reportsChanged`), to reload it. */
+  reportsVersion?: number;
 }) {
   const greeter = canGreet(currentUser);
   const moderator = canModerate(currentUser);
@@ -88,7 +94,7 @@ export function PeopleView({
       <div className="screen-body">
         <div className="screen-column">
           {greeter ? <PendingApprovalsPanel onUsersChanged={onUsersChanged} /> : null}
-          {moderator ? <ModerationPanel currentUser={currentUser} onUsersChanged={onUsersChanged} /> : null}
+          {moderator ? <ModerationPanel currentUser={currentUser} onUsersChanged={onUsersChanged} reportsVersion={reportsVersion} /> : null}
         </div>
       </div>
     </section>
@@ -217,18 +223,30 @@ function PendingRow({ onResolved, user }: { onResolved: (user: User) => void; us
 const TIMEOUT_DURATION_MS = 3_600_000; // a moderator "time out" lasts one hour
 
 /**
- * The moderator report queue (docs/26): open member reports with one-motion actions. A message report
- * offers Remove / Escalate / Dismiss; a user report offers Time-out / Ban / Escalate / Dismiss. Every
- * action resolves the report (it drops out of the queue). Names are resolved from the moderation roster.
+ * The moderator report queue (docs/26): open member reports with one-motion actions. A message report shows
+ * the reported message (its text, attachment names, author and where it was posted) and offers Remove /
+ * Escalate / Dismiss; a user report offers Time-out / Ban / Escalate / Dismiss. Escalate hands the report
+ * to the admins, whose queue keeps it (marked "Escalated by") until one of them acts; every other action
+ * resolves it. Names are resolved from the moderation roster.
  */
-function ReportQueue({ people, onApplyUser }: { people: User[]; onApplyUser: (user: User) => void }) {
-  const [reports, setReports] = useState<Report[]>([]);
+function ReportQueue({
+  currentUser,
+  people,
+  onApplyUser,
+  reportsVersion,
+}: {
+  currentUser: User;
+  people: User[];
+  onApplyUser: (user: User) => void;
+  reportsVersion: number;
+}) {
+  const [reports, setReports] = useState<ModerationReport[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string>();
   const [busyId, setBusyId] = useState<string>();
   const [reloadKey, setReloadKey] = useState(0);
   // A user report whose "Ban" is waiting on its alertdialog.
-  const [confirmingBan, setConfirmingBan] = useState<Report>();
+  const [confirmingBan, setConfirmingBan] = useState<ModerationReport>();
 
   useEffect(() => {
     let active = true;
@@ -243,7 +261,7 @@ function ReportQueue({ people, onApplyUser }: { people: User[]; onApplyUser: (us
         setReports(
           Array.isArray(payload)
             ? payload.flatMap((item) => {
-                const parsed = ReportSchema.safeParse(item);
+                const parsed = ModerationReportSchema.safeParse(item);
                 return parsed.success ? [parsed.data] : [];
               })
             : [],
@@ -258,11 +276,11 @@ function ReportQueue({ people, onApplyUser }: { people: User[]; onApplyUser: (us
     return () => {
       active = false;
     };
-  }, [reloadKey]);
+  }, [reloadKey, reportsVersion]);
 
   const nameFor = (id: string): string => people.find((entry) => entry.id === id)?.displayName ?? generateDisplayName(id);
 
-  async function act(report: Report, enforce: () => Promise<unknown>, resolution: ReportResolution): Promise<void> {
+  async function act(report: ModerationReport, enforce: () => Promise<unknown>, resolution: ReportResolution): Promise<void> {
     setBusyId(report.id);
     setError(undefined);
     try {
@@ -313,6 +331,12 @@ function ReportQueue({ people, onApplyUser }: { people: User[]; onApplyUser: (us
                     {" · "}
                     {t("moderation.reports.reporter", { name: nameFor(report.reporterUserId) })}
                   </span>
+                  {report.escalatedByUserId ? (
+                    <span className="badge badge-accent report-escalated">
+                      {t("moderation.reports.escalatedBy", { name: nameFor(report.escalatedByUserId) })}
+                    </span>
+                  ) : null}
+                  {report.targetType === "message" ? <ReportedMessageView nameFor={nameFor} report={report} /> : null}
                   {report.note ? (
                     <p className="report-note" dir="auto">
                       {report.note}
@@ -321,6 +345,7 @@ function ReportQueue({ people, onApplyUser }: { people: User[]; onApplyUser: (us
                 </div>
                 <div className="row-actions">
                   {report.targetType === "message" ? (
+                    report.messageGone || report.message?.removed ? null : (
                     <button
                       className="btn btn-danger btn-sm"
                       disabled={busy}
@@ -329,6 +354,7 @@ function ReportQueue({ people, onApplyUser }: { people: User[]; onApplyUser: (us
                     >
                       {t("moderation.reports.removeMessage")}
                     </button>
+                    )
                   ) : (
                     <>
                       <button
@@ -356,14 +382,17 @@ function ReportQueue({ people, onApplyUser }: { people: User[]; onApplyUser: (us
                       </button>
                     </>
                   )}
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    disabled={busy}
-                    onClick={() => void act(report, () => Promise.resolve(), "escalated")}
-                    type="button"
-                  >
-                    {t("moderation.reports.escalate")}
-                  </button>
+                  {/* Admins are who an escalation goes to, so they don't get the button. */}
+                  {currentUser.isAdmin || report.status === "escalated" ? null : (
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      disabled={busy}
+                      onClick={() => void act(report, () => Promise.resolve(), "escalated")}
+                      type="button"
+                    >
+                      {t("moderation.reports.escalate")}
+                    </button>
+                  )}
                   <button
                     className="btn btn-ghost btn-sm"
                     disabled={busy}
@@ -396,12 +425,58 @@ function ReportQueue({ people, onApplyUser }: { people: User[]; onApplyUser: (us
   );
 }
 
+/**
+ * What a message report is about: who posted it, where, and the message itself (shown as plain text, never
+ * rendered as markdown or HTML), or a note that it's gone or already removed.
+ */
+function ReportedMessageView({ report, nameFor }: { report: ModerationReport; nameFor: (id: string) => string }) {
+  if (report.messageGone || !report.message) {
+    return <p className="row-meta">{t("moderation.reports.gone")}</p>;
+  }
+  const { message } = report;
+  const author = nameFor(message.authorId);
+  const where =
+    message.where.kind === "channel"
+      ? t("moderation.reports.inChannel", { author, channel: message.where.channelName })
+      : t("moderation.reports.inDm", {
+          author,
+          other: nameFor(message.where.userIds.find((id) => id !== message.authorId) ?? message.where.userIds[1]),
+        });
+  return (
+    <div className="reported-message">
+      <span className="row-meta">
+        {where}
+        {message.removed ? ` · ${t("moderation.reports.alreadyRemoved")}` : ""}
+      </span>
+      {message.body ? (
+        <p className="reported-message-body" dir="auto">
+          {message.body}
+        </p>
+      ) : null}
+      {message.reaction ? <span className="row-meta">{t("moderation.reports.reaction", { emoji: message.reaction })}</span> : null}
+      {message.attachments.length ? (
+        <div className="reported-attachments">
+          {message.attachments.map((attachment) =>
+            isImageAttachment(attachment) ? (
+              <AttachmentImage alt={attachment.name ?? ""} attachment={attachment} key={attachment.id} />
+            ) : (
+              <AttachmentFile attachment={attachment} key={attachment.id} />
+            ),
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ModerationPanel({
   currentUser,
   onUsersChanged,
+  reportsVersion,
 }: {
   currentUser: User;
   onUsersChanged: (users: User[]) => void;
+  reportsVersion: number;
 }) {
   const [people, setPeople] = useState<User[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -448,7 +523,7 @@ function ModerationPanel({
 
   return (
     <>
-      <ReportQueue onApplyUser={applyUser} people={people} />
+      <ReportQueue currentUser={currentUser} onApplyUser={applyUser} people={people} reportsVersion={reportsVersion} />
       <div className="card">
         <CardHeader
           actions={<RefreshButton onClick={() => setReloadKey((key) => key + 1)} />}

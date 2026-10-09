@@ -11,6 +11,7 @@ import { NavLink } from "../components/NavLink";
 import { CardHeader } from "../components/ScreenParts";
 import { ScreenHeader } from "../components/ScreenHeader";
 import { t } from "../i18n";
+import { CONTACT_EMAIL, WEBSITE } from "../lib/privacy-policy";
 import { safeQrSvg } from "../lib/qr";
 import { fingerprint, getHostKeyMismatch, inviteQrHostKey, isSessionQrVerified, joinQrUrl } from "../lib/transport";
 
@@ -293,7 +294,18 @@ export function SettingsView({
           {/* The privacy policy is served by this node (/privacy, lib/privacy-policy.ts): it reads with no
               internet and never sends anyone to another website. */}
           <p className="screen-footnote privacy-policy-link">
+            <a href="/rules">{t("settings.rules")}</a>
+            {" · "}
             <a href="/privacy">{t("settings.privacyPolicy")}</a>
+          </p>
+          {/* No telemetry, so a report is the only way a problem reaches us. Plain text, not links: the
+              network may have no internet, and Settings never sends anyone off the node. */}
+          <p className="screen-footnote report-problems">
+            {t("settings.reportProblems")}
+            <br />
+            <span dir="ltr">{WEBSITE}</span>
+            <br />
+            <span dir="ltr">{CONTACT_EMAIL}</span>
           </p>
         </div>
       </div>

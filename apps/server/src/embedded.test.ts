@@ -154,7 +154,7 @@ describe("P1-3 regression (Sol round 3): main.js's encrypted-driver-unavailable 
       // derived values — the plaintext `node-sqlite` default driver, not `better-sqlite3`, since the
       // driver choice itself is orthogonal to this regression (the bug was never reaching a driver
       // choice at all — it crashed inside the encrypted-key branch before that).
-      const app = await buildApp({
+      const app = await buildApp({ requireRulesAcceptance: false,
         dataDir,
         logger: false,
         dbEncryptionKey: ephemeralDbKey ? undefined : dbKeyEnv,

@@ -1,7 +1,7 @@
 {
   "name": "loam",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Local-first, off-grid messaging: a host runs it on a laptop, Pi, or phone; nearby people scan a QR and chat over the local network.",
   "scripts": {
     "dev": "tsx scripts/dev.ts",
@@ -28,7 +28,9 @@
       "uuid@<11.1.1": "^11.1.1",
       "@babel/core@<7.29.6": "^7.29.6",
       "ip-address@<10.7.1": "^10.7.2",
-      "@xmldom/xmldom@^0.9.0": "^0.9.12"
+      "@xmldom/xmldom@^0.9.0": "^0.9.12",
+      "source-map-js@<1.2.2": "^1.2.2",
+      "http-cache-semantics@<4.3.0": "^4.3.0"
     },
     "patchedDependencies": {
       "llama.rn@0.12.6": "patches/llama.rn@0.12.6.patch"

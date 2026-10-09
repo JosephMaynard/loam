@@ -25,10 +25,10 @@
   --border-strong: #c6bfb0;
 
   /* Brand + actions */
-  --accent: #f26b1d;
-  --accent-hover: #e05d12;
+  --accent: #d84000;
+  --accent-hover: #c23900;
   --accent-fg: #ffffff;
-  --accent-soft: rgba(242, 107, 29, 0.14);
+  --accent-soft: rgba(216, 64, 0, 0.14);
   --primary: #2f5f4c;
   --primary-hover: #264e3e;
   --primary-fg: #ffffff;
@@ -49,9 +49,8 @@
   --danger-solid: #c9302c;
   --danger-solid-hover: #b12824;
   --online: #33c27a;
-  /* Focus rings: the brand orange is only 2.9:1 on the light surfaces (WCAG 1.4.11 wants 3:1), so light
-     mode uses a deeper ember; dark mode's orange is 5.7:1 and keeps the accent. */
-  --focus: #c2410c;
+  /* Focus rings: the brand orange is 3.6:1 or more on every surface in both themes (WCAG 1.4.11 wants 3:1). */
+  --focus: var(--accent);
 
   /* Depth */
   --shadow-1: 0 1px 2px rgba(29, 38, 34, 0.08);

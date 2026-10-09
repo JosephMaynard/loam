@@ -13,6 +13,7 @@
 // Google Play only accepts an Android App Bundle for new apps. `--aab` adds a `bundleRelease` pass
 // after the APK; upload the .aab to Play with Play App Signing enabled, where this repo's release
 // keystore acts as the UPLOAD key (docs/30). The APK stays the GitHub-Releases / sideload artifact.
+// The two differ in one way: how they learn of a newer LOAM (-PloamDistribution, modules/loam-updates).
 //
 // Signing: the release APK is signed with the throwaway debug key unless you first run
 // `pnpm --filter app keystore` (generates apps/app/keystore.properties, which
@@ -142,6 +143,11 @@ if (!existsSync(keystoreProps)) {
 const out = parseOut();
 const pnpm = { cwd: repoRoot, env };
 
+// The release tag (CI sets LOAM_RELEASE_TAG on tag builds only) is baked into modules/loam-updates, so the
+// GitHub build's update check knows an RC from the final release of the same X.Y.Z. That module's
+// build.gradle validates it and fails the build on anything but vX.Y.Z / vX.Y.Z-rc.N / vX.Y.Z-beta.N.
+const releaseTagArgs = process.env.LOAM_RELEASE_TAG ? [`-PloamReleaseTag=${process.env.LOAM_RELEASE_TAG}`] : [];
+
 console.log("Building the LOAM Android host APK — this takes a few minutes on a cold cache.");
 
 // 1. Workspace build (packages + server + web client — the client dist gets bundled into the server).
@@ -180,8 +186,10 @@ run("npx", ["expo", "prebuild", "--platform", "android", "--no-install", "--clea
   // to debug signing — belt and braces for the keystore check above (e.g. the file vanishing mid-build).
   env: { ...env, CI: "1", ...(buildAab ? { LOAM_REQUIRE_RELEASE_SIGNING: "1" } : {}) },
 });
-// 5. Assemble the release APK for arm64 (the only ABI the bundled native prebuild ships).
-run("./gradlew", ["assembleRelease", "-PreactNativeArchitectures=arm64-v8a"], {
+// 5. Assemble the release APK for arm64 (the only ABI the bundled native prebuild ships). The APK is the
+//    GitHub / sideload build: modules/loam-updates compiles its GitHub stub (no Play code, and update checks
+//    only when someone taps "Check for updates").
+run("./gradlew", ["assembleRelease", "-PreactNativeArchitectures=arm64-v8a", "-PloamDistribution=github", ...releaseTagArgs], {
   cwd: androidDir,
   env,
 });
@@ -198,7 +206,12 @@ console.log(`Install it on a connected phone/emulator with:\n  adb install -r ${
 if (buildAab) {
   // 6. The Play upload artifact. Same arm64-only ABI filter as the APK (the bundled native prebuilds
   //    ship no other ABI, so a wider bundle would install-then-crash on 32-bit devices).
-  run("./gradlew", ["bundleRelease", "-PreactNativeArchitectures=arm64-v8a"], { cwd: androidDir, env });
+  //    The bundle is the Play build: modules/loam-updates links Google's app-update library and asks the Play
+  //    Store app for updates instead of GitHub. Only that module recompiles; the JS bundle is shared.
+  run("./gradlew", ["bundleRelease", "-PreactNativeArchitectures=arm64-v8a", "-PloamDistribution=play", ...releaseTagArgs], {
+    cwd: androidDir,
+    env,
+  });
 
   if (!existsSync(gradlewAab)) {
     console.error(`\nBuild finished but no AAB was found at ${gradlewAab}`);

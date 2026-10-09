@@ -1,5 +1,6 @@
 import nodejs from '@comapeo/nodejs-mobile-react-native';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import { SymbolView } from 'expo-symbols';
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -9,7 +10,6 @@ import {
   BackHandler,
   KeyboardAvoidingView,
   Linking,
-  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -20,8 +20,10 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { WebView } from 'react-native-webview';
 
 
+import { AboutOverlay } from '@/components/about-overlay';
 import { DbEncryptionSettingsOverlay } from '@/components/db-encryption-settings';
 import { EmergencyResetOverlay } from '@/components/emergency-reset';
+import { HostMenu } from '@/components/host-menu';
 import { HostShareOverlay } from '@/components/host-share-overlay';
 import { ModelManagerOverlay } from '@/components/model-manager';
 import { SetupWizard, type SetupOutcome } from '@/components/setup-wizard';
@@ -54,6 +56,7 @@ import { ensureHostService } from '@/lib/host-service';
 import { noteConnectedClients, noteLauncherInterfaces } from '@/hooks/use-hotspot';
 import { parseHostClients, parseHostInterfaces, type HostInterface } from '@/lib/join-display';
 import { registerOnDeviceLlm } from '@/lib/on-device-llm';
+import { clearSharedFiles, parseSaveFileMessage, shareReceivedFile } from '@/lib/save-file';
 import { registerMeshCourier } from '@/mesh/mesh-courier';
 import { closeApp, startKiosk, stopKiosk } from '../../modules/loam-hotspot';
 
@@ -312,10 +315,9 @@ function HostScreen() {
   const [modelManagerOpen, setModelManagerOpen] = useState(false);
   // Whether the on-device DB-encryption mode picker overlay (docs/01, docs/21) is open.
   const [dbEncryptionOpen, setDbEncryptionOpen] = useState(false);
-  // Whether the top-bar hamburger menu (AI model / Encryption / Share · Host) is open. The bar used to
-  // show each of those as its own button, but they ran off the right edge on narrower phones — now a
-  // single menu button opens a dropdown listing the same actions, wired to the same handlers/state above.
+  // Whether the top-bar menu (components/host-menu.tsx) is open, and the About screen it leads to.
   const [menuOpen, setMenuOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   // Measured height of the top bar (via onLayout), used to anchor the menu dropdown just below it —
   // more robust than a hardcoded guess across devices/font scales.
   const [topBarHeight, setTopBarHeight] = useState(0);
@@ -364,9 +366,6 @@ function HostScreen() {
   const [displayMode, setDisplayMode] = useState(false);
   // The network's name from /api/bootstrap, shown above the codes in display mode.
   const [hostNodeName, setHostNodeName] = useState<string>();
-  // A private network (the hardened profile): Emergency reset sits in the main menu, to hand in a hurry.
-  // On any other network it lives in Encryption settings, out of the way.
-  const [privateNetwork, setPrivateNetwork] = useState(false);
   const webViewRef = useRef<WebView>(null);
   // Whether the WebView (the LOAM web client, which routes with preact-iso via the History API) has
   // in-app history to go back through. A ref, not state: the hardware-back listener reads it without
@@ -378,6 +377,11 @@ function HostScreen() {
   // strip below the WebView (so its content never draws under the on-screen nav bar) and, when needed,
   // to keep the boot/error screen's content clear of it too.
   const insets = useSafeAreaInsets();
+
+  // A file handed to the share sheet last time (lib/save-file.ts) doesn't stay in the cache past a restart.
+  useEffect(() => {
+    void clearSharedFiles();
+  }, []);
 
   // Wire the Android hardware/gesture Back button to the WebView's in-app history. The LOAM web client
   // routes with preact-iso, which pushes History API entries, so the WebView has a real back stack — but
@@ -716,13 +720,10 @@ function HostScreen() {
           return { gated: true } as const;
         }
         const body = (await response.json()) as unknown;
-        const networkConfig = (body as { networkConfig?: { nodeName?: unknown; securityProfile?: unknown } } | null)
+        const networkConfig = (body as { networkConfig?: { nodeName?: unknown } } | null)
           ?.networkConfig;
         if (typeof networkConfig?.nodeName === 'string' && networkConfig.nodeName && !cancelled) {
           setHostNodeName(networkConfig.nodeName);
-        }
-        if (!cancelled) {
-          setPrivateNetwork(networkConfig?.securityProfile === 'hardened');
         }
         return { gated: false, fragment: fragmentFor(body) } as const;
       })
@@ -975,7 +976,16 @@ function HostScreen() {
         setShareOpen(true);
         return;
       }
+      // A received file the person tapped: hand it to Android's share sheet (lib/save-file.ts), since the
+      // WebView can't download the tunnel's blob: URLs. Malformed or oversized requests are dropped.
+      const saveRequest = parseSaveFileMessage(parsed);
+      if (saveRequest) {
+        void shareReceivedFile(saveRequest).catch((error: unknown) => console.warn('LOAM: could not share the file', error));
+        return;
+      }
       if (parsed && parsed.type === 'loam-wipe') {
+        // A shared file's cached copy must not outlive the reset.
+        void clearSharedFiles();
         // Give the client's own local purge a moment, then rejoin under the node's NEW transport key (see
         // `webViewKey`). Still a native no-op for key material — that stays with the acked protocol below.
         setTimeout(() => {
@@ -1015,102 +1025,60 @@ function HostScreen() {
           type="backgroundElement"
           style={styles.topBar}
           onLayout={(event) => setTopBarHeight(event.nativeEvent.layout.height)}>
-          <ThemedText type="smallBold">LOAM host</ThemedText>
+          {/* What only the host needs to see: that it's running and how many phones are on it (the web app
+              below already shows the network's name and mark). A tap opens the join codes. */}
+          <Pressable
+            onPress={() => setShareOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel={t('menu.invite')}
+            style={styles.topBarStatus}>
+            <View style={[styles.topBarDot, { backgroundColor: ONLINE_GREEN }]} />
+            <ThemedText type="smallBold" numberOfLines={1} style={styles.topBarStatusText}>
+              {hostClients.length ? t('host.connected', { n: hostClients.length }) : t('host.noneConnected')}
+            </ThemedText>
+          </Pressable>
           <Pressable
             onPress={() => setMenuOpen(true)}
             accessibilityRole="button"
-            accessibilityLabel="Open host menu"
+            accessibilityLabel={t('menu.open')}
             hitSlop={Spacing.two}
             style={styles.menuButton}>
-            <View style={[styles.menuBar, { backgroundColor: theme.text }]} />
-            <View style={[styles.menuBar, { backgroundColor: theme.text }]} />
-            <View style={[styles.menuBar, { backgroundColor: theme.text }]} />
+            <SymbolView name={{ android: 'menu', ios: 'line.3.horizontal' }} size={26} tintColor={theme.text} />
           </Pressable>
         </ThemedView>
-        {/* The menu button's dropdown (Issue 2): a single hamburger replaces the old row of "AI model" /
-            "Encryption" / "Share · Host" buttons, which overflowed the bar on narrower phones. Each item
-            below calls the exact same handler/state setter the old buttons used — only the presentation
-            changed. A transparent Modal + full-screen backdrop Pressable (tap outside to dismiss) anchors
-            a small card just under the measured top bar, right-aligned under the menu button. */}
-        <Modal visible={menuOpen} transparent animationType="fade" onRequestClose={() => setMenuOpen(false)}>
-          <Pressable
-            style={styles.menuBackdrop}
-            onPress={() => setMenuOpen(false)}
-            accessibilityRole="button"
-            accessibilityLabel="Close menu">
-            <View style={[styles.menuCardWrap, { paddingTop: insets.top + topBarHeight }]}>
-              <ThemedView type="backgroundElement" style={styles.menuCard}>
-                <Pressable
-                  onPress={() => {
-                    setMenuOpen(false);
-                    setModelManagerOpen(true);
-                  }}
-                  accessibilityRole="button"
-                  accessibilityLabel="Manage the on-device AI model"
-                  style={styles.menuItem}>
-                  <ThemedText type="smallBold">AI model</ThemedText>
-                </Pressable>
-                <View style={styles.menuDivider} />
-                <Pressable
-                  onPress={() => {
-                    setMenuOpen(false);
-                    setDbEncryptionOpen(true);
-                  }}
-                  accessibilityRole="button"
-                  accessibilityLabel="On-device encryption settings"
-                  style={styles.menuItem}>
-                  <ThemedText type="smallBold">Encryption</ThemedText>
-                </Pressable>
-                <View style={styles.menuDivider} />
-                <Pressable
-                  onPress={() => {
-                    setMenuOpen(false);
-                    setShareOpen(true);
-                  }}
-                  accessibilityRole="button"
-                  accessibilityLabel="Share or host this LOAM node"
-                  style={styles.menuItem}>
-                  <ThemedText type="smallBold">Share · Host</ThemedText>
-                </Pressable>
-                <View style={styles.menuDivider} />
-                {/* The privacy policy is served by this node (the web client's /privacy page): it opens in
-                    this WebView, with no internet and no other website involved. */}
-                <Pressable
-                  onPress={() => {
-                    setMenuOpen(false);
-                    webViewRef.current?.injectJavaScript(
-                      "history.pushState(null, '', '/privacy'); dispatchEvent(new PopStateEvent('popstate')); true;",
-                    );
-                  }}
-                  accessibilityRole="link"
-                  accessibilityLabel={t('menu.privacy')}
-                  style={styles.menuItem}>
-                  <ThemedText type="smallBold">{t('menu.privacy')}</ThemedText>
-                </Pressable>
-                {/* Emergency reset, on a private network only: last, set apart and in red, so it's easy to
-                    find in a hurry but not the item a thumb lands on by habit. Its own screen asks for a
-                    press-and-hold. Elsewhere it's at the bottom of Encryption settings. */}
-                {privateNetwork ? (
-                  <>
-                    <View style={[styles.menuDivider, styles.menuDangerDivider]} />
-                    <Pressable
-                      onPress={() => {
-                        setMenuOpen(false);
-                        setResetOpen(true);
-                      }}
-                      accessibilityRole="button"
-                      accessibilityLabel={t('reset.menu')}
-                      style={styles.menuItem}>
-                      <ThemedText type="smallBold" style={{ color: theme.danger }}>
-                        {t('reset.menu')}
-                      </ThemedText>
-                    </Pressable>
-                  </>
-                ) : null}
-              </ThemedView>
-            </View>
-          </Pressable>
-        </Modal>
+        {/* The menu (components/host-menu.tsx): it reports the chosen item, and each opens what it always did. */}
+        <HostMenu
+          visible={menuOpen}
+          top={insets.top + topBarHeight}
+          onClose={() => setMenuOpen(false)}
+          onSelect={(action) => {
+            switch (action) {
+              case 'invite':
+                setShareOpen(true);
+                return;
+              case 'encryption':
+                setDbEncryptionOpen(true);
+                return;
+              case 'assistant':
+                setModelManagerOpen(true);
+                return;
+              case 'rules':
+              case 'privacy':
+                // Served by this node (the web client's /rules and /privacy pages): they open in this WebView,
+                // with no internet and no other website involved.
+                webViewRef.current?.injectJavaScript(
+                  `history.pushState(null, '', '/${action}'); dispatchEvent(new PopStateEvent('popstate')); true;`,
+                );
+                return;
+              case 'about':
+                setAboutOpen(true);
+                return;
+              case 'reset':
+                setResetOpen(true);
+                return;
+            }
+          }}
+        />
         {/* Persistent boot notice (AF2/P1-4): rendered as a sibling ABOVE the WebView, same reasoning
             as the top bar's comment — an overlay wouldn't receive touches. Survives 'ready' (unlike the
             old behaviour, where this arrived as a terminal 'error' and got wiped the moment 'ready'
@@ -1286,6 +1254,7 @@ function HostScreen() {
             setResetOpen(true);
           }}
         />
+        <AboutOverlay visible={aboutOpen} onClose={() => setAboutOpen(false)} />
         <EmergencyResetOverlay
           channel={nodejs.channel}
           onClose={() => setResetOpen(false)}
@@ -1638,6 +1607,9 @@ function HostScreen() {
   );
 }
 
+/** The "live" green the web client uses for presence and a running network (`--online`). */
+const ONLINE_GREEN = '#33c27a';
+
 const styles = StyleSheet.create({
   flex: {
     flex: 1,
@@ -1700,49 +1672,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
   },
-  // The hamburger menu button (Issue 2): three stacked bars drawn with plain Views (no react-native-svg
-  // dependency in this app) inside a tappable column.
-  menuButton: {
-    flexDirection: 'column',
-    justifyContent: 'center',
-    alignItems: 'flex-end',
-    gap: Spacing.half,
-    padding: Spacing.two,
-  },
-  menuBar: {
-    width: 22,
-    height: 2,
-    borderRadius: 1,
-  },
-  // Full-screen dim backdrop behind the menu dropdown — tapping it (anywhere outside the card) closes
-  // the menu.
-  menuBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-  },
-  // Positions the card just under the measured top bar, right-aligned under the menu button.
-  menuCardWrap: {
-    alignItems: 'flex-end',
-    paddingRight: Spacing.three,
-  },
-  menuCard: {
-    minWidth: 180,
-    borderRadius: Spacing.three,
-    paddingVertical: Spacing.one,
-    overflow: 'hidden',
-  },
-  menuItem: {
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.three,
-  },
-  menuDivider: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: 'rgba(128,128,128,0.3)',
-  },
-  // A wider gap above Emergency reset, so it reads as its own group.
-  menuDangerDivider: {
-    marginTop: Spacing.two,
-  },
+  // The running status, left of the menu button; cut short rather than wrapping on a narrow phone.
+  topBarStatus: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: Spacing.two, marginRight: Spacing.two, paddingVertical: Spacing.one },
+  topBarDot: { width: 9, height: 9, borderRadius: 5 },
+  topBarStatusText: { flexShrink: 1 },
+  menuButton: { padding: Spacing.one },
   // Bottom system-nav-bar inset strip (Issue 1) — a solid `backgroundElement`-coloured bar reserved
   // below the WebView, sized to `insets.bottom` at render time (see the inline style merge).
   bottomInsetBar: {

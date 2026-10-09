@@ -97,6 +97,8 @@ export function ReportDialog({ targetType, targetId, onClose }: ReportDialogProp
               value={note}
             />
           </label>
+          {/* Honest about what a report shares: the moderators see the reported message itself. */}
+          <p className="field-hint report-shared">{t("report.shared")}</p>
           {error ? (
             <p className="form-error" role="alert">
               {error}

@@ -40,7 +40,7 @@ async function makeApp(config?: unknown, opts?: Partial<AppOptions>): Promise<{ 
   if (config !== undefined) {
     writeFileSync(join(dataDir, "config.json"), JSON.stringify(config));
   }
-  const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...opts });
+  const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...opts });
   cleanups.push(async () => {
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });
@@ -377,7 +377,7 @@ describe("sealed pulls: no refetch loop, no endpoint leak, sender-chosen TTL (#1
     expect(fetchCounts()).toEqual([1, 1]);
 
     await app.close(); // restart
-    const reopened = await buildApp({ dataDir, logger: false });
+    const reopened = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     cleanups.push(() => reopened.close());
     await syncRound(reopened, admin.cookie);
     expect(fetchCounts()).toEqual([1, 1]);
@@ -672,7 +672,7 @@ describe("peer users: only accepted authors, no reserved ids, no mesh keys minte
     // A restart runs ensureAllMeshIdentities: it must not mint a secret keypair for the imported user nor
     // overwrite the key their home node published.
     await app.close();
-    const reopened = await buildApp({ dataDir, logger: false });
+    const reopened = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     cleanups.push(() => reopened.close());
     expect(reopened.store.loadMeshIdentities().some((row) => row.userId === author.id)).toBe(false);
     expect(reopened.store.loadUsers().find((user) => user.id === author.id)?.identityKey?.sign).toBe(peerKey.signPublic);
@@ -748,7 +748,7 @@ describe("peer users: only accepted authors, no reserved ids, no mesh keys minte
     ).run(meshDm.id, mailingMesh, admin.userId, meshDm.createdAt, JSON.stringify(meshDm));
     db.close();
 
-    const reopened = await buildApp({ dataDir, logger: false });
+    const reopened = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     cleanups.push(() => reopened.close());
     const rows = new Map(reopened.store.loadMeshIdentities().map((row) => [row.userId, row.data]));
     const users = new Map(reopened.store.loadUsers().map((user) => [user.id, user]));
@@ -778,7 +778,7 @@ describe("peer users: only accepted authors, no reserved ids, no mesh keys minte
     app.store.upsertUser({ ...synced, identityKey: { alg: "ed25519", sign: forged.signPublic, kx: forged.kxPublic, kxSig: forged.kxSig } });
 
     await app.close();
-    const reopened = await buildApp({ dataDir, logger: false });
+    const reopened = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     cleanups.push(() => reopened.close());
     // The row is DELETED, not overwritten with a placeholder.
     expect(reopened.store.loadMeshIdentities().some((entry) => entry.userId === peerAuthor.id)).toBe(false);

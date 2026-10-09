@@ -73,7 +73,7 @@ function tempDataDir(): string {
 
 /** Boot an app on `dataDir` (closed after the test). */
 async function boot(dataDir: string, opts?: Partial<AppOptions>): Promise<LoamApp> {
-  const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...opts });
+  const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...opts });
   cleanups.push(() => app.close());
   return app;
 }
@@ -134,7 +134,7 @@ describe("the sealed resume mint never aliases an existing identity", () => {
 describe("a wipe journal written by an older build is repaired, not treated as corrupt", () => {
   it("resumes with a snapshot holding transportEncryption \"off\" and an out-of-namespace bot id", async () => {
     const dataDir = tempDataDir();
-    const first = await buildApp({ dataDir, logger: false });
+    const first = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     await first.close();
 
     const snapshot = defaultLoamConfig() as unknown as {
@@ -166,13 +166,13 @@ describe("a wipe journal written by an older build is repaired, not treated as c
 
   it("still locks on a snapshot that is invalid for any other reason", async () => {
     const dataDir = tempDataDir();
-    const first = await buildApp({ dataDir, logger: false });
+    const first = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     await first.close();
     const snapshot = defaultLoamConfig() as unknown as { llm: { ollama: Record<string, unknown> } };
     delete snapshot.llm.ollama.botId; // never had one: not a legacy value, so nothing to repair
     writeFileSync(join(dataDir, ".loam-wipe-phase"), JSON.stringify({ phase: "delete-pending", config: snapshot }));
 
-    await expect(buildApp({ dataDir, logger: false })).rejects.toThrow(/INVALID config snapshot/);
+    await expect(buildApp({ requireRulesAcceptance: false, dataDir, logger: false })).rejects.toThrow(/INVALID config snapshot/);
     expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(true);
   });
 });
@@ -188,7 +188,7 @@ describe("a failed keyed open never creates or misreports a plaintext database",
       throw dbMock.driverError;
     };
 
-    await expect(buildApp({ dataDir, logger: false, dbEncryptionKey: "a key" })).rejects.toMatchObject({
+    await expect(buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "a key" })).rejects.toMatchObject({
       code: "db_encryption_driver_missing",
     });
     expect(reports).toContain("db_encryption_driver_missing");
@@ -198,7 +198,7 @@ describe("a failed keyed open never creates or misreports a plaintext database",
 
   it("a driver that won't load never offers recovery for an EXISTING encrypted database either", async () => {
     const dataDir = tempDataDir();
-    const first = await buildApp({ dataDir, logger: false, dbEncryptionKey: "a key" });
+    const first = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "a key" });
     await first.close();
     const before = readFileSync(join(dataDir, "loam.db"));
     const reports = captureBootReports();
@@ -207,7 +207,7 @@ describe("a failed keyed open never creates or misreports a plaintext database",
       throw dbMock.driverError;
     };
 
-    await expect(buildApp({ dataDir, logger: false, dbEncryptionKey: "a key" })).rejects.toMatchObject({
+    await expect(buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "a key" })).rejects.toMatchObject({
       code: "db_encryption_driver_missing",
     });
     expect(reports).toEqual(["db_encryption_driver_missing"]);
@@ -224,18 +224,18 @@ describe("a failed keyed open never creates or misreports a plaintext database",
       throw new Error("Refusing to use the database: it was opened with an encryption key but is PLAINTEXT on disk");
     };
 
-    await expect(buildApp({ dataDir, logger: false, dbEncryptionKey: "a key" })).rejects.toThrow(/PLAINTEXT on disk/);
+    await expect(buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "a key" })).rejects.toThrow(/PLAINTEXT on disk/);
     expect(reports).not.toContain("db_encryption_plaintext_unconverted");
     expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
   });
 
   it("an existing PLAINTEXT database under an encrypted mode is still reported as unconverted", async () => {
     const dataDir = tempDataDir();
-    const first = await buildApp({ dataDir, logger: false });
+    const first = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     await first.close();
     const reports = captureBootReports();
 
-    await expect(buildApp({ dataDir, logger: false, dbEncryptionKey: "a key" })).rejects.toMatchObject({
+    await expect(buildApp({ requireRulesAcceptance: false, dataDir, logger: false, dbEncryptionKey: "a key" })).rejects.toMatchObject({
       code: "db_encryption_plaintext_unconverted",
     });
     expect(reports).toContain("db_encryption_plaintext_unconverted");
@@ -245,7 +245,7 @@ describe("a failed keyed open never creates or misreports a plaintext database",
 describe("mesh identity rows are deleted, not overwritten", () => {
   it("boot removes a `null` placeholder row an earlier build left behind", async () => {
     const dataDir = tempDataDir();
-    const first = await buildApp({ dataDir, logger: false });
+    const first = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     const config = await first.server.inject({ method: "GET", url: "/api/config" });
     const userId = (config.json() as { currentUser: { id: string } }).currentUser.id;
     first.store.upsertMeshIdentity(userId, "null");
@@ -259,14 +259,14 @@ describe("mesh identity rows are deleted, not overwritten", () => {
 describe("a persisted config row repaired at load is written back once", () => {
   it("rewrites a legacy row at boot, and leaves a valid row untouched", async () => {
     const dataDir = tempDataDir();
-    const first = await buildApp({ dataDir, logger: false });
+    const first = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     first.store.setConfigValue(
       "config",
       JSON.stringify({ node: { name: "Kept" }, security: { transportEncryption: "off" }, llm: { ollama: { botId: "user.x" } } }),
     );
     await first.close();
 
-    const second = await buildApp({ dataDir, logger: false });
+    const second = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     const row = JSON.parse(second.store.getConfigValue("config") ?? "{}") as {
       node?: { name?: string };
       security?: { transportEncryption?: string };

@@ -58,7 +58,7 @@ async function makeApp(
     writeFileSync(join(dataDir, "config.json"), JSON.stringify(config));
   }
   const app = asCourier(
-    await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, hostToken: HOST_TOKEN, ...opts }),
+    await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, hostToken: HOST_TOKEN, ...opts }),
   );
   cleanups.push(async () => {
     await app.close();
@@ -71,7 +71,7 @@ async function makeApp(
  * but the courier always knows the current one, so reuse it here. */
 async function reopenApp(app: LoamApp, dataDir: string): Promise<LoamApp> {
   await app.close();
-  const next = asCourier(await buildApp({ dataDir, logger: false, hostToken: HOST_TOKEN }));
+  const next = asCourier(await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, hostToken: HOST_TOKEN }));
   cleanups.push(() => next.close());
   return next;
 }

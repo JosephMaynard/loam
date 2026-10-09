@@ -13,7 +13,7 @@ network unless you link it to another LOAM network.
 
 | Host | How | Good for |
 |---|---|---|
-| **Android phone** | the LOAM app ([latest release](https://github.com/JosephMaynard/loam/releases/latest)) | Anywhere: the phone makes its own Wi-Fi, so no router or internet is needed. |
+| **Android phone** | the LOAM app ([latest release](https://github.com/MagicZebraLtd/loam/releases/latest)) | Anywhere: the phone makes its own Wi-Fi, so no router or internet is needed. |
 | **Mac, Linux or Windows computer** | `npx loamnet` | A laptop already on a Wi-Fi network, or one sharing its own hotspot. |
 | **Raspberry Pi** (or any always-on box) | `npx loamnet` | A fixed spot that stays up; a good partner for a phone network to link with. |
 
@@ -52,8 +52,9 @@ nobody on the network can see. The next time you open LOAM it offers **Continue*
 or **Start a new network**, which erases the old one (press and hold to confirm). A Private network that
 has ended just shows setup again.
 
-**The host menu** (top right) has **AI model**, **Encryption**, **Share · Host** and **Privacy
-policy**, plus **Emergency reset** on a Private network.
+**The host menu** (top right) has **Invite people** (the join codes), **Encryption**, **AI assistant**,
+**Network rules**, **Privacy policy**, **About LOAM** (version, website, email) and, last and in red,
+**Emergency reset**.
 
 ### On a computer or Raspberry Pi
 
@@ -108,7 +109,7 @@ LOAM opens in their browser. Nothing to install, no account, and the code carrie
 encryption key, so their messages are encrypted from the first request. (Pictures and files are
 encrypted too only when the network requires encryption: see **Connections** in [§4](#4-shaping-the-network).)
 
-- **From the host phone:** **Share · Host** shows the codes. On Hotspot there are two, the hotspot's
+- **From the host phone:** **Invite people** in the host menu shows the codes. On Hotspot there are two, the hotspot's
   Wi-Fi first and then LOAM; on Wi-Fi there's one. The address is printed beside it for anyone who'd
   rather type. **Display mode** shows the codes full screen, as large as the screen allows, keeps the
   screen on and pins LOAM in front; press and hold to leave it. The network keeps running with the
@@ -197,7 +198,7 @@ messages stay where they are. Direct messages, private channels and anything fro
 never leave either network.
 
 **With a link code** (the usual way). On the network that's already running, show a link code: on the
-host phone, **Share · Host → Link another LOAM node → Show a link code**; in the admin area,
+host phone, **Invite people → Link another LOAM node → Show a link code**; in the admin area,
 **Node-to-node sync → Link another node**. On the other phone, during setup choose **Join another LOAM
 network** and scan it. That's all: the two networks sync from then on, with nothing to approve. A code
 works once, for 10 minutes, so show it only to the phone you mean to link. The plain join code can't link
@@ -221,8 +222,8 @@ Erasing a network deletes every message, person, picture and file, and tells eve
 to clear its copy and show a neutral disconnected screen. A phone that was offline clears its copy the
 next time it reaches the network.
 
-- **On the host phone:** **Emergency reset** is in the host menu on a Private network, and at the bottom
-  of **Encryption** on every network. Press and hold for three seconds. When it has finished, LOAM closes
+- **On the host phone:** **Emergency reset** is the last item in the host menu, in red, and also at the
+  bottom of **Encryption**. Press and hold for three seconds. When it has finished, LOAM closes
   completely, and next time it opens on setup. If something couldn't be erased, the screen says so and
   stays open: closing LOAM and opening it again finishes the job.
 - **From the admin area:** **Emergency Reset**, once enabled there (the Hardened profile enables it).

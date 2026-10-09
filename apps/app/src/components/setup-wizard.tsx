@@ -18,9 +18,11 @@ import { CodeScanner } from '@/components/code-scanner';
 import { HoldToConfirm } from '@/components/hold-to-confirm';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { GitHubUpdateCheck, PlayUpdateNotice } from '@/components/update-notice';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { chooseAppLocale, loadAppLocale, useAppLocale } from '@/hooks/use-app-locale';
 import { loadHostMode, setHostMode } from '@/hooks/use-host-mode';
+import { loadHostAck, saveHostAck } from '@/lib/host-ack';
 import { useTheme } from '@/hooks/use-theme';
 import { APP_LOCALES, LOCALE_NAMES, t, type AppCatalogKey } from '@/lib/i18n';
 import { detectPreviousNetwork, loadSetupRecord, prepareNewNetwork, saveSetupRecord } from '@/lib/new-network';
@@ -74,15 +76,19 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
   const [error, setError] = useState<string>();
   // Where the language screen returns to (it's also reachable later from the home screen).
   const [afterLanguage, setAfterLanguage] = useState<Step>('type');
+  // Whether this host has seen "You run this network" (lib/host-ack.ts). Until then it sits above the
+  // button that starts or continues a network, and that button says "I understand".
+  const [acked, setAcked] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([loadAppLocale(), detectPreviousNetwork(), loadSetupRecord(), loadHostMode()]).then(
-      ([storedLocale, previous, record, hostMode]) => {
+    void Promise.all([loadAppLocale(), detectPreviousNetwork(), loadSetupRecord(), loadHostMode(), loadHostAck()]).then(
+      ([storedLocale, previous, record, hostMode, hostAck]) => {
         if (cancelled) {
           return;
         }
         setContinuable(previous);
+        setAcked(hostAck);
         setRemembered(record);
         setPreset(record?.preset ?? 'community');
         setNodeName(record && record.nodeName !== DEFAULT_NODE_NAME ? record.nodeName : '');
@@ -120,9 +126,18 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
     return () => subscription.remove();
   });
 
+  /** Record the host's acknowledgement, if this is the tap that gave it. */
+  async function acknowledge(): Promise<void> {
+    if (!acked) {
+      await saveHostAck();
+      setAcked(true);
+    }
+  }
+
   async function startNew(record: SetupRecord): Promise<void> {
     setBusy(true);
     setError(undefined);
+    await acknowledge();
     const prepared = await prepareNewNetwork(record, locale);
     if (!prepared.ok) {
       setBusy(false);
@@ -137,11 +152,15 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
   }
 
   function continuePrevious(): void {
+    void acknowledge();
     onDone({
       record: remembered ?? { preset: 'custom', nodeName: DEFAULT_NODE_NAME, connection },
       newNetwork: false,
     });
   }
+
+  // The screen setup opens on: "Welcome back", or the first question when there's nothing to continue.
+  const opening = step === 'home' || (step === 'type' && !continuable);
 
   const rememberedName = remembered && remembered.nodeName !== DEFAULT_NODE_NAME ? remembered.nodeName : undefined;
 
@@ -185,8 +204,15 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
       content = (
         <>
           <Hero title={t('setup.backTitle')} body={t('setup.continueHelp')} />
+          {acked ? null : <HostNote />}
           <PrimaryButton
-            label={rememberedName ? t('setup.continue', { name: rememberedName }) : t('setup.continuePlain')}
+            label={
+              !acked
+                ? t('setup.agreeContinue')
+                : rememberedName
+                  ? t('setup.continue', { name: rememberedName })
+                  : t('setup.continuePlain')
+            }
             onPress={continuePrevious}
           />
           <SecondaryButton label={t('setup.startNew')} onPress={() => setStep('erase')} />
@@ -283,11 +309,14 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
           {connection === 'join' ? (
             <PrimaryButton label={t('setup.next')} onPress={() => setStep('scan')} />
           ) : (
+            <>
+            {acked ? null : <HostNote />}
             <PrimaryButton
-              label={busy ? t('setup.starting') : t('setup.start')}
+              label={busy ? t('setup.starting') : acked ? t('setup.start') : t('setup.agreeStart')}
               disabled={busy}
               onPress={() => void startNew({ preset, nodeName: cleanNodeName(nodeName), connection })}
             />
+            </>
           )}
         </>
       );
@@ -303,8 +332,9 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
               <ThemedText type="small" themeColor="textSecondary">
                 {t('setup.joinNote')}
               </ThemedText>
+              {acked ? null : <HostNote />}
               <PrimaryButton
-                label={busy ? t('setup.starting') : t('setup.start')}
+                label={busy ? t('setup.starting') : acked ? t('setup.start') : t('setup.agreeStart')}
                 disabled={busy}
                 onPress={() => void startNew({ preset, nodeName: cleanNodeName(nodeName), connection: 'join', peer })}
               />
@@ -349,7 +379,10 @@ export function SetupWizard({ onDone }: { onDone: (outcome: SetupOutcome) => voi
             {step === 'language' || (step === 'type' && !continuable) ? (
               <Hero title={t('setup.welcomeTitle')} body={t('setup.welcomeBody')} />
             ) : null}
+            {/* Update news only on the screen setup opens on, where no network is running yet. */}
+            {opening ? <PlayUpdateNotice /> : null}
             {content}
+            {opening ? <GitHubUpdateCheck /> : null}
             {error ? (
               <ThemedText type="small" style={{ color: theme.danger }}>
                 {error}
@@ -385,6 +418,23 @@ function Hero({ body, title }: { body?: string; title: string }) {
           {body}
         </ThemedText>
       ) : null}
+    </View>
+  );
+}
+
+/**
+ * "You run this network": what hosting means, shown once (until acknowledged) right above the button that
+ * starts or continues a network, which then reads "I understand…". No extra screen, so it never slows down
+ * someone starting a network in a hurry.
+ */
+function HostNote() {
+  const theme = useTheme();
+  return (
+    <View style={[styles.hostNote, { backgroundColor: theme.backgroundElement, borderColor: theme.border }]}>
+      <SymbolView name={{ android: 'info', ios: 'info.circle' }} size={18} tintColor={theme.textSecondary} />
+      <ThemedText themeColor="textSecondary" style={styles.hostNoteText}>
+        {t('setup.hostAck')}
+      </ThemedText>
     </View>
   );
 }
@@ -537,6 +587,8 @@ const styles = StyleSheet.create({
   },
   choiceNoteText: { flex: 1, fontSize: 13, lineHeight: 18, fontWeight: 400 },
   choiceEnd: { alignSelf: 'center' },
+  hostNote: { flexDirection: 'row', gap: Spacing.two, padding: Spacing.three, borderRadius: 14, borderWidth: 1 },
+  hostNoteText: { flex: 1, fontSize: 14, lineHeight: 20, fontWeight: 400 },
   radio: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, alignItems: 'center', justifyContent: 'center', marginTop: 9 },
   radioDot: { width: 10, height: 10, borderRadius: 5 },
   input: { borderWidth: 1.5, borderRadius: 14, paddingHorizontal: Spacing.three, paddingVertical: 14, fontSize: 18 },

@@ -168,7 +168,7 @@ describe("P1-1 end-to-end (Sol round 3): db_encryption_unreadable keeps the runt
 
       let builtApp: LoamApp | undefined;
       const start = async (): Promise<LoamApp> => {
-        const app = await buildApp({ dataDir, dbEncryptionKey: "key B", logger: false });
+        const app = await buildApp({ requireRulesAcceptance: false, dataDir, dbEncryptionKey: "key B", logger: false });
         builtApp = app;
         return app;
       };

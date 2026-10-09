@@ -2,7 +2,7 @@ import type { HostApi, HostStatus, HostUser, LoamConfig, LoamConfigUpdate } from
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { plain } from "./ansi.js";
-import { createTui, type Tui } from "./app.js";
+import { createTui, HOST_ACK_VERSION, type Tui } from "./app.js";
 import { hashKioskPassword } from "./kiosk.js";
 import { createLogBook } from "./log.js";
 import type { CliSettings } from "./settings.js";
@@ -142,7 +142,8 @@ function setup(
     terminal,
     system,
     launch: { dataDir: "/home/ada/.loam", nodeVersion: "v24.15.0", platform: "darwin arm64", databaseDriver: "node:sqlite" },
-    settings: options.settings ?? {},
+    // The host note is acknowledged unless a test is about it (see "the host note").
+    settings: { hostAck: HOST_ACK_VERSION, ...options.settings },
     saveSettings: (next) => {
       if (options.failSaves) {
         throw new Error("ENOSPC: no space left on device");
@@ -159,6 +160,35 @@ function setup(
   const screenText = () => tui.frame().map(plain).join("\n");
   return { tui, host, terminal, log, system, saved, writes, quit, screenText };
 }
+
+describe("the host note", () => {
+  it("shows once on a first start, and Enter records that the host understood", async () => {
+    const { tui, screenText, saved } = setup({ settings: { hostAck: undefined } });
+    expect(screenText()).toContain("You run this network");
+    expect(screenText()).toContain("report it to the police");
+    await tui.input("\r");
+    expect(tui.modal).toBeUndefined();
+    expect(saved.at(-1)).toMatchObject({ hostAck: HOST_ACK_VERSION });
+  });
+
+  it("shows after unlocking a first start that opened locked", async () => {
+    const passwordHash = hashKioskPassword("abcd");
+    const { tui, screenText } = setup({
+      settings: { hostAck: undefined, kiosk: { passwordHash, startLocked: true } },
+      startLocked: true,
+    });
+    expect(screenText()).not.toContain("You run this network");
+    await tui.input("\r");
+    await tui.input("abcd\r");
+    expect(tui.locked).toBe(false);
+    expect(screenText()).toContain("You run this network");
+  });
+
+  it("stays away once acknowledged", () => {
+    const { screenText } = setup();
+    expect(screenText()).not.toContain("You run this network");
+  });
+});
 
 describe("the Join screen", () => {
   it("keeps the QR on screen beside the join address", () => {
@@ -251,7 +281,7 @@ describe("the Join screen", () => {
     expect(screenText()).toContain("utun3");
     await tui.input("\x1b[B\x1b[B\r");
     expect(host.setJoinHost).toHaveBeenCalledWith("10.8.0.2");
-    expect(saved.at(-1)).toEqual({ joinHost: "10.8.0.2" });
+    expect(saved.at(-1)).toEqual({ hostAck: HOST_ACK_VERSION, joinHost: "10.8.0.2" });
     expect(screenText()).toContain("http://10.8.0.2:3000");
   });
 });

@@ -2,7 +2,7 @@
 // upload/serve. Extracted verbatim from app.ts (2026-09-04 split) over the shared AppContext.
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { AttachmentUploadRequestSchema, AvatarImageUploadRequestSchema, InviteRedeemRequestSchema, MODERATION_TIMEOUT_MAX_MS, type MessageAttachment, MessageRemoveRequestSchema, MessageSchema, ModerationUpdateRequestSchema, type Report, ReportCreateRequestSchema, ReportResolveRequestSchema, ReportSchema, RolesUpdateRequestSchema, TypingRequestSchema, type User, type UserBlockList, UserSchema, UserUpdateRequestSchema } from "@loam/schema";
+import { AttachmentUploadRequestSchema, MEMBER_RULES_VERSION, RulesAcceptRequestSchema, AvatarImageUploadRequestSchema, InviteRedeemRequestSchema, MODERATION_TIMEOUT_MAX_MS, type MessageAttachment, MessageRemoveRequestSchema, MessageSchema, ModerationUpdateRequestSchema, type Report, type ModerationReport, ReportCreateRequestSchema, ReportResolveRequestSchema, ReportSchema, type ReportedMessage, RolesUpdateRequestSchema, TypingRequestSchema, type User, type UserBlockList, UserSchema, UserUpdateRequestSchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
 import { newMessageId } from "./ids.js";
@@ -50,6 +50,13 @@ export function registerUserRoutes(ctx: AppContext): void {
       return reply.code(403).send(errorBody(profileTimeoutError));
     }
 
+    // A name someone types is published content. Avatar settings are only generated looks, so they're fine.
+    const profileRulesError = body.data.displayName !== undefined ? ctx.rulesError(user) : undefined;
+
+    if (profileRulesError) {
+      return reply.code(403).send(errorBody(profileRulesError));
+    }
+
     // Only the upload route mints image avatars; a profile edit may not point at any image file.
     const avatarError = ctx.clientAvatarUpdateError(user, body.data.avatar);
 
@@ -59,6 +66,56 @@ export function registerUserRoutes(ctx: AppContext): void {
 
     return ctx.applyUserUpdate(user, body.data);
   });
+
+  // Agree to LOAM's member rules (the Welcome screen's "I'm 18 or over, and I agree"). Only the current
+  // version: an older client gets a distinct code so it can reload rather than record a stale agreement.
+  ctx.server.post("/api/users/me/rules", async (request, reply) => {
+    const body = RulesAcceptRequestSchema.safeParse(request.body);
+
+    if (!body.success) {
+      return reply.code(400).send(errorBody("Invalid request"));
+    }
+
+    const user = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
+    const accessError = ctx.participationError(user);
+
+    if (accessError) {
+      return reply.code(403).send(errorBody(accessError));
+    }
+
+    if (body.data.version !== MEMBER_RULES_VERSION) {
+      return reply.code(409).send(errorBody("These rules have changed. Reload to read the current ones"));
+    }
+
+    return user.rulesVersion === MEMBER_RULES_VERSION ? user : ctx.acceptRules(user, MEMBER_RULES_VERSION);
+  });
+
+  // The Welcome screen's "Try another": a fresh random name and avatar for the same id. Only before the
+  // person first agrees to the rules, i.e. before they can have posted anything under the old name.
+  ctx.server.post(
+    "/api/users/me/reroll",
+    { config: { rateLimit: { max: 30, timeWindow: "1 minute", allowList: () => false } } },
+    async (request, reply) => {
+      const user = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
+      const accessError = ctx.participationError(user);
+
+      if (accessError) {
+        return reply.code(403).send(errorBody(accessError));
+      }
+
+      // Someone who posted before the rules existed (an upgraded network) hasn't agreed yet either, but their
+      // name is already on what they wrote: they keep it.
+      if (
+        user.type !== "human" ||
+        user.rulesVersion !== undefined ||
+        ctx.data.messages.some((message) => message.authorId === user.id)
+      ) {
+        return reply.code(403).send(errorBody("A new name is only available before you first join in"));
+      }
+
+      return ctx.rerollIdentity(user);
+    },
+  );
 
   ctx.server.put(
     "/api/users/me/avatar-image",
@@ -81,6 +138,13 @@ export function registerUserRoutes(ctx: AppContext): void {
 
     if (uploaderTimeoutError) {
       return reply.code(403).send(errorBody(uploaderTimeoutError));
+    }
+
+    // An uploaded picture is published content: not before the member rules are agreed.
+    const uploaderRulesError = ctx.rulesError(uploader);
+
+    if (uploaderRulesError) {
+      return reply.code(403).send(errorBody(uploaderRulesError));
     }
 
     const body = AvatarImageUploadRequestSchema.safeParse(request.body);
@@ -158,6 +222,13 @@ export function registerUserRoutes(ctx: AppContext): void {
 
     if (!currentUser.isAdmin || !ctx.appConfig.identity.allowAdminUserEdit) {
       return reply.code(403).send(errorBody("Admin user editing is disabled on this LOAM node"));
+    }
+
+    // A typed name is published content, written here by the admin: same rule as the self-edit.
+    const adminRulesError = body.data.displayName !== undefined ? ctx.rulesError(currentUser) : undefined;
+
+    if (adminRulesError) {
+      return reply.code(403).send(errorBody(adminRulesError));
     }
 
     const user = ctx.data.users.find((candidate) => candidate.id === request.params.userId);
@@ -343,13 +414,17 @@ export function registerUserRoutes(ctx: AppContext): void {
         status: "open",
       });
       ctx.store.upsertReport(report);
-      // Intentionally no broadcast and no reporter detail in the response — reports are moderator-private.
+      // No broadcast and no reporter detail in the response — reports are moderator-private. Moderators only
+      // get a content-free nudge so their queue count updates.
+      notifyModerators(ctx);
       return reply.code(201).send({ ok: true });
     },
   );
 
-  // The open-report queue for moderators/admins, newest first. Reporter ids are included here (mod-only) —
-  // this endpoint is the ONLY place a report or its reporter is ever exposed.
+  // The report queue for moderators/admins, newest first: open reports, plus (for admins) the ones a moderator
+  // escalated. Reporter ids are included here (mod-only) — this endpoint is the ONLY place a report or its
+  // reporter is ever exposed. A message report carries the reported message itself, read live (see
+  // `reportedMessage`), so the moderator can judge it; nothing else from that conversation is included.
   ctx.server.get("/api/moderation/reports", async (request, reply) => {
     const currentUser = ctx.ensureSessionUser(ctx.getSessionUserId(request, reply));
 
@@ -357,11 +432,22 @@ export function registerUserRoutes(ctx: AppContext): void {
       return reply.code(403).send(errorBody("Moderator access required"));
     }
 
-    return ctx.store.loadOpenReports();
+    return ctx.store
+      .loadOpenReports()
+      .filter((report) => report.status === "open" || currentUser.isAdmin)
+      .map((report): ModerationReport => {
+        if (report.targetType !== "message") {
+          return report;
+        }
+        const message = reportedMessage(ctx, report.targetId);
+        return message ? { ...report, message } : { ...report, messageGone: true };
+      });
   });
 
   // Resolve a report: record the action taken and close it. The enforcement itself (remove message /
   // timeout / ban) is done via its own endpoint; this closes the loop so the queue clears. Mods/admins.
+  // "escalated" doesn't close it: it hands the report to the admins, whose queue keeps it until one of them
+  // resolves it. Only an admin can resolve an escalated report.
   ctx.server.post<{ Params: { reportId: string } }>(
     "/api/moderation/reports/:reportId/resolve",
     async (request, reply) => {
@@ -383,6 +469,27 @@ export function registerUserRoutes(ctx: AppContext): void {
         return reply.code(404).send(errorBody("Report does not exist"));
       }
 
+      if (existing.status === "escalated" && !currentUser.isAdmin) {
+        return reply.code(403).send(errorBody("Admin access required"));
+      }
+
+      if (body.data.resolution === "escalated") {
+        // Already with the admins (an admin escalating is a no-op: there's nobody above them).
+        if (existing.status !== "open" || currentUser.isAdmin) {
+          return existing;
+        }
+        const escalated: Report = ReportSchema.parse({
+          ...existing,
+          status: "escalated",
+          ...(body.data.note ? { resolutionNote: body.data.note } : {}),
+          escalatedByUserId: currentUser.id,
+          escalatedAt: Date.now(),
+        });
+        ctx.store.upsertReport(escalated);
+        notifyModerators(ctx);
+        return escalated;
+      }
+
       const resolved: Report = ReportSchema.parse({
         ...existing,
         status: "resolved",
@@ -393,6 +500,7 @@ export function registerUserRoutes(ctx: AppContext): void {
         resolvedAt: Date.now(),
       });
       ctx.store.upsertReport(resolved);
+      notifyModerators(ctx);
       return resolved;
     },
   );
@@ -719,6 +827,12 @@ export function registerUserRoutes(ctx: AppContext): void {
         return reply.code(403).send(errorBody(uploadTimeoutError));
       }
 
+      const uploadRulesError = ctx.rulesError(currentUser);
+
+      if (uploadRulesError) {
+        return reply.code(403).send(errorBody(uploadRulesError));
+      }
+
       if (!ctx.appConfig.features.enableAttachments) {
         return reply.code(403).send(errorBody("Attachments are disabled on this LOAM node"));
       }
@@ -795,6 +909,8 @@ export function registerUserRoutes(ctx: AppContext): void {
           !!message.attachments?.some((entry) => entry.id === attachment.id),
       );
       const sessionUserId = ctx.getSessionUserIdFromRequest(request);
+      // Served only because a moderator is judging a report about it: never cached past this request.
+      let reviewingReport = false;
 
       if (!owningMessage) {
         if (!sessionUserId || ctx.attachmentOwners.get(attachment.id)?.userId !== sessionUserId) {
@@ -811,7 +927,11 @@ export function registerUserRoutes(ctx: AppContext): void {
 
         const audience = ctx.messageAudienceUserIds(owningMessage);
 
-        if (audience && !audience.has(user.id)) {
+        // A moderator judging a report sees the reported message's pictures and files too, even from a
+        // direct message or a private channel they're not in: only while the report is in their queue.
+        reviewingReport = reportVisibleTo(ctx, user, owningMessage.id);
+
+        if (!reviewingReport && audience && !audience.has(user.id)) {
           return reply.code(404).send(errorBody("Attachment does not exist"));
         }
 
@@ -822,7 +942,7 @@ export function registerUserRoutes(ctx: AppContext): void {
         // too, matching how the message body itself is filtered.
         const owningAuthor = ctx.data.users.find((candidate) => candidate.id === owningMessage.authorId);
 
-        if (owningAuthor?.shadowBanned && owningMessage.authorId !== user.id) {
+        if (!reviewingReport && owningAuthor?.shadowBanned && owningMessage.authorId !== user.id) {
           return reply.code(404).send(errorBody("Attachment does not exist"));
         }
       }
@@ -832,7 +952,9 @@ export function registerUserRoutes(ctx: AppContext): void {
         // raw request param — the served path is then provably derived from the whitelisted pattern, never
         // from user input.
         const fileBytes = await readFile(join(ctx.attachmentsDir, attachmentFileName(attachment)));
-        reply.header("cache-control", "private, max-age=3600").header("x-content-type-options", "nosniff");
+        reply
+          .header("cache-control", reviewingReport ? "no-store" : "private, max-age=3600")
+          .header("x-content-type-options", "nosniff");
 
         // Images render inline with their real type (safe — images aren't executable). A NON-image file is
         // ALWAYS served as `application/octet-stream` + `Content-Disposition: attachment`, so the browser
@@ -908,4 +1030,64 @@ export function promoteUser(
   Object.assign(user, next);
   ctx.broadcast({ type: "userUpserted", user });
   return { ok: true, user };
+}
+
+/** Tell every connected moderator and admin that the report queue changed (no content, just "refresh"). */
+function notifyModerators(ctx: AppContext): void {
+  const audience = new Set(ctx.data.users.filter((user) => ctx.canModerate(user)).map((user) => user.id));
+  if (audience.size > 0) {
+    ctx.sendEventToUsers(audience, { type: "reportsChanged" });
+  }
+}
+
+/**
+ * The reported message as a moderator sees it: its text, attachment names, author and where it was posted,
+ * read from the live message (a reaction shows its emoji and where its target was posted). Undefined when it
+ * no longer exists: deleted by its author, or expired under the network's retention setting. Nothing is kept
+ * with the report itself, so reporting never outlives the network's own deletion rules.
+ */
+function reportedMessage(ctx: AppContext, messageId: string): ReportedMessage | undefined {
+  const message = ctx.data.messages.find((candidate) => candidate.id === messageId);
+  if (!message || message.type === "sealed") {
+    return undefined;
+  }
+  const placed =
+    message.type === "reaction" ? ctx.data.messages.find((candidate) => candidate.id === message.targetMessageId) : message;
+  if (!placed || placed.type === "sealed" || placed.type === "reaction") {
+    return undefined;
+  }
+  let where: ReportedMessage["where"];
+  if (placed.type === "dm") {
+    where = { kind: "dm", userIds: [placed.authorId, placed.recipientUserId] };
+  } else {
+    const channel = ctx.ensureChannel(placed.channelId);
+    where = { kind: "channel", channelId: placed.channelId, channelName: channel?.name ?? placed.channelId };
+  }
+  return {
+    authorId: message.authorId,
+    body: message.type === "reaction" ? "" : message.body,
+    attachments: message.type === "reaction" ? [] : (message.attachments ?? []).slice(0, 8),
+    ...(message.type === "reaction" ? { reaction: message.reaction } : {}),
+    where,
+    createdAt: message.createdAt,
+    ...(message.meta?.removedByModerator ? { removed: true } : {}),
+  };
+}
+
+/**
+ * Whether `user` has a report about `messageId` in their moderation queue right now: an open report for any
+ * moderator or admin, an escalated one for an admin (the queue's own rule in `GET /api/moderation/reports`).
+ */
+function reportVisibleTo(ctx: AppContext, user: User, messageId: string): boolean {
+  if (!ctx.canModerate(user)) {
+    return false;
+  }
+  return ctx.store
+    .loadOpenReports()
+    .some(
+      (report) =>
+        report.targetType === "message" &&
+        report.targetId === messageId &&
+        (report.status === "open" || user.isAdmin),
+    );
 }

@@ -1,6 +1,6 @@
 {
   "name": "loamnet",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Run a local, off-grid LOAM messaging node from the terminal — server + installable PWA, no internet or accounts. Scan the printed QR to join over your LAN.",
   "keywords": [
     "loam",
@@ -14,14 +14,14 @@
   ],
   "license": "AGPL-3.0-only",
   "author": "Magic Zebra Ltd",
-  "homepage": "https://github.com/JosephMaynard/loam#readme",
+  "homepage": "https://github.com/MagicZebraLtd/loam#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JosephMaynard/loam.git",
+    "url": "git+https://github.com/MagicZebraLtd/loam.git",
     "directory": "cli"
   },
   "bugs": {
-    "url": "https://github.com/JosephMaynard/loam/issues"
+    "url": "https://github.com/MagicZebraLtd/loam/issues"
   },
   "type": "module",
   "bin": {

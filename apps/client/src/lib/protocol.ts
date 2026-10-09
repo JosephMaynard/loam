@@ -46,6 +46,9 @@ export type RouteState =
     }
   | {
       screen: "privacy";
+    }
+  | {
+      screen: "rules";
     };
 
 export type MessageResponse = {
@@ -77,6 +80,10 @@ export type SocketEvent =
   | {
       type: "channelRemoved";
       channelId: string;
+    }
+  | {
+      /** Moderators and admins only: the report queue changed (content-free; refetch it). */
+      type: "reportsChanged";
     }
   | {
       type: "presence";
@@ -150,6 +157,10 @@ function parseRouteUnsafe(path: string): RouteState {
 
   if (path === "/privacy") {
     return { screen: "privacy" };
+  }
+
+  if (path === "/rules") {
+    return { screen: "rules" };
   }
 
   const channelThread = path.match(/^\/channel\/([^/]+)\/thread\/([^/]+)$/);
@@ -265,6 +276,10 @@ export function parseSocketEvent(data: unknown): SocketEvent | undefined {
     return typeof candidate.channelId === "string"
       ? { type: "channelRemoved", channelId: candidate.channelId }
       : undefined;
+  }
+
+  if (candidate.type === "reportsChanged") {
+    return { type: "reportsChanged" };
   }
 
   if (candidate.type === "presence") {

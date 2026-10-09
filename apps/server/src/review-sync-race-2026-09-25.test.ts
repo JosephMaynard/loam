@@ -37,7 +37,7 @@ const MESH_NO_RELAY = { enabled: true, relay: false, ttlMs: 3_600_000, hopLimit:
 async function makeApp(config: unknown, opts: Partial<AppOptions> = {}): Promise<{ app: LoamApp; dataDir: string }> {
   const dataDir = mkdtempSync(join(tmpdir(), "loam-review-race-"));
   writeFileSync(join(dataDir, "config.json"), JSON.stringify(config));
-  const app = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...opts });
+  const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...opts });
   cleanups.push(async () => {
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });
@@ -191,7 +191,7 @@ describe("sealed-offer history can't be bypassed to find delivered mail (#2)", (
     expect(requestedIds(peer, mark)).toEqual([]);
 
     await app.close();
-    const reopened = await buildApp({ dataDir, logger: false });
+    const reopened = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     cleanups.push(() => reopened.close());
     mark = peer.requests.length;
     await syncRound(reopened, cookie);
@@ -222,7 +222,7 @@ describe("sealed-offer history can't be bypassed to find delivered mail (#2)", (
     expect(requestedIds(peer, mark)).toEqual([]);
 
     await app.close();
-    const reopened = await buildApp({ dataDir, logger: false });
+    const reopened = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     cleanups.push(() => reopened.close());
     reopened.reapExpiredMessages();
     state.mode = "sealed";
@@ -279,7 +279,7 @@ describe("sealed-offer history can't be bypassed to find delivered mail (#2)", (
 
     // Across a restart too, then past the seen retention (horizon + 7-day TTL max + 2 epochs): both at once.
     await app.close();
-    const reopened = await buildApp({ dataDir, logger: false, tombstoneHorizonMs: horizon });
+    const reopened = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, tombstoneHorizonMs: horizon });
     cleanups.push(() => reopened.close());
     const afterRetention = start + horizon + 9 * DAY_MS + 60_000;
     vi.spyOn(Date, "now").mockReturnValue(afterRetention);
