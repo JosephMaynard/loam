@@ -1,77 +1,84 @@
-# LOAM roadmap — planning notes for Fable
+# LOAM roadmap
 
-> **STATUS (2026-08): historical.** The four initiatives below and most of the investigations are
-> **shipped** (see CLAUDE.md for the built baseline). The active plan of record is
-> **[docs/29-next-phase.md](29-next-phase.md)**; the live backlog disposition is its §5. This file
-> is kept as the original orientation map for the per-initiative briefing docs.
+> **Status: current (9 October 2026, version 0.6.0).** What LOAM does today, what comes next, and what is
+> being considered. Nothing below the "Next" section has a date. The detailed list of open work is
+> [docs/25](25-backlog.md); settled and open design choices are in [decisions.md](decisions.md).
 
-These docs are a **briefing pack**, not prescriptive specs. They capture the current state (grounded
-in real files/functions), the goal, design options with a recommendation, a task breakdown, and open
-questions. Fable decides how to execute. Read `CLAUDE.md` first for the architecture baseline. For the
-end-to-end guide to *running* a node (host setup, admin, moderation, mesh, emergency posture), see
-the [Operator's guide](12-operators-guide.md).
+LOAM is local communication for crowded or disrupted places: one host runs a network, people nearby
+join it from a browser, and nothing needs the internet ([MISSION.md](../MISSION.md)). The roadmap
+follows the project's order of priorities: no setup, privacy, then coping with poor connections.
+Features that would weaken one of those come last or not at all.
 
-## The four initiatives
+## Built today
 
-| # | Initiative | One-line goal | Doc |
-|---|-----------|----------------|-----|
-| 1 | **SQLite migration** | Replace the flat-JSON store with SQLite behind a data-access layer. | [01-sqlite-migration.md](01-sqlite-migration.md) |
-| 2 | **Kill switch** | Config-gated, admin-triggered fast wipe of all data (server + connected clients). | [02-kill-switch.md](02-kill-switch.md) |
-| 3 | **Admin UI** | In-app, admin-only area to edit config and run admin actions (no more hand-editing text files). | [03-admin-ui.md](03-admin-ui.md) |
-| 4 | **Android host app** | Expo/React-Native app that runs a hotspot, shows join QRs, and hosts the LOAM web client in a WebView. | [04-android-host-app.md](04-android-host-app.md) |
+- **Hosting** on an Android phone (its own hotspot, or an existing Wi-Fi network), on a computer or a
+  Raspberry Pi (`npx loamnet`, with a full-screen terminal view and a kiosk mode). Phones join by
+  scanning a QR code; there are no accounts.
+- **Messaging:** public and private channels, threads, direct messages, reactions, pictures and files,
+  search, shared locations, and messages that expire after a set time.
+- **Moderation:** join approval with rotating invite codes, moderators and greeters, a report queue,
+  bans, time-outs, shadow-bans, per-person blocking, and member rules everyone accepts before posting.
+- **Privacy and security:** encrypted connections from the join code (and a mode that refuses anything
+  else), an encrypted database (SQLCipher), security profiles, and an Emergency Reset that erases the
+  network on the host and on every connected phone. [SECURITY.md](../SECURITY.md) states the limits,
+  starting with the fact that the host can read everything.
+- **Linking networks:** two networks can share their public channels.
+- **Fifteen languages**, five of them right to left.
+- **An optional assistant:** a small model on the host phone, or a laptop's Ollama model, in direct
+  messages.
+- **Mesh mail (experimental, off by default):** sealed messages that linked networks carry for each other,
+  readable only by the recipient's network.
 
-## Investigations (candidate initiatives, not yet sequenced)
+## Next
 
-Researched but not committed — briefings for Fable/owner to prioritize.
+The 0.6.0 release and the work around it:
 
-| Initiative | One-line goal | Doc |
-|-----------|----------------|-----|
-| **Optional authentication** | Add an opt-in `authenticated` deployment mode (Better Auth now; atproto later) without touching the anonymous off-grid default. | [05-authentication.md](05-authentication.md) |
-| **LLM improvements** | Provider abstraction, fix the O(n²) streaming, bound context, channel/@mention, and local RAG. | [06-llm.md](06-llm.md) |
-| **Other features** | Menu of candidates: attachments, E2EE, LoRa sync, presence, etc. (ephemeral messages, moderation, search, and RTL have since landed — see the doc's status notes). | [07-more-features.md](07-more-features.md) |
-| **Maps & location sharing** | Offline map tiles + opt-in location sharing on the local node. | [10-maps-location-sharing.md](10-maps-location-sharing.md) |
-| **Node-to-node sync** | Pull-based gossip of public data between nodes (the transport-agnostic layer LoRa will ride). **MVP landed.** | [11-node-sync.md](11-node-sync.md) |
-| **Transport security (no HTTPS)** | QR-bootstrapped app-layer encryption so plain-HTTP LAN traffic is confidential + MITM-resistant without certs. | [08-transport-security.md](08-transport-security.md) |
-| **Security profiles** | Make all security optional via a few named presets (open/standard/hardened), not a toggle matrix — spans disaster-relief to protest. | [09-security-profiles.md](09-security-profiles.md) |
-| **AT-Proto-inspired P2P** | Portable cryptographic identity + user-owned signed repos that sync between nodes (borrow the concepts, drop the online resolution). Largest remaining epic; builds on the mesh identity stack. | [22-atproto-p2p.md](22-atproto-p2p.md) |
+- **Testing on real phones.** Several features are verified in code and CI but not yet on a physical
+  device: the encrypted database (keying, changing and wiping it), the on-device model, the host's
+  background service, and the Android changes in recent releases. The checklist is
+  [docs/21](21-device-verification-checklist.md).
+- **Google Play.** The app meets Play's requirements in code; publishing needs the store paperwork and the
+  device run above ([docs/30](30-play-store.md)). The APK on GitHub Releases stays available.
+- **Tablets, Chromebooks and Android laptops.** The host app supports large screens and keyboards; it needs
+  testing on those devices.
+- **Windows hosts.** `loamnet` runs on Windows, but how its file writes survive a crash there hasn't been
+  checked.
+- **Translations.** Fourteen of the fifteen languages were machine-translated and need review by native
+  speakers ([docs/13](13-i18n.md) has the translation policy).
 
-## How they interlock
+## Being designed or considered
 
-- **1 enables 2 and 3.** The kill switch and admin config editor both want a real storage layer with
-  transactional writes and a config table. Do the SQLite migration first (or at least land the
-  data-access abstraction) so 2 and 3 build on it instead of the JSON files.
-- **2 and 3 share a surface.** The kill switch is *triggered from* the admin UI and *configured in* the
-  admin config. Build the admin config plumbing once; both use it.
-- **3 has a hard prerequisite: admin bootstrap.** *(Solved — landed with initiative 3 part A.)*
-  Admin now comes from the pluggable `admin.bootstrap` strategies (`firstUser` default, `setupCode`,
-  `passphrase`, `none`; `hostDevice`, forced on the Android host by its per-boot launcher token) via
-  `POST /api/admin/claim`; the legacy seed users are deleted at boot. See `CLAUDE.md` and 03.
-- **4 pulls on everything.** If the phone hosts the server, the storage/kill-switch/admin work must run
-  under whatever Android runtime you choose, which constrains the SQLite driver (initiative 1). Decide
-  the Android hosting model early even if you build it last.
+None of these are built. Each links to the design or briefing it comes from.
 
-## Recommended sequence
+| Idea | Where it stands |
+|---|---|
+| **Phone-to-phone mesh over Bluetooth and Wi-Fi Aware**, so a message can travel with someone walking between two networks | The radio layer is written but has never run on real radios, and the Bluetooth fallback and battery management are still to do ([docs/16](16-opportunistic-mesh.md), [docs/17](17-mesh-transport-testing.md)). |
+| **Delivery receipts for mesh mail** | Designed ([docs/23](23-atproto-p2p-plan.md) §11). |
+| **Courier sync**, carrying a network's updates by hand between places | Designed ([docs/19](19-courier-sync.md)). |
+| **Encrypting pictures and files on the host**, as the database already is | Not started. Today an Emergency Reset deletes them. |
+| **Moderation and deletions that travel between linked networks** | Needs signed messages first; part of the portable identity work below. |
+| **Portable identity**: one signed identity that moves between networks | A plan exists and has been through one round of external review; key decisions are open ([docs/22](22-atproto-p2p.md), [docs/23](23-atproto-p2p-plan.md)). |
+| **End-to-end encryption** for direct messages and private channels, so the host can't read them | An open decision ([decisions.md](decisions.md) rows 11 and 17). It would turn off search and the assistant for those conversations. |
+| **Optional accounts** for networks hosted on the internet | An open decision ([docs/05](05-authentication.md)). The anonymous, account-free default would stay. |
+| **Long-range radio (LoRa)**, possibly through Reticulum | Investigated ([docs/28](28-prior-art-reticulum.md)); the sync protocol is what a radio link would carry. |
+| **Offline maps** for shared locations | Location messages exist; the map is designed but not built ([docs/10](10-maps-location-sharing.md)). |
+| **A smarter assistant**: search over the network's own messages, more model choices | Listed in [docs/06](06-llm.md). |
+| **A desktop app** for hosts who don't want a terminal | Feasibility study ([docs/24](24-electron-desktop.md)). |
 
-1. **Initiative 1** — SQLite migration + data-access layer + first server tests. Low user-visible risk,
-   unblocks the rest.
-2. **Initiative 3 (part A)** — admin bootstrap + admin config read/write API + minimal admin UI.
-3. **Initiative 2** — kill switch (server wipe + client remote-wipe), wired into the admin UI and config.
-4. **Initiative 3 (part B)** — flesh out the admin UI (wire the currently-hardcoded feature flags, user
-   management, etc.).
-5. **Initiative 4** — Android host app, once the server story is stable.
+## What LOAM won't do
 
-## Cross-cutting open decisions
+- Collect anything: no analytics, crash reports, accounts or cloud service. Messages leave a network only
+  when its operator links it to another network or points the assistant at another machine.
+- Rush the radio transport or the identity cryptography. Earlier apps in this space were hurt by shipping
+  those before they were proven, so they stay experimental until they have been tested on real devices
+  and reviewed.
 
-These shape multiple initiatives. Captured with recommendations in [decisions.md](decisions.md); the
-top few are worth confirming with the project owner before Fable commits.
+## Asking for something
 
-1. **Encryption at rest?** Pairs with the kill switch for the protest threat model and *drives the
-   SQLite driver choice* (`node:sqlite` has no encryption; SQLCipher/libsql do). See 01 and 02.
-2. **Android hosting model** — does the phone run the Node server (via nodejs-mobile, needs bare/prebuild
-   workflow) or is it a thin host UI? Biggest fork; see 04.
-3. **Admin bootstrap mechanism** — first-user-claims-admin, console/QR setup code, or config passphrase?
-   See 03.
-4. **Monorepo the RN app?** *(Settled by action — it lives at `apps/app`.)* Co-located to share
-   `packages/qr` + `packages/schema`. See 04.
-5. **Kill-switch UX** — instant vs. confirmation vs. duress code; and whether it remote-wipes connected
-   clients (strongly recommended: yes). See 02.
+Open an [issue](https://github.com/MagicZebraLtd/loam/issues) with what you need and where you'd use LOAM,
+or email opensource@magiczebra.co.uk. [CONTRIBUTING.md](../CONTRIBUTING.md) explains how to send a change.
+
+## Background documents
+
+The design notes in `docs/` record how each part was planned and built. [ARCHITECTURE.md](../ARCHITECTURE.md)
+lists every one with whether it describes shipped behaviour, a plan, an investigation or history.

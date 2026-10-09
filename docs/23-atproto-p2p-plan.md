@@ -1,10 +1,10 @@
-# 23 — Portable identity & user-owned signed repos: plan of record (revised after Sol round 1)
+# 23. Portable identity & user-owned signed repos: plan of record (revised after review round 1)
 
-**Status: design revised, still pre-implementation.** External crypto review (Sol, round 1) gave a
+**Status: design revised, still pre-implementation.** External crypto review (round 1) gave a
 **"green light on the initiative, red light on freezing the round-1 record format"** — four architectural
 blockers, not implementation nits. This revision incorporates them. **The next step is NOT the Phase 0
-code PR; it is locking the four decisions in §9, then a revised Phase 0.** Round-1 brief + full response:
-`sol-review/REVIEW-BRIEF-future-plans.md`.
+code PR; it is locking the four decisions in §9, then a revised Phase 0.** The round-1 brief and the full
+response are kept outside the repository.
 
 ## What round 1 changed (summary)
 - **The round-1 record format is withdrawn.** A single append-only chain *per author* cannot coexist with
@@ -72,7 +72,7 @@ accountId = SHA-256(canonical({ version, recoveryPolicy, initialRecoveryKeys }))
 ## 5. Repo model — **per-device operation logs** (blockers 1 + 3)
 Not one chain per author. Each authorised **device** keeps its own append-only **operation log**, aggregated
 into the account repo. Concurrent posts from two authorised devices are **both valid** — multi-device works.
-The operation-log entry (Sol's shape):
+The operation-log entry (the reviewer's shape):
 ```text
 entry = { version, accountId, deviceKeyId, identityEpoch,
           deviceSeq, devicePrev,
@@ -132,7 +132,7 @@ so **not every public-channel message is auto-published.** Per profile:
 The kill switch removes host-custodied keys locally; it **cannot** wipe offline clients, exported recovery
 bundles, or remote peers — a prominent boundary.
 
-## 9. The four decisions to lock **before** Phase 0 (Sol's recommended next move)
+## 9. The four decisions to lock **before** Phase 0 (the reviewer's recommended next move)
 1. **Per-device operation logs** vs an explicit single-writer (signed writer-lease) constraint. *(Recommend
    per-device.)*
 2. **Identity/control/recovery model** — the revised Option B (§4) and its unavoidable freshness limit, **or**
@@ -148,7 +148,7 @@ state; fork-proof retention; strict vs non-canonical CBOR rejection; integer ove
 edit/retract operations; and **byte-identical known-answer vectors across Node 18, Node 24, browser, and
 Android**.
 
-## 11. Related crypto items — updated per Sol
+## 11. Related crypto items, updated after the review
 - **Mesh delivery-ack → hash-lock receipt** (the proposed blinded MAC was unverifiable-by-a-carrier or
   forgeable). Sender picks random `ackSecret` (carried in the encrypted inner payload); the authenticated
   public envelope carries `ackCommit = SHA-256("loam.mesh.ack.v1" || msgId || ackSecret)`; the recipient
@@ -175,7 +175,7 @@ Android**.
   TOFU over attacker-controlled HTTP does not defeat an active first-contact MITM (which can eclipse peers
   and suppress the very revocations/fork-proofs this design depends on).
 
-## 12. The honest simultaneous-adversary result (Sol)
+## 12. The honest simultaneous-adversary result (from the review)
 With a stolen author key **plus** a malicious peer/relay, an attacker can: forge all future records + build
 alternative histories from any old head; suppress revocations/deletions/fork-proofs indefinitely; present a
 stale-but-valid prefix to newcomers; (under the withdrawn first-seen-wins) keep partitions divergent or
@@ -186,7 +186,7 @@ deletion, or agreement** — which is why the revisions above target exactly tho
 
 ## 13. Open design flags to fold into the next review round
 Raised by an automated review pass of this draft; all concern the **unbuilt** design (nothing here ships in
-the current release). Carry them into the Sol round-2 review before any Phase-0 code:
+the current release). Carry them into the round-2 review before any Phase-0 code:
 - **Out-of-order / conflicting successors on ingest.** Verify-on-ingest must not silently drop a validly-signed
   entry just because its predecessor (or the current device head) isn't known yet: quarantine it pending its
   predecessor, and persist a validly-signed *conflicting* successor as **fork evidence** rather than discarding

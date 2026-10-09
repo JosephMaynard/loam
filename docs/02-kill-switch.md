@@ -19,7 +19,7 @@
 > plaintext logical wipe. Reboot in `ephemeral` mode also
 > loses the key permanently. Known limitation: Node strings can't be reliably zeroed in RAM, so a
 > device seized *while running* remains the weak case (documented honestly). **Second known
-> limitation (Sol 2026-08-15): uploaded media — avatar and attachment files — live OUTSIDE the
+> limitation (external review, 15 August 2026): uploaded media, avatar and attachment files, live OUTSIDE the
 > encrypted DB as plaintext files, so the cryptographic wipe does not apply to them; the kill switch
 > deletes the files, which on flash is best-effort removal, not secure erasure.** Media-at-rest
 > encryption is tracked in `docs/29` (Track 2). Remaining (future): duress/decoy passphrase; RAM

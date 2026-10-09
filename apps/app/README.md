@@ -15,7 +15,7 @@ pnpm --filter app apk        # → apps/app/loam-host.apk
 adb install -r apps/app/loam-host.apk
 ```
 
-`apk` runs the workspace build, `fetch:native` (places the two vendored, sha256-pinned SQLite prebuilds),
+`apk` runs the workspace build, `fetch:native` (places the two vendored, sha256-pinned SQLite prebuilds and their vendored JS wrappers),
 `bundle:server`, llama.rn's native libs, `expo prebuild --clean` and `gradlew assembleRelease` (arm64-v8a).
 Without a keystore it warns that the APK is debug-signed (acknowledge with `--debug-signed`), and
 `pnpm --filter app aab` (the Google Play bundle, docs/30) refuses to build. Needs a real JDK and the

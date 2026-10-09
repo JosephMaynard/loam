@@ -1,5 +1,11 @@
 # 15 — Review follow-ups (next-phase backlog)
 
+> **Status: historical.** The deferred backlog from a July 2026 code review. Most entries have since been
+> fixed and are struck through in place. Some entries that still read as open are done too: #10 (the QR
+> encoder has a lower error-correction level), #11 (the wake lock has a timeout), #16 (the error codes live
+> in `@loam/schema`) and the `notifyIfHidden` half of #22 (removed). What is still open is tracked in
+> [docs/25](25-backlog.md), whose rows cite this file as `15#n`.
+
 Output of a full four-area code review (server / client / packages+android / tests) plus a
 dependency-alignment pass. The high-value, low-risk findings were **fixed in the same branch**
 (shadow-ban REST leak, shadowBanned egress strip, panic fingerprinting, unbounded schema strings,

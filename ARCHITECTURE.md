@@ -331,7 +331,7 @@ the entry says so.
 | `02-kill-switch.md` | Live | Emergency Reset: the wipe, the panic token, the cryptographic wipe under encryption. |
 | `03-admin-ui.md` | Live | Admin bootstrap strategies, the claim route, config layering and the admin area. Its "remaining" list predates later work such as the channels and Safety panels. |
 | `04-android-host-app.md` | Live | The Android host: embedded Node, hotspot and Wi-Fi modes, join address discovery, setup screens, build and signing. |
-| `05-authentication.md` | Plan | Optional real accounts (Better Auth or atproto) as a deployment mode. No banner; no workspace package depends on an auth library, so it is unbuilt. |
+| `05-authentication.md` | Plan | Optional real accounts (Better Auth or atproto) as a deployment mode. Not built: no workspace package depends on an auth library. |
 | `06-llm.md` | Live | The assistant as built (Ollama and the on-device model), followed by a list of improvements to investigate that are not built. No banner. |
 | `07-more-features.md` | Plan | A menu of candidate features ranked by fit; the table notes which rows have since landed. |
 | `08-transport-security.md` | Live | The app-layer transport encryption design: handshake, sealing, tunnel, pinning, image encryption. |
@@ -341,21 +341,21 @@ the entry says so.
 | `12-operators-guide.md` | Live | Running a network, for the host: devices, setup, admission, moderation, linking, reset. |
 | `13-i18n.md` | Live | The 15-locale, admin-selected, node-wide translation and the translation policy. |
 | `14-distribution.md` | Live | The `loamnet` npm package: what ships and how it is built. |
-| `15-review-follow-ups.md` | Plan | The deferred backlog from a four-area review; several entries are struck through as fixed. No banner; classed from content. |
+| `15-review-follow-ups.md` | Historical | The deferred backlog from a July 2026 review; most entries are fixed, and what is open moved to `25`. |
 | `16-opportunistic-mesh.md` | Live | The sealed-mail mesh: Phases 0 to 2 shipped, the Phase 3 radio transport scaffolded and unverified on hardware. |
 | `17-mesh-transport-testing.md` | Live | The two-phone test procedure and stub register for the Phase 3 scaffold; the hardware pass is still outstanding. |
-| `18-transport-security-review.md` | Live | The reviewer's guide to transport encryption: code map, guarantees, limitations, attack checklist. |
+| `18-transport-security-review.md` | Live | The reviewer's guide to transport encryption: code map, guarantees, limitations, attack checklist. Its banner lists what `20` changed since. |
 | `19-courier-sync.md` | Plan | A human-carried, offline "data mule" transport beside LAN sync. Design only. |
 | `20-transport-auth-binding.md` | Live | Binding identity to the transport session: bound sessions, `GET /api/bootstrap`, tunnel-only content. |
-| `21-device-verification-checklist.md` | Live | On-device checks (model loading, SQLCipher keying, wipe timing) for shipped code that CI cannot exercise. No banner; the pass itself is outstanding. |
+| `21-device-verification-checklist.md` | Live | On-device checks (model loading, SQLCipher keying, wipe timing, the host service) for shipped code that CI cannot exercise. The pass itself is outstanding. |
 | `22-atproto-p2p.md` | Historical | Portable identity and user-owned repos, as an introduction; superseded by `23`. |
 | `23-atproto-p2p-plan.md` | Plan | The revised plan of record for portable identity, pre-implementation after external review. |
 | `24-electron-desktop.md` | Investigation | Feasibility of a double-click desktop host. |
-| `25-backlog.md` | Historical | The consolidated backlog; its banner marks many rows shipped and points to `29` for the active disposition. |
+| `25-backlog.md` | Live | The list of open work: §0 has the current open items, the older sections keep per-item detail. |
 | `26-prior-art-buzz.md` | Investigation | Findings from reading Block's Buzz. |
 | `27-path-to-mvp.md` | Historical | The pre-tester plan, superseded by `29`. |
 | `28-prior-art-reticulum.md` | Investigation | Findings on Reticulum as a candidate LoRa transport. |
-| `29-next-phase.md` | Plan | The post-v0.4.0 plan of record (stabilise, prove, extend); later releases have shipped parts of it, so read it beside `CHANGELOG.md`. |
+| `29-next-phase.md` | Historical | The August 2026 plan (stabilise, prove, extend). Track 0 shipped; the rest is still open and tracked in `25`. |
 | `30-play-store.md` | Live | The Google Play readiness audit of the release build and what remains in the Play Console. |
-| `decisions.md` | Historical | The early decision log; nearly every row is marked settled. No banner; classed from content. |
-| `roadmap.md` | Historical | The original orientation map for the briefing docs; marked historical. |
+| `decisions.md` | Live | The decision log: settled choices, and the open ones (identity mode, accounts, end-to-end encryption) with today's behaviour. |
+| `roadmap.md` | Live | The public roadmap: what is built, what is next, what is being considered. |
