@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { requestEmergencyReset, resetOutcome } from './emergency-reset';
+import { closeAfterReset, requestEmergencyReset, resetOutcome } from './emergency-reset';
 
 /** A bridge double: records posts, lets the test answer like main.js would. */
 function fakeChannel() {
@@ -68,5 +68,33 @@ describe('requestEmergencyReset', () => {
     expect(resetOutcome({ ok: true, complete: false, keyClear: false })).toBe('incomplete');
     expect(resetOutcome({ ok: true, complete: false, keyClear: true })).toBe('incomplete');
     expect(resetOutcome({ ok: false, error: 'not running' })).toBe('failed');
+  });
+});
+
+describe('closeAfterReset', () => {
+  it('closes LOAM only once the shared-file cache is cleared', async () => {
+    // Review 2026-10-09 (Android P3): the host-menu reset used to close straight away, leaving the last
+    // shared file in the cache until the next launch.
+    const order: string[] = [];
+    let release!: () => void;
+    const clear = () =>
+      new Promise<void>((resolve) => {
+        release = () => {
+          order.push('clear');
+          resolve();
+        };
+      });
+    const pending = closeAfterReset(clear, () => order.push('close'));
+    await Promise.resolve();
+    expect(order).toEqual([]);
+    release();
+    await pending;
+    expect(order).toEqual(['clear', 'close']);
+  });
+
+  it('still closes LOAM when the clear fails', async () => {
+    const close = vi.fn();
+    await closeAfterReset(() => Promise.reject(new Error('cache gone')), close);
+    expect(close).toHaveBeenCalledTimes(1);
   });
 });

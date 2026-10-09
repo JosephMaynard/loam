@@ -36,6 +36,21 @@ export function resetOutcome(result: EmergencyResetResult): ResetOutcome {
   return result.keyClear ? 'key-clear' : 'close';
 }
 
+/**
+ * Close LOAM after a reset, once the last shared file's cached copy is gone (lib/save-file.ts
+ * `clearSharedFiles`): that folder is otherwise only emptied on the next launch, and a reset is meant to
+ * leave nothing behind on this phone. Best effort: a clear that fails never keeps the app open. Dependencies
+ * are injected (the native close, the file-system clear) so the ordering is testable without them.
+ */
+export async function closeAfterReset(clearSharedFiles: () => Promise<void>, closeApp: () => void): Promise<void> {
+  try {
+    await clearSharedFiles();
+  } catch {
+    // best effort: the app closes either way
+  }
+  closeApp();
+}
+
 /** Long enough for an encrypted wipe on a slow phone; the server answers as soon as it's done. */
 const DEFAULT_TIMEOUT_MS = 30_000;
 

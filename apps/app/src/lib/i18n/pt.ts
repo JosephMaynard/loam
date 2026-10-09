@@ -139,7 +139,7 @@ export const pt: Partial<AppCatalog> = {
   "menu.about": "Sobre o LOAM",
   "about.title": "Sobre o LOAM",
   "about.version": "Versão {version}",
-  "about.body": "O LOAM é gratuito e de código aberto. Não tem análises nem relatórios de falhas, por isso só sabemos dos problemas que você nos conta. Fale com a gente.",
+  "about.body": "O LOAM é gratuito e de código aberto. Não tem análises nem relatórios de falhas, por isso só sabemos dos problemas que você nos conta. Se algo estiver errado, ou se quiser um novo recurso, fale com a gente.",
   "about.website": "Site",
   "about.email": "E-mail",
   "about.source": "Código-fonte",

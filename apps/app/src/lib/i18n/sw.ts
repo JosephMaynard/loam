@@ -139,7 +139,7 @@ export const sw: Partial<AppCatalog> = {
   "menu.about": "Kuhusu LOAM",
   "about.title": "Kuhusu LOAM",
   "about.version": "Toleo {version}",
-  "about.body": "LOAM ni bure na ya chanzo huria. Haina takwimu za matumizi wala ripoti za hitilafu, kwa hivyo tunajua tu matatizo unayotuambia. Wasiliana nasi.",
+  "about.body": "LOAM ni bure na ya chanzo huria. Haina takwimu za matumizi wala ripoti za hitilafu, kwa hivyo tunajua tu matatizo unayotuambia. Kama kuna tatizo, au ungependa kipengele kipya, wasiliana nasi.",
   "about.website": "Tovuti",
   "about.email": "Barua pepe",
   "about.source": "Msimbo chanzo",

@@ -10,6 +10,7 @@ import {
   type HotspotAddressCandidate,
   type HotspotCredentials,
 } from '../../modules/loam-hotspot';
+import { awaitWithin } from '@/lib/await-within';
 import {
   eligibleHotspotCandidates,
   mergeHotspotCandidates,
@@ -24,8 +25,8 @@ import {
  * - `starting`   — permission granted, waiting on `WifiManager.LocalOnlyHotspot`.
  * - `running`    — up; `credentials` holds the generated SSID + password, and the address fields below
  *                  fill in as the hotspot's (randomly assigned) address is found.
- * - `error`      — couldn't start (permission denied, no WiFi hardware, driver failure); `error`
- *                  holds a human-readable reason. LOAM's Step-2 URL QR is still shown (docs/04).
+ * - `error`      — couldn't start (permission denied or unanswered, no WiFi hardware, driver failure);
+ *                  `error` holds a human-readable reason. LOAM's Step-2 URL QR is still shown (docs/04).
  */
 export type HotspotPhase = 'idle' | 'requesting' | 'starting' | 'running' | 'error';
 
@@ -141,14 +142,22 @@ function publish(next: HotspotState): void {
   }
 }
 
+// How long to wait for the permission dialog's answer. Android can dismiss a runtime-permission request
+// without ever resolving it (another permission dialog opened over it, the activity recreated under it);
+// unbounded, that would keep `inFlight` set and the phase at `requesting` for the rest of the process, so
+// every later `ensureHotspot` would no-op. Generous, since the operator may be reading the dialog.
+const PERMISSION_TIMEOUT_MS = 60_000;
+
+/** The permission dialog's outcome; `timeout` when no answer came back within `PERMISSION_TIMEOUT_MS`. */
+type PermissionOutcome = 'granted' | 'denied' | 'timeout';
+
 /**
  * Request the runtime permissions LocalOnlyHotspot needs. ACCESS_FINE_LOCATION is always required;
- * API 33+ also gates it behind NEARBY_WIFI_DEVICES. Resolves true only if every requested
- * permission was granted.
+ * API 33+ also gates it behind NEARBY_WIFI_DEVICES. `granted` only if every requested permission was.
  */
-async function requestHotspotPermissions(): Promise<boolean> {
+async function requestHotspotPermissions(): Promise<PermissionOutcome> {
   if (Platform.OS !== 'android') {
-    return false;
+    return 'denied';
   }
   const wanted: (keyof typeof PermissionsAndroid.PERMISSIONS)[] = ['ACCESS_FINE_LOCATION'];
   const apiLevel = typeof Platform.Version === 'number' ? Platform.Version : 0;
@@ -156,8 +165,13 @@ async function requestHotspotPermissions(): Promise<boolean> {
     wanted.push('NEARBY_WIFI_DEVICES');
   }
   const permissions = wanted.map((name) => PermissionsAndroid.PERMISSIONS[name]);
-  const result = await PermissionsAndroid.requestMultiple(permissions);
-  return permissions.every((permission) => result[permission] === PermissionsAndroid.RESULTS.GRANTED);
+  const answer = await awaitWithin(PermissionsAndroid.requestMultiple(permissions), PERMISSION_TIMEOUT_MS);
+  if (answer.timedOut) {
+    return 'timeout';
+  }
+  return permissions.every((permission) => answer.value[permission] === PermissionsAndroid.RESULTS.GRANTED)
+    ? 'granted'
+    : 'denied';
 }
 
 /**
@@ -182,16 +196,21 @@ export async function ensureHotspot(): Promise<void> {
   inFlight = true;
   publish({ phase: 'requesting' });
   try {
-    const granted = await requestHotspotPermissions();
+    const permission = await requestHotspotPermissions();
     if (myGen !== generation) {
       // Superseded during the permission dialog. Nothing native has started yet, so just bail.
       return;
     }
-    if (!granted) {
+    if (permission !== 'granted') {
+      // A timed-out request leaves nothing in flight (`finally` below clears the guard): reopening the
+      // screen calls `ensureHotspot` again, which asks again, and an answer given meanwhile is just granted.
       publish({
         phase: 'error',
         error:
-          'Location permission is needed to start the hotspot. LOAM is still reachable to anyone already on this network.',
+          permission === 'timeout'
+            ? 'Android gave no answer to the permission request. Close and reopen this screen to try again. ' +
+              'LOAM is still reachable to anyone already on this network.'
+            : 'Location permission is needed to start the hotspot. LOAM is still reachable to anyone already on this network.',
       });
       return;
     }

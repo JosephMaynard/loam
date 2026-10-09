@@ -52,6 +52,7 @@ import {
   type StartFreshIntent,
 } from '@/lib/db-encryption';
 import { confirmStartUnencrypted, retryKeyResolution, switchEncryptionOffAndRetry } from '@/lib/driver-missing-recovery';
+import { closeAfterReset } from '@/lib/emergency-reset';
 import { ensureHostService } from '@/lib/host-service';
 import { noteConnectedClients, noteLauncherInterfaces } from '@/hooks/use-hotspot';
 import { parseHostClients, parseHostInterfaces, type HostInterface } from '@/lib/join-display';
@@ -267,7 +268,7 @@ export default function HostRoot() {
 }
 
 /**
- * The LOAM Android host screen. Boots the embedded Node server on first mount, waits for its
+ * The LOAM Android host screen. Boots the embeddedde server on first mount, waits for its
  * readiness signal (posted by main.js once /api/config answers), then loads the served LOAM client
  * in a WebView with cookies + WebSocket enabled. Shows a "starting host…" state until then, since
  * cold start can take ~80s (docs/04).
@@ -334,7 +335,7 @@ function HostScreen() {
   const [hostInvite, setHostInvite] = useState<string>();
   // The `#k=<transportPublicKey>` URL fragment, learned from GET /api/bootstrap once the host is
   // ready. Empty when transport encryption is off (or the fetch hasn't resolved yet) — plain URLs,
-  // today's behaviour. Non-empty in `optional`/`required` mode, so both the host's own WebView and
+  // today's behaviour.n-empty in `optional`/`required` mode, so both the host's own WebView and
   // the join QR carry the key a `required`-mode handshake needs (docs/08).
   const [transportKeyFragment, setTransportKeyFragment] = useState('');
   // See `nodeHostToken` — the per-boot host token the WebView hands to the LOAM client to claim admin.
@@ -459,8 +460,9 @@ function HostScreen() {
     setWipeClearFailure(undefined);
     // The wiped runtime can't restart in this process (nodejs-mobile starts once per process), and a
     // reopened activity would only reattach to it, stuck. Close LOAM completely instead: the next launch is
-    // a clean start on the setup screens.
-    closeApp();
+    // a clean start on the setup screens. The last shared file's cached copy goes first (lib/save-file.ts),
+    // or it would sit in the cache until that launch.
+    await closeAfterReset(clearSharedFiles, closeApp);
   };
 
   // Display mode: keep the screen awake and pin the app while it's on. Both are best-effort no-ops when
@@ -524,10 +526,13 @@ function HostScreen() {
         // because the server also became ready is exactly the bug this fix removes.
         // Keep the host alive when the screen locks (docs/04). Best-effort and idempotent: if the app is
         // in the background right now (API 31+ refuses a background FGS start — cold start is ~80 s, so
-        // the operator may well have switched away), the AppState effect below retries on return.
-        void ensureHostService();
+        // the operator may well have switched away), the AppState effect below retries on return. No
+        // notification prompt from here: right after setup the share overlay is
+        // already open when `ready` lands, so it starts the hotspot, and its permission request, in this
+        // same tick; the share-open effect below says where the prompt is offered instead.
+        void ensureHostService({ prompt: false });
       } else if (payload?.status === 'notice') {
-        // Non-fatal (main.js only ever sends this for DB-encryption boot degradations — see its
+        //n-fatal (main.js only ever sends this for DB-encryption boot degradations — see its
         // `DB_ENCRYPTION_NOTICE_CODES`) — never touches `status`/`nodeStatus`, so it can't regress a
         // 'ready' host back to a spinner/error screen, and it persists past a later 'ready' (see above).
         if (payload.code) {
@@ -598,7 +603,7 @@ function HostScreen() {
     // P1-2 (Sol round 3/4): the server's kill switch posts this when a `persistent`/`passphrase`-
     // encrypted node is wiped — its key is FIXED (Keystore-held), so the server deleted the now-orphaned
     // ciphertext and handed off HERE to clear the key material and restart. Unlike the P1-1
-    // `db_encryption_unreadable` recovery above (which retries boot in the SAME still-alive Node runtime
+    // `db_encryption_unreadable` recovery above (which retries boot in the SAME still-alivede runtime
     // — a plain JS function call inside that process), this genuinely needs a NEW OS process: the OLD
     // embedded server is still bound to port 3000 with its store already closed, and nodejs-mobile's
     // native module only starts its runtime ONCE per process (`_startedNodeAlready` — a second
@@ -781,10 +786,12 @@ function HostScreen() {
   // "start hosting" moment, so (re)start the foreground service then too (idempotent).
   useEffect(() => {
     if (shareOpen && status === 'ready') {
-      // No notification prompt here: in Hotspot mode the overlay is about to ask for the hotspot's
-      // location/nearby-Wi-Fi permissions, and two overlapping permission dialogs can auto-deny one. The
-      // overlay re-asserts (with the prompt) once the hotspot is running — or at once in Wi-Fi mode, which
-      // asks for nothing else.
+      // notification prompt here, nor on the launcher's `ready` above: in Hotspot mode the overlay is
+      // about to ask for the hotspot's location/nearby-Wi-Fi permissions (and right after setup it is
+      // already open when `ready` lands, so both moments coincide with that request), and two overlapping
+      // permission dialogs can auto-deny one. The overlay re-asserts (with the prompt) once the hotspot is
+      // running — or at once in Wi-Fi mode, which asks for nothing else — and the AppState → active effect
+      // above prompts too, so a host that never opens the share screen is still asked, once.
       void ensureHostService({ prompt: false });
     }
     if (shareOpen) {
@@ -807,7 +814,7 @@ function HostScreen() {
   // by BOTH the `db_encryption_unreadable` "Preserve old database & start fresh" button and the
   // `db_encryption_plaintext_unconverted` "Delete existing data & start encrypted" button — the marker
   // intent is derived from the active `errorCode` below (Sol P1) so it matches the pressed button. As of
-  // Sol round 3 this ALSO makes main.js retry boot immediately, in the SAME still-alive Node runtime (see
+  // Sol round 3 this ALSO makes main.js retry boot immediately, in the SAME still-alivede runtime (see
   // its `loam-db-start-fresh` listener) — no app restart needed any more. `onStatus`'s `'ready'` branch
   // clears the active fatal block automatically once that retry succeeds (and resets this busy/message
   // state); if it fails again, a fresh `'error'` status simply replaces this one.
@@ -998,7 +1005,7 @@ function HostScreen() {
         }, 1500);
       }
     } catch {
-      // Not JSON / not ours — fall through to the wipe-protocol classifier.
+      //t JSON / not ours — fall through to the wipe-protocol classifier.
     }
     handleClientWebViewMessage(raw);
   };
@@ -1128,7 +1135,7 @@ function HostScreen() {
             the screen edge, so its padding is (keyboard height − insets.bottom) and padding + strip is
             exactly the keyboard height — the strip never adds to the keyboard's padding. The Expo keyboard
             guide suggests `behavior={undefined}` on Android; that relies on the window resizing, which
-            edge-to-edge takes away, hence `padding`. Not yet verified on a device. */}
+            edge-to-edge takes away, hence `padding`.t yet verified on a device. */}
         <KeyboardAvoidingView behavior="padding" style={styles.flex}>
         {webViewReady ? (
           <WebView
@@ -1485,7 +1492,7 @@ function HostScreen() {
             {errorMessage ?? 'The encrypted-storage module failed to load on this device.'}
           </ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            Nothing was stored unencrypted. Retry, or switch encryption off to run this host WITHOUT
+           thing was stored unencrypted. Retry, or switch encryption off to run this host WITHOUT
             encryption.
           </ThemedText>
           <ThemedView style={styles.noticeBannerActions}>

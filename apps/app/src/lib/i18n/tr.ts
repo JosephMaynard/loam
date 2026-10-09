@@ -139,7 +139,7 @@ export const tr: Partial<AppCatalog> = {
   "menu.about": "LOAM hakkında",
   "about.title": "LOAM hakkında",
   "about.version": "Sürüm {version}",
-  "about.body": "LOAM ücretsiz ve açık kaynaklıdır. Analiz veya çökme raporu yoktur, bu yüzden yalnızca bize bildirdiğiniz sorunlardan haberimiz olur. Bize yazın.",
+  "about.body": "LOAM ücretsiz ve açık kaynaklıdır. Analiz veya çökme raporu yoktur, bu yüzden yalnızca bize bildirdiğiniz sorunlardan haberimiz olur. Bir sorun varsa ya da yeni bir özellik isterseniz, bize yazın.",
   "about.website": "Web sitesi",
   "about.email": "E-posta",
   "about.source": "Kaynak kodu",

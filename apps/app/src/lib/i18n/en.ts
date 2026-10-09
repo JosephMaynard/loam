@@ -144,7 +144,7 @@ export const en = {
   "menu.about": "About LOAM",
   "about.title": "About LOAM",
   "about.version": "Version {version}",
-  "about.body": "LOAM is free and open source. It has no analytics or crash reporting, so we only hear about problems you tell us about. Please get in touch.",
+  "about.body": "LOAM is free and open source. It has no analytics or crash reporting, so we only hear about problems you tell us about. If something is wrong, or you would like a feature, please get in touch.",
   "about.website": "Website",
   "about.email": "Email",
   "about.source": "Source code",
