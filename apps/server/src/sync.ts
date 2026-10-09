@@ -36,6 +36,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
     lastSuccessAt?: number;
     lastError?: string;
     imported: number;
+    /** An unpinned peer answered a later handshake this boot with a different transport key (see
+     *  `notePeerKey`): public data is still pulled, but `sync.token` is no longer sent to it. */
+    keyChanged?: boolean;
   };
   const peerSyncStatus = new Map<string, PeerSyncStatus>();
   // Cached per-peer transport decision (docs/08), keyed by peer URL, so the 5s sync tick reuses one
@@ -192,9 +195,29 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   // 2n − 1 requests per n-id batch (~8 000 a round), each reading up to the 8 MiB cap. A round may spend at
   // most `2 × batches + SPLIT_SLACK` extra requests and `MAX_WASTED_BYTES_PER_ROUND` bytes on unusable
   // responses; past either, the peer is treated as failing for this round (`lastError`). One bad record in a
-  // full batch costs ~2·log2(200) ≈ 16 extra requests, so honest peers stay far inside both limits.
+  // full batch costs ~2·log2(200) ≈ 16 extra requests, so honest peers stay far inside the request limit.
+  // The byte budget is NOT what isolates a single over-cap record: every too-large answer on the way down
+  // costs the full cap (200→100→50→25→13→7→4→2→1 is nine of them, 72 MiB), so a single id that answers too
+  // large is always settled as refused first and the budget is checked only before a further split. Were
+  // it the other way round, the offender would never be remembered and every round would repeat the same
+  // downloads and fail at the same batch, starving every later offer.
   const SPLIT_SLACK = 16;
   const MAX_WASTED_BYTES_PER_ROUND = 4 * maxPeerJsonBytes;
+  // Plaintext cap on one sealed `/api/sync/attachment` answer. The schema caps `data` at the base64 of a
+  // 1 MiB file (1 398 104 chars), so 2 MiB holds every honest answer; without its own cap an attachment
+  // fetch read up to the 8 MiB message cap and sat outside the round's byte budget.
+  const maxPeerAttachmentJsonBytes = 2 * 1024 * 1024;
+  // Channel imports per round and in total. A digest may list any number of public channels and each new
+  // one is a synchronous write plus a frame to every client, so a round takes at most this many NEW
+  // channels (the rest wait for a later round), and a node never holds more channels of synced origin than
+  // the ceiling (`rt.syncedChannelIds`, durable `synced_channels` provenance); past it, new ones are
+  // skipped and logged once per round.
+  const MAX_NEW_CHANNELS_PER_ROUND = 200;
+  const MAX_SYNCED_CHANNELS = 2_000;
+  // How far ahead of this node's clock an imported message may be stamped. Off-grid nodes have no NTP, so
+  // honest skew is clamped rather than refused; a far-future stamp would otherwise sort newest forever and
+  // never expire under retention.
+  const MAX_PEER_CLOCK_SKEW_MS = 5 * 60_000;
 
   // Per-peer memory of PUBLIC offers this node fetched and REFUSED (review 2026-09-25 #6), keyed by id +
   // version, so a refused NEW message (a reply to a deleted post, a post into an archived channel, an over-cap
@@ -250,6 +273,46 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   // (review 2026-09-25 #13). RAM-only; cleared by the kill switch.
   const peersSeenEncrypted = new Set<string>();
 
+  // The transport key each UNPINNED peer answered its first handshake with this boot, and the peers that
+  // later answered with a different one. An unpinned key is learned over plain HTTP (trust on first use):
+  // nothing can tell a legitimate change (an ephemeral-key host rebooted) from an on-path attacker who
+  // started answering, so public data is still pulled from such a peer, but `sync.token` is no longer
+  // sealed to it (`peerSyncToken`), the change is logged once, and the admin status reports `keyChanged`.
+  // A pinned key never gets here: a mismatch fails the handshake closed. RAM-only; cleared by the kill
+  // switch, so a restart (or pinning the new key) is what accepts a changed key again.
+  const firstSeenPeerKeys = new Map<string, string>();
+  const peersWithChangedKey = new Set<string>();
+
+  /** Record the key an unpinned peer's handshake returned, flagging the peer if it differs from the first. */
+  function notePeerKey(peerUrl: string, hostPublicKey: string): void {
+    const first = firstSeenPeerKeys.get(peerUrl);
+    if (first === undefined) {
+      firstSeenPeerKeys.set(peerUrl, hostPublicKey);
+      return;
+    }
+    if (first === hostPublicKey || peersWithChangedKey.has(peerUrl)) {
+      return;
+    }
+    peersWithChangedKey.add(peerUrl);
+    const status = peerSyncStatus.get(peerUrl) ?? { imported: 0 };
+    status.keyChanged = true;
+    peerSyncStatus.set(peerUrl, status);
+    rt.log.warn(
+      `Sync: peer ${peerUrl} answered a handshake with a different transport key than earlier this boot; still pulling its public data, but no longer sending it the sync token (pin its key, or restart this node, to trust the new key)`,
+    );
+  }
+
+  /** The `sync.token` to seal into a request to `peerUrl`: the configured one, unless the peer is unpinned
+   *  and changed its key this boot (then none, so a key an attacker substituted can't collect it). */
+  function peerSyncToken(peerUrl: string): string | undefined {
+    const token = rt.appConfig.sync.token;
+    if (!token) {
+      return undefined;
+    }
+    const pinned = rt.appConfig.sync.peers.find((peer) => peer.url === peerUrl)?.transportKey;
+    return pinned || !peersWithChangedKey.has(peerUrl) ? token : undefined;
+  }
+
   /**
    * Forget every remembered PUBLIC refusal, keeping the rest of the per-peer state (transport sessions,
    * downgrade history). Called when a local policy that decides refusals changes (an admin config save, a
@@ -266,6 +329,8 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
     peerTransportSessions.clear();
     refusedOffers.clear();
     peersSeenEncrypted.clear();
+    firstSeenPeerKeys.clear();
+    peersWithChangedKey.clear();
     peerBatchSizes.clear();
     refusedLinkCodes.clear();
     linkRetryAt.clear();
@@ -288,7 +353,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
       return;
     }
     try {
-      const result = await fetchPeerJson(peer.url, "/api/sync/link", SyncLinkResponseSchema, { ...self, code });
+      // The link request introduces this node; it never carries this node's own `sync.token`. The code is
+      // the credential here, and the answer is what hands a token over (the peer's, if it has one).
+      const result = await fetchPeerJson(peer.url, "/api/sync/link", SyncLinkResponseSchema, { body: { ...self, code }, syncToken: false });
       if (rt.wipeGeneration !== generation || rt.wipeInProgress) {
         return;
       }
@@ -337,6 +404,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   async function handshakePeerAndCache(peerUrl: string): Promise<PeerTransportSession> {
     const pinnedKey = rt.appConfig.sync.peers.find((peer) => peer.url === peerUrl)?.transportKey;
     const session = await handshakeWithPeer(peerUrl, { expectedHostKey: pinnedKey });
+    if (!pinnedKey) {
+      notePeerKey(peerUrl, session.hostPublicKey);
+    }
     peerTransportSessions.set(peerUrl, { transport: session, expiresAt: Date.now() + PEER_TRANSPORT_SESSION_TTL_MS });
     peersSeenEncrypted.add(peerUrl);
     return session;
@@ -369,6 +439,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   ): Promise<PeerTransportSession> {
     const pinnedKey = rt.appConfig.sync.peers.find((peer) => peer.url === peerUrl)?.transportKey;
     const fresh = await handshakeWithPeer(peerUrl, { expectedHostKey: pinnedKey });
+    if (!pinnedKey) {
+      notePeerKey(peerUrl, fresh.hostPublicKey);
+    }
     session.sessionId = fresh.sessionId;
     session.key = fresh.key;
     session.hostPublicKey = fresh.hostPublicKey;
@@ -438,6 +511,18 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
     }
   }
 
+  /** What one peer request carries and how it is accounted for (see {@link fetchPeerJson}). */
+  type PeerRequestOptions = {
+    /** The route body; absent for a bodyless GET (a sealed request is a POST either way). */
+    body?: unknown;
+    /** The round's unusable-byte meter: an over-cap answer costs the cap, an unparsable one its bytes. */
+    meter?: { wastedBytes: number };
+    /** Plaintext cap on the answer; defaults to the 8 MiB digest/messages ceiling. */
+    maxBytes?: number;
+    /** Whether the configured `sync.token` may ride along (default true). The link request sends none. */
+    syncToken?: boolean;
+  };
+
   /**
    * GET/POST a peer endpoint with a timeout, a response-size cap, and schema validation. Transparently
    * routes through the peer's transport session when it advertises encryption (docs/08) — so the sync
@@ -450,20 +535,20 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
     peerUrl: string,
     path: string,
     schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
-    body?: unknown,
-    meter?: { wastedBytes: number },
+    options: PeerRequestOptions = {},
   ): Promise<T> {
+    const { body, meter, maxBytes = maxPeerJsonBytes, syncToken = true } = options;
     const transport = await resolvePeerTransport(peerUrl);
     let raw: string;
     try {
       raw =
         transport === "plaintext"
-          ? await fetchPeerText(peerUrl, path, body)
-          : await sealedFetchPeerText(transport, peerUrl, path, body);
+          ? await fetchPeerText(peerUrl, path, body, maxBytes)
+          : await sealedFetchPeerText(transport, peerUrl, path, body, maxBytes, syncToken);
     } catch (error) {
       // An over-cap body was read up to the cap before it was abandoned — bytes spent for nothing.
       if (meter && error instanceof Error && error.message === "Peer response too large") {
-        meter.wastedBytes += maxPeerJsonBytes;
+        meter.wastedBytes += maxBytes;
       }
       throw error;
     }
@@ -487,7 +572,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   }
 
   /** Plain-HTTP peer request (transport `off`): the pre-encryption path, unchanged. */
-  async function fetchPeerText(peerUrl: string, path: string, body?: unknown): Promise<string> {
+  async function fetchPeerText(peerUrl: string, path: string, body: unknown, maxBytes: number): Promise<string> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
 
@@ -508,10 +593,16 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
         throw new Error(`Peer answered ${response.status}`);
       }
 
-      return (await readPeerBody(response, maxPeerJsonBytes)).toString("utf8");
+      return (await readPeerBody(response, maxBytes)).toString("utf8");
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  /** The wire cap for a sealed answer whose plaintext may be `maxBytes`: the `{"enc":"…"}` envelope inflates
+   *  it by 4/3 plus a few bytes. */
+  function sealedWireCap(maxBytes: number): number {
+    return maxBytes === maxPeerJsonBytes ? maxSealedPeerJsonBytes : Math.ceil((maxBytes * 4) / 3) + 64 * 1024;
   }
 
   /** Sealed peer request over a live transport session, with a one-shot re-handshake on expiry. */
@@ -519,15 +610,18 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
     session: PeerTransportSession,
     peerUrl: string,
     path: string,
-    body?: unknown,
+    body: unknown,
+    maxBytes: number,
+    withSyncToken: boolean,
   ): Promise<string> {
     const response = await sealedFetch(session, peerUrl, path, {
       body,
       // Seal the sync token INSIDE the envelope rather than presenting it as a wire header (docs/08) — so a
       // node-membership bearer credential is never readable on the wire and the request proves key
-      // possession. A present token also makes a bodyless digest a sealed POST.
-      syncToken: rt.appConfig.sync.token,
-      maxBytes: maxSealedPeerJsonBytes,
+      // possession. A present token also makes a bodyless digest a sealed POST. Decided per attempt
+      // (`peerSyncToken`): the retry after a re-handshake that returned a changed key must not carry it.
+      syncToken: withSyncToken ? () => peerSyncToken(peerUrl) : undefined,
+      maxBytes: sealedWireCap(maxBytes),
       reHandshake: async () => {
         try {
           // Fold the fresh session into THIS request's `session` object (and re-cache it) so the cache and
@@ -632,15 +726,18 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
    *    preserving back-compat with older / off-mode peers that predate the sync-attachment route (whose
    *    attachments would otherwise disappear permanently). An older *encrypted* peer without the new route
    *    can't be served this way (documented: it must be upgraded).
-   * Throws on any failure; the caller treats a throw as "image absent, message still imports".
+   * Throws on any failure; the caller treats a throw as "image absent, message still imports". With a
+   * `meter` (the sync round's), an over-cap answer costs its cap and unparsable bytes count, like a batch.
    */
-  async function fetchPeerAttachmentBytes(peerUrl: string, attachment: MessageAttachment): Promise<Buffer> {
+  async function fetchPeerAttachmentBytes(peerUrl: string, attachment: MessageAttachment, meter?: { wastedBytes: number }): Promise<Buffer> {
     const fileName = attachmentFileName(attachment);
     const transport = await resolvePeerTransport(peerUrl);
 
     if (transport === "plaintext") {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10_000);
+      // Read up to the cap for THIS attachment's type — non-image files may be larger than images.
+      const maxBytes = isImageAttachmentMime(attachment.mimeType) ? attachmentMaxBytes : attachmentFileMaxBytes;
       try {
         const response = await fetch(`${peerUrl.replace(/\/+$/, "")}/api/attachments/${fileName}`, {
           signal: controller.signal,
@@ -648,21 +745,35 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
         if (!response.ok) {
           throw new Error(`Peer answered ${response.status}`);
         }
-        // Read up to the cap for THIS attachment's type — non-image files may be larger than images.
-        const maxBytes = isImageAttachmentMime(attachment.mimeType) ? attachmentMaxBytes : attachmentFileMaxBytes;
         return await readPeerBody(response, maxBytes);
+      } catch (error) {
+        if (meter && error instanceof Error && error.message === "Peer response too large") {
+          meter.wastedBytes += maxBytes;
+        }
+        throw error;
       } finally {
         clearTimeout(timeout);
       }
     }
 
-    const result = await fetchPeerJson(peerUrl, "/api/sync/attachment", SyncAttachmentResponseSchema, { fileName });
+    const result = await fetchPeerJson(peerUrl, "/api/sync/attachment", SyncAttachmentResponseSchema, {
+      body: { fileName },
+      meter,
+      maxBytes: maxPeerAttachmentJsonBytes,
+    });
     return Buffer.from(result.data, "base64");
   }
 
   /** Best-effort copy of an imported message's attachment files from the peer that has them. Returns the
-   *  attachments whose files THIS call wrote, so a caller that then discards the import can remove them. */
-  async function importPeerAttachments(peerUrl: string, message: Message, generation: number): Promise<MessageAttachment[]> {
+   *  attachments whose files THIS call wrote, so a caller that then discards the import can remove them.
+   *  Every fetch is accounted on the round's `meter`; once the round's byte budget is spent no further
+   *  fetch is made and the file is recorded as missing for the retry pass instead. */
+  async function importPeerAttachments(
+    peerUrl: string,
+    message: Message,
+    generation: number,
+    meter?: { wastedBytes: number },
+  ): Promise<MessageAttachment[]> {
     const written: MessageAttachment[] = [];
     if (message.type === "reaction" || message.type === "sealed" || !message.attachments?.length) {
       return written;
@@ -678,8 +789,13 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
         // fall through to fetch
       }
 
+      if (meter && meter.wastedBytes > MAX_WASTED_BYTES_PER_ROUND) {
+        rt.store.addMissingAttachment({ messageId: message.id, attachmentId: attachment.id, mimeType: attachment.mimeType, peerUrl });
+        continue;
+      }
+
       try {
-        const bytes = await fetchPeerAttachmentBytes(peerUrl, attachment);
+        const bytes = await fetchPeerAttachmentBytes(peerUrl, attachment, meter);
 
         // The fetch awaited: a kill switch meanwhile wiped the store, so a work item recorded now would land
         // a pre-wipe message id in the fresh post-wipe DB (review 2026-09-25 #9).
@@ -690,7 +806,10 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
         if (!isAcceptableAttachmentBytes(bytes, attachment.mimeType)) {
           // Fetched something, but it isn't usable — record it as missing too (docs/15 A6) rather
           // than silently dropping it: a peer mid-write or serving a truncated/corrupt copy today can
-          // look fine on a later retry.
+          // look fine on a later retry. The bytes were spent for nothing, like an unparsable batch.
+          if (meter) {
+            meter.wastedBytes += bytes.length;
+          }
           rt.store.addMissingAttachment({ messageId: message.id, attachmentId: attachment.id, mimeType: attachment.mimeType, peerUrl });
           continue;
         }
@@ -974,6 +1093,17 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
     return false;
   }
 
+  /** `message` with its `createdAt` / `editedAt` brought back to `horizon` where they lie beyond it (the
+   *  same object when neither does). */
+  function clampPeerStamps(message: Message, horizon: number): Message {
+    const createdAt = Math.min(message.createdAt, horizon);
+    const editedAt = message.editedAt === undefined ? undefined : Math.min(message.editedAt, horizon);
+    if (createdAt === message.createdAt && editedAt === message.editedAt) {
+      return message;
+    }
+    return { ...message, createdAt, ...(editedAt === undefined ? {} : { editedAt }) };
+  }
+
   /** True when message `messageId` exists here and still lists attachment `attachmentId`. */
   function messageReferencesAttachment(messageId: string, attachmentId: string): boolean {
     const message = rt.data.messages.find((candidate) => candidate.id === messageId);
@@ -1030,6 +1160,16 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
     // hostile peer could otherwise inject a message that renders as authored by this node's admin
     // (local ids are discoverable; they're exported as message authorIds in the sync digest).
     if (rt.isLocallyAuthoritative(message.authorId)) {
+      return "refuse";
+    }
+
+    // ...nor to ANY user this node created itself. A peer may author new content only as a user it (or
+    // another peer) introduced here (`synced_users` provenance) or as a brand-new author it introduces now:
+    // local ids are public (they're exported as message authors), so without this a peer could post as any
+    // ordinary local member, into that member's owner-only channel included. A message this node's own user
+    // wrote and a peer echoes back is an existing id and never reaches here as new; its edits are refused
+    // by the provenance rule on `existing` below.
+    if (!existing && rt.data.users.some((candidate) => candidate.id === message.authorId) && !rt.store.isUserSynced(message.authorId)) {
       return "refuse";
     }
 
@@ -1209,15 +1349,17 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
     generation: number,
     pendingIds: ReadonlySet<string>,
     batch: { ids: ReadonlySet<string>; kind: "public" | "sealed"; seenAt: number },
+    meter?: { wastedBytes: number },
   ): Promise<{ imported: number; deferred: Set<string> }> {
     const order = { channelPost: 0, channelReply: 1, reaction: 2, dm: 3, sealed: 4 } as const;
     const sorted = [...messages].sort((a, b) => order[a.type] - order[b.type] || a.createdAt - b.createdAt);
     const usersById = new Map(users.map((user) => [user.id, user]));
     const deferred = new Set<string>();
+    const stampHorizon = Date.now() + MAX_PEER_CLOCK_SKEW_MS;
     let imported = 0;
 
-    for (const message of sorted) {
-      if (!batch.ids.has(message.id) || (message.type === "sealed") !== (batch.kind === "sealed")) {
+    for (const offered of sorted) {
+      if (!batch.ids.has(offered.id) || (offered.type === "sealed") !== (batch.kind === "sealed")) {
         continue;
       }
 
@@ -1225,13 +1367,18 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
       // flow: it's never broadcast to clients — it's decrypted-and-delivered to a local recipient, or
       // relayed onward (hop-decremented, bounded), or dropped. Never falls through to store+broadcast.
       // (`acceptSealedFromPeer` applies the tombstone / reserved-id / expiry checks itself.)
-      if (message.type === "sealed") {
+      if (offered.type === "sealed") {
         // The round already applied the seen-record quota before fetching (see the sealed pull in syncWithPeer).
-        if (mesh.acceptSealedFromPeer(message, peerUrl, batch.seenAt, true)) {
+        if (mesh.acceptSealedFromPeer(offered, peerUrl, batch.seenAt, true)) {
           imported += 1;
         }
         continue;
       }
+
+      // Peer stamps are clamped to this node's clock plus a little skew, like channel stamps: a far-future
+      // `createdAt` would sort newest forever and never expire under retention, a far-future `editedAt`
+      // would win every later edit. Clamped, never refused — off-grid clocks drift.
+      const message = clampPeerStamps(offered, stampHorizon);
 
       const existing = rt.data.messages.find((candidate) => candidate.id === message.id);
       const verdict = vetPeerImport(message, existing, usersById, pendingIds);
@@ -1257,7 +1404,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
           return { imported, deferred };
         }
 
-        written = await importPeerAttachments(peerUrl, message, generation);
+        written = await importPeerAttachments(peerUrl, message, generation, meter);
         // A kill switch during the attachment fetch just wiped the store — stop before we insert
         // this (and any later) message back onto it (docs/15 #2).
         if (rt.wipeGeneration !== generation) {
@@ -1337,6 +1484,8 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
         return;
       }
 
+      let newChannels = 0;
+      let channelsOverCap = 0;
       for (const channel of digest.channels) {
         if (channel.visibility !== "public") {
           continue;
@@ -1364,6 +1513,12 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
           if (channel.archived) {
             continue;
           }
+          // Bounded: so many new channels a round, so many of synced origin in all (see the constants).
+          if (newChannels >= MAX_NEW_CHANNELS_PER_ROUND || rt.syncedChannelIds.size >= MAX_SYNCED_CHANNELS) {
+            channelsOverCap += 1;
+            continue;
+          }
+          newChannels += 1;
           // Strip the peer's LOCAL-only choices: private roster (never public here anyway), pin, and the
           // per-channel retention TTL — retention is a local policy, so an importer must not inherit the
           // source's TTL and silently expire its own copy.
@@ -1421,6 +1576,11 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
         rt.store.upsertChannel(merged);
         Object.assign(existing, merged);
         rt.broadcast({ type: "channelUpserted", channel: existing });
+      }
+      if (channelsOverCap) {
+        rt.log.warn(
+          `Sync: peer ${peer.url} listed ${channelsOverCap} new channel(s) beyond the import cap (${MAX_NEW_CHANNELS_PER_ROUND} a round, ${MAX_SYNCED_CHANNELS} of synced origin in all); skipped this round`,
+        );
       }
 
       const now = Date.now();
@@ -1550,15 +1710,16 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
       /** Fetch + import one batch (a sealed batch is only fetched here: it goes to `sealedFetched`, imported
        *  after the round's last request). A batch whose CONTENT is unusable (over the size cap, not JSON, fails the
        *  schema) is split in half and retried, down to single ids, so one oversized or malformed message
-       *  can't sink the rest (#2) — and a single unusable id is remembered as refused. A too-large answer
-       *  also shrinks this peer's later batches of that kind. Splitting stops, and the peer counts as failing
-       *  for the round, once the round's split or wasted-byte budget is spent. Any other failure (peer
-       *  unreachable, 4xx/5xx) ends the round's fetching too: it is returned, not thrown, so what earlier
-       *  batches imported stands. */
+       *  can't sink the rest (#2) — and a single unusable id is ALWAYS remembered as refused, before any budget
+       *  is consulted (see the note on MAX_WASTED_BYTES_PER_ROUND). A too-large answer also shrinks this peer's
+       *  later batches of that kind. Splitting stops, and the peer counts as failing for the round, once the
+       *  round's split or wasted-byte budget is spent; the byte budget also ends the round after a batch whose
+       *  attachment fetches spent it. Any other failure (peer unreachable, 4xx/5xx) ends the round's fetching
+       *  too: it is returned, not thrown, so what earlier batches imported stands. */
       const pullBatch = async (ids: string[], kind: "public" | "sealed"): Promise<{ imported: number; error?: string } | "wiped"> => {
         let payload: { messages: Message[]; users: User[] };
         try {
-          payload = await fetchPeerJson(peer.url, "/api/sync/messages", SyncMessagesResponseSchema, { ids }, meter);
+          payload = await fetchPeerJson(peer.url, "/api/sync/messages", SyncMessagesResponseSchema, { body: { ids }, meter });
         } catch (error) {
           if (rt.wipeGeneration !== generation) {
             return "wiped";
@@ -1571,13 +1732,13 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
             const floor = kind === "public" ? MIN_PUBLIC_BATCH_IDS : MIN_SEALED_BATCH_IDS;
             sizes[kind] = Math.max(floor, Math.min(sizes[kind], Math.ceil(ids.length / 2)));
           }
-          if (meter.wastedBytes > MAX_WASTED_BYTES_PER_ROUND) {
-            return { imported: 0, error: "Peer kept serving unusable batches (byte budget spent); retrying next round" };
-          }
           if (ids.length === 1) {
             rt.log.warn(`Sync: peer ${peer.url} served an unusable record for one message; skipping it`);
             settleBatch(ids, new Set());
             return { imported: 0 };
+          }
+          if (meter.wastedBytes > MAX_WASTED_BYTES_PER_ROUND) {
+            return { imported: 0, error: "Peer kept serving unusable batches (byte budget spent); retrying next round" };
           }
           if (splitsLeft < 2) {
             return { imported: 0, error: "Peer kept serving unusable batches (split budget spent); retrying next round" };
@@ -1602,15 +1763,21 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
           sealedFetched.push({ ids, payload });
           return { imported: 0 };
         }
+        const wastedBefore = meter.wastedBytes;
         const result = await importPeerMessages(peer.url, payload.messages, payload.users, generation, pendingIds, {
           ids: new Set(ids),
           kind,
           seenAt: now,
-        });
+        }, meter);
         if (rt.wipeGeneration !== generation) {
           return "wiped";
         }
         settleBatch(ids, result.deferred);
+        // This batch's attachment fetches took the round past its byte budget. (A batch that starts with the
+        // budget already spent fetches no attachments at all, so it can't be the one to cross the line.)
+        if (wastedBefore <= MAX_WASTED_BYTES_PER_ROUND && meter.wastedBytes > MAX_WASTED_BYTES_PER_ROUND) {
+          return { imported: result.imported, error: "Peer kept serving unusable attachments (byte budget spent); retrying next round" };
+        }
         return { imported: result.imported };
       };
 

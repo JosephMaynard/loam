@@ -132,8 +132,11 @@ node with **no local users of its own** — a pure mule (a spare phone) that onl
   syncs, do traffic analysis on tags/sizes/timing. No cover traffic.
 - **A malicious node** a courier syncs with sees the same, plus it could **inject** mail (bounded by
   TTL/hop/cap and `acceptSealedFromPeer`'s defensive checks) or **drop** mail (a courier/node can always
-  refuse to carry — availability, not confidentiality). Public-message impersonation is already guarded
-  (`importPeerMessages` refuses content attributed to a local authoritative user).
+  refuse to carry — availability, not confidentiality). Public-message impersonation is guarded by
+  provenance (`vetPeerImport`): a peer may author a new message only as a user that sync introduced here
+  (`synced_users`) or as a brand-new author it introduces with the message; a new message attributed to
+  any user this node created itself, admin or ordinary member, is refused, and an edit may only touch a
+  message this node imported.
 - **A coerced/seized courier phone** exposes: its own local data (mitigated by at-rest encryption + kill
   switch + ephemeral retention), and the *ciphertext* bag it carries (not readable). This is the same
   posture as any relay node — the mule is a carrier, not a confidant.

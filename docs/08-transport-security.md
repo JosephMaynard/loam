@@ -253,6 +253,18 @@ plaintext pull of the peer's **public** data — the `sync.token` is withheld, s
 nothing — and, like any unauthenticated plaintext exchange, the chance to tamper with that public data in
 transit. Pinning the peer's key (`SyncPeer.transportKey`, below) or running `required` closes it.
 
+**Residual (unpinned key, first contact).** An unpinned peer's static key is learned from its
+`/api/bootstrap` and handshake over plain HTTP, so an on-path attacker present at this node's **first**
+handshake with that peer this boot can substitute its own key and receive everything the node then seals
+to it, the `sync.token` included. What the attacker cannot do is come back later: the puller remembers the
+first key each unpinned peer answered with this boot, and when a later handshake returns a **different**
+key it keeps pulling public data (an ephemeral-key host legitimately re-mints its key at every reboot, and
+refusing would strand hotspot hosts) but stops sealing the token to that peer, logs one warning naming it,
+and reports `keyChanged` in the peer's `GET /api/admin/sync` status; a request already in flight when the
+re-handshake finds the new key is retried without the token too. Pinning the new key, or restarting this
+node, trusts it again. So an unpinned peer can leak the token to an active attacker at first contact only,
+never afterwards; a pinned peer never can, since a mismatched key fails the handshake closed.
+
 This closes a real gap: a peer running `transportEncryption: "required"` previously **401'd every
 plaintext sync pull** (its transport hook refuses any `/api/*` content request without a session), so it
 could not be synced *from* at all. It can now.

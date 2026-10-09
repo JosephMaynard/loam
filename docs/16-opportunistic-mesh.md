@@ -129,8 +129,11 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    tolerant, so one envelope has many spellings), peer-supplied ids inside the `sealed.` namespace are
    refused, and a `ttlExpiresAt` beyond the 7-day max (+1 epoch skew) is dropped. `hopLimit` and `meta` are
    NOT authenticated: a relay rebuilds the carried row from the needed fields only, doesn't carry a copy
-   with no hops left, and lets a better-provisioned copy of held mail raise the held hop budget — so a
-   carrier can't park a dead copy that shadows the genuine one. This supersedes the
+   with no hops left, and lets a better-provisioned copy of CARRIED mail raise the held hop budget — so a
+   carrier can't park a dead copy that shadows the genuine one. Mail a local user sealed here is never
+   raised (carried rows are marked in `synced_messages`, which is how the two are told apart): it already
+   holds the budget the operator configured, and a peer must not be able to make this node spread its own
+   users' mail further than they asked. This supersedes the
    "dedup by id" wording in §2 below. **Not covered:** an Emergency Reset clears tombstones, so replay
    records don't survive a wipe (tied to the open mesh-key-wipe policy, docs/29 §4).
 7. **Attachments** on sealed messages are rejected (text-only v1, as §2 specifies).
@@ -228,6 +231,14 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    missing-attachment retry runs on its own 30 s timer and can be delayed by a delivery that runs at the
    same moment, and the inbound call itself takes longer when it delivers. The courier's refresh doesn't
    wait for that call, and the difference is milliseconds against a 2 s delay and radio latency.
+   **What the first hop learns about origin:** mail a local user seals here is stored and advertised at the
+   configured `mesh.hopLimit`, while a carried copy is advertised one lower, so a peer that pulls this
+   node's digest and sees a blob at the configured maximum (most nodes keep the default, so the value is
+   widely known) can tell that the blob most likely originated here rather than passing through, and
+   `ttlExpiresAt` minus the configured `mesh.ttlMs` dates the send to the second. Neither says who sent it
+   or to whom, but together they place the sender on this node for its first-hop carrier. Randomising the
+   initial hop budget and jittering the TTL would blunt this at some cost in reach; the wire behaviour is
+   unchanged for now and the residual is recorded here.
 
 ---
 

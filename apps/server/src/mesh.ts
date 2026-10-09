@@ -263,6 +263,7 @@ export function createMeshLayer(rt: Runtime) {
       if (
         !result.success ||
         result.data.meshId !== meshId ||
+        meshCardKeyError(result.data) !== undefined ||
         meshIdFromSignPublic(result.data.sign) !== result.data.meshId ||
         !verifyKxBinding(result.data.sign, result.data.kx, result.data.kxSig)
       ) {
@@ -631,8 +632,16 @@ export function createMeshLayer(rt: Runtime) {
     if (held) {
       // `hopLimit` is NOT authenticated, so a carrier can pre-offer genuine mail with a nearly spent hop
       // budget to park a copy here that goes nowhere. Let a better-provisioned copy of the SAME mail
-      // raise the held budget instead of being shadowed by it (monotonic: never lowered).
-      if (held.type === "sealed" && sealedReplayKey(held) === replayKey && message.hopLimit - 1 > held.hopLimit) {
+      // raise the held budget instead of being shadowed by it (monotonic: never lowered). Only for mail
+      // this node CARRIES (provenance: the carry path below marks its row synced): mail a local user sealed
+      // here already holds the budget the operator configured, and a peer re-offering it with a larger one
+      // must not be able to make this node spread its own users' mail further than they asked.
+      if (
+        held.type === "sealed" &&
+        sealedReplayKey(held) === replayKey &&
+        message.hopLimit - 1 > held.hopLimit &&
+        rt.store.isMessageSynced(held.id)
+      ) {
         const raised = MessageSchema.parse({ ...held, hopLimit: message.hopLimit - 1 }) as SealedMessage;
         rt.store.updateMessage(raised);
         held.hopLimit = raised.hopLimit;
@@ -673,18 +682,47 @@ export function createMeshLayer(rt: Runtime) {
       ttlExpiresAt: message.ttlExpiresAt,
       hopLimit: message.hopLimit - 1,
     });
-    rt.store.insertMessage(relayed);
+    // Marked as imported, like a public import: it is what tells carried mail from mail sealed here (the
+    // hop-raise rule above), and `deleteMessage` drops the mark with the row.
+    rt.store.transaction(() => {
+      rt.store.insertMessage(relayed);
+      rt.store.markMessageSynced(relayed.id);
+    });
     rt.data.messages.push(relayed);
     return true; // opaque — no client broadcast
   }
 
-  /** Verify and store a mesh contact card in `ownerUserId`'s address book. Rejects a card whose
-   * self-certifying `meshId` doesn't derive from its signing key, or whose `kxSig` doesn't bind its
-   * agreement key — the two checks that make sealing to a contact immune to key substitution. The
-   * card (name included) stays in the caller's private address book; it is NOT promoted to a shared
-   * roster user, so one local user's contacts aren't exposed to the others. Returns an error string
-   * on failure. */
+  // The byte lengths the crypto expects of a card's keys: Ed25519 public key, X25519 public key, Ed25519
+  // signature, and the random mailbox token `createMeshIdentity` mints.
+  const MESH_CARD_KEY_BYTES = { sign: 32, kx: 32, kxSig: 64, mailboxToken: 32 } as const;
+
+  /**
+   * Why `card`'s key material is unusable, or undefined when every key decodes to the length the crypto
+   * expects. The schema only checks the base64url alphabet, and the two binding checks don't fix lengths
+   * either: a card's author can sign any `kx` bytes with their own key and derive the id from any `sign`
+   * bytes, so a wrong-length key verified fine on the way in and then threw inside `sealMailbox` on every
+   * send to that contact. Checked on add, on load, and once more before sealing.
+   */
+  function meshCardKeyError(card: MeshIdentityCard): string | undefined {
+    for (const [field, expected] of Object.entries(MESH_CARD_KEY_BYTES) as [keyof typeof MESH_CARD_KEY_BYTES, number][]) {
+      if (Buffer.from(card[field], "base64url").length !== expected) {
+        return `This mesh card is invalid (${field} is not a ${expected}-byte key).`;
+      }
+    }
+    return undefined;
+  }
+
+  /** Verify and store a mesh contact card in `ownerUserId`'s address book. Rejects a card whose keys
+   * have the wrong length, whose self-certifying `meshId` doesn't derive from its signing key, or whose
+   * `kxSig` doesn't bind its agreement key — the checks that make sealing to a contact immune to key
+   * substitution and keep a malformed card from ever reaching the crypto. The card (name included)
+   * stays in the caller's private address book; it is NOT promoted to a shared roster user, so one
+   * local user's contacts aren't exposed to the others. Returns an error string on failure. */
   function addMeshContact(ownerUserId: string, card: MeshIdentityCard): string | undefined {
+    const keyError = meshCardKeyError(card);
+    if (keyError) {
+      return keyError;
+    }
     if (meshIdFromSignPublic(card.sign) !== card.meshId) {
       return "This mesh card is invalid (id does not match its key).";
     }
@@ -730,16 +768,27 @@ export function createMeshLayer(rt: Runtime) {
     if (sealedHeldCount() >= rt.appConfig.mesh.maxCarried) {
       return "This node's sealed-mail queue is full; try again later.";
     }
+    // A card that passed an older build's checks may still hold a wrong-length key: refuse it here rather
+    // than let the crypto throw and turn the send into a 500.
+    const keyError = meshCardKeyError(contact);
+    if (keyError) {
+      return keyError;
+    }
     const now = Date.now();
     const ttlExpiresAt = now + rt.appConfig.mesh.ttlMs;
     const toTag = mailboxTag(contact.mailboxToken, currentEpoch(now, MESH_EPOCH_WINDOW_MS));
     const aad = sealedAad(toTag, ttlExpiresAt);
-    const blob = sealMailbox({
-      recipientKxPublic: contact.kx,
-      sender: { signPublic: sender.signPublic, signSecret: sender.signSecret, kxPublic: sender.kxPublic },
-      plaintext: body,
-      aad,
-    });
+    let blob: string;
+    try {
+      blob = sealMailbox({
+        recipientKxPublic: contact.kx,
+        sender: { signPublic: sender.signPublic, signSecret: sender.signSecret, kxPublic: sender.kxPublic },
+        plaintext: body,
+        aad,
+      });
+    } catch {
+      return "This mesh contact's card is unusable; ask them for a fresh one.";
+    }
     const message = MessageSchema.parse({
       id: newMessageId("seal"),
       type: "sealed",
