@@ -288,12 +288,15 @@ on a plaintext request — an encrypted session authenticates solely via the sea
 
 The peer's static transport key is learned from its `/api/bootstrap` **over plain HTTP** — that is *not*
 an out-of-band channel (unlike the browser's join-QR `#k=`). Unpinned, this is **unauthenticated key
-discovery**, not true trust-on-first-use: the key is taken from the peer's advertisement on *each*
-resolve and is **not** persisted or pinned across session expiry, so there is no first-seen key to detect
-a later swap against. So by default node-to-node sync gets **passive-eavesdropper confidentiality +
-integrity for the sync data and the token, but NOT active-MITM resistance** between nodes: a
-machine-in-the-middle could present its own key on `/api/bootstrap` and the handshake, then re-encrypt to
-the real peer (and so read the token it terminates). Pinning the peer key closes that.
+discovery** with a boot-scoped memory, not true trust-on-first-use: the puller remembers the first key each
+unpinned peer answered with **this boot** (see the residual above), so a swap after that is detected within
+the boot, the `sync.token` is withheld from the changed key and the admin status says so; but the memory is
+not persisted across restarts, so a swap that is already in place when this node starts, or at its very
+first contact, is not detectable without a pin. So by default node-to-node sync gets **passive-eavesdropper
+confidentiality + integrity for the sync data and the token, but only partial active-MITM resistance**
+between nodes: a machine-in-the-middle present at first contact could present its own key on
+`/api/bootstrap` and the handshake, then re-encrypt to the real peer (and so read the token it terminates).
+Pinning the peer key closes that entirely.
 
 To get active-MITM resistance, an operator **pins** the peer's key: `SyncPeer.transportKey` (a
 base64url X25519 key, e.g. copied from the peer's join QR / host screen out-of-band). When set, the

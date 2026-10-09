@@ -196,10 +196,11 @@ on".
 
 1. the native station address, the one the router's DHCP gave this phone (`WifiManager.dhcpInfo` /
    `connectionInfo`, the same `stationAddresses()` the hotspot picker uses to rule the station out);
-2. else, while Android reports **no** Wi-Fi network: a launcher-reported wired adapter (`eth*`, `en*`,
-   `usb*`, `rndis*`) with an RFC 1918 address, or, when the native read says a wired network exists but
-   the launcher names its interface differently, `preferredLanAddress` over the launcher's private,
-   non-cellular addresses; else nothing;
+2. else, while Android reports **no** Wi-Fi network: a launcher-reported wired adapter (`eth*` or `en*`;
+   `usb*` and `rndis*` are deliberately excluded, since on a phone they are the USB-tethering downstream,
+   reachable only by the tethered computer) with an RFC 1918 address, or, when the native read says a wired
+   network exists but the launcher names its interface differently, `preferredLanAddress` over the
+   launcher's private, non-cellular addresses; else nothing;
 3. else (on Wi-Fi, or before the first native read) a launcher-reported `wlan<N>` interface with an
    RFC 1918 address (lowest N first), from `loam-hostinfo`'s `interfaces`;
 4. else a wired adapter as in 2;

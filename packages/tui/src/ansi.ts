@@ -54,8 +54,9 @@ const EMOJI_MODIFIER = /^[\u{1f3fb}-\u{1f3ff}]$/u;
 const PICTOGRAPHIC = /^\p{Extended_Pictographic}$/u;
 
 /**
- * A combining mark, variation selectors aside (they pick a glyph rather than stack on it). Three or more on
- * one base draw over the rows above and below in most terminals, so {@link clean} keeps the first two.
+ * A combining mark, variation selectors aside (they pick a glyph rather than stack on it). Too many on one
+ * base draw over the rows above and below in most terminals, so {@link clean} keeps the first three (enough
+ * for Burmese, Khmer and Tibetan stacks).
  */
 const MARK = "(?:(?![\\ufe00-\\ufe0f])\\p{M})";
 const STACKED_MARKS = new RegExp(`(${MARK}{3})${MARK}+`, "gu");
