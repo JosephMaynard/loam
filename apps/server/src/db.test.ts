@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { Channel, Message, Report, User } from "@loam/schema";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { assertNotPlaintextSqliteFile, importLegacyJsonData, openStore, type LoamStore } from "./db.js";
+import { assertNotPlaintextSqliteFile, openStore, type LoamStore } from "./db.js";
 
 function makeUser(id: string, overrides: Partial<User> = {}): User {
   return {
@@ -523,76 +523,6 @@ describe("reports", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
-});
-
-describe("importLegacyJsonData", () => {
-  let dataDir: string;
-  let store: LoamStore;
-
-  beforeEach(() => {
-    dataDir = mkdtempSync(join(tmpdir(), "loam-db-test-"));
-    store = openStore(join(dataDir, "loam.db"));
-  });
-
-  afterEach(() => {
-    store.close();
-    rmSync(dataDir, { recursive: true, force: true });
-  });
-
-  function writeLegacyFiles(): void {
-    writeFileSync(join(dataDir, "users.json"), JSON.stringify([makeUser("user.1234", { isAdmin: true })]));
-    writeFileSync(join(dataDir, "channels.json"), JSON.stringify([makeChannel("general")]));
-    writeFileSync(join(dataDir, "messages.json"), JSON.stringify(allMessageVariants));
-    writeFileSync(
-      join(dataDir, "sessions.json"),
-      JSON.stringify([
-        { token: "token-a", userId: "user.1234" },
-        { token: "", userId: "user.invalid" },
-        { junk: true },
-      ]),
-    );
-  }
-
-  it("returns false when no legacy files exist", () => {
-    expect(importLegacyJsonData(store, dataDir)).toBe(false);
-  });
-
-  it("imports legacy files, skips invalid sessions, and renames files to .bak", () => {
-    writeLegacyFiles();
-
-    expect(importLegacyJsonData(store, dataDir)).toBe(true);
-
-    expect(store.loadUsers()).toEqual([makeUser("user.1234", { isAdmin: true })]);
-    expect(store.loadChannels()).toEqual([makeChannel("general")]);
-    expect(store.loadMessages()).toEqual(allMessageVariants);
-    expect(store.loadSessions()).toEqual([{ token: "token-a", userId: "user.1234" }]);
-
-    for (const file of ["users", "channels", "messages", "sessions"]) {
-      expect(existsSync(join(dataDir, `${file}.json`))).toBe(false);
-      expect(existsSync(join(dataDir, `${file}.json.bak`))).toBe(true);
-    }
-
-    expect(JSON.parse(readFileSync(join(dataDir, "users.json.bak"), "utf8"))).toHaveLength(1);
-  });
-
-  it("does not import into a non-empty store", () => {
-    store.upsertUser(makeUser("user.existing"));
-    writeLegacyFiles();
-
-    expect(importLegacyJsonData(store, dataDir)).toBe(false);
-    expect(store.loadUsers()).toEqual([makeUser("user.existing")]);
-    expect(existsSync(join(dataDir, "users.json"))).toBe(true);
-  });
-
-  it("rolls back and keeps legacy files when a row is corrupt", () => {
-    writeLegacyFiles();
-    writeFileSync(join(dataDir, "messages.json"), JSON.stringify([{ id: "msg_bad", type: "channelPost" }]));
-
-    expect(() => importLegacyJsonData(store, dataDir)).toThrow();
-    expect(store.isEmpty()).toBe(true);
-    expect(existsSync(join(dataDir, "users.json"))).toBe(true);
-    expect(existsSync(join(dataDir, "users.json.bak"))).toBe(false);
   });
 });
 

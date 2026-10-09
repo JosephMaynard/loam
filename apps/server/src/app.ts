@@ -34,7 +34,7 @@ import {
 import { generateDisplayName } from "@loam/display-name";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 
-import { importLegacyJsonData, type StoredRowReport } from "./db.js";
+import type { StoredRowReport } from "./db.js";
 import { createLlmLayer, INTERRUPTED_ASSISTANT_BODY } from "./llm.js";
 import { createMeshLayer } from "./mesh.js";
 import type { Runtime } from "./runtime.js";
@@ -1866,16 +1866,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Loads persisted application data into memory: runs the one-time legacy JSON import, loads all
-   * tables, seeds default channels on first boot, ensures (non-admin) seed users — demoting any
-   * legacy admin seed, since admin now comes only from the bootstrap strategies — and ensures the
-   * Ollama bot user if configured.
+   * Loads persisted application data into memory: loads all tables, seeds default channels on first
+   * boot, ensures (non-admin) seed users — demoting any legacy admin seed, since admin now comes only
+   * from the bootstrap strategies — and ensures the Ollama bot user if configured.
    */
   function loadData(): void {
-    if (importLegacyJsonData(store, dataDir)) {
-      server.log.info("Imported legacy .loam JSON data into SQLite (originals renamed to *.json.bak)");
-    }
-
     // A row an older release wrote that no longer validates (e.g. an id past `ID_MAX_LENGTH`) is not fatal:
     // an upgraded node must still boot. The store repairs what it provably can (in memory) and QUARANTINES the
     // rest — not loaded, left on disk, and its id refused to every write (see `LoamStore.quarantine`).

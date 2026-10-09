@@ -288,3 +288,19 @@ describe("a persisted config row repaired at load is written back once", () => {
     expect(third.store.getConfigValue("config")).toBe(valid);
   });
 });
+
+describe("flat-JSON files from before the SQLite store are ignored", () => {
+  it("boots a fresh node over a malformed users.json, leaving the file alone", async () => {
+    const dataDir = tempDataDir();
+    // The pre-SQLite store's file names. The importer that read them (and threw on a row the schema refused,
+    // failing the boot) is gone: every released LOAM has kept its data in SQLite.
+    writeFileSync(join(dataDir, "users.json"), JSON.stringify([{ id: "user.old", displayName: 7 }]));
+    writeFileSync(join(dataDir, "messages.json"), "not json");
+
+    const app = await boot(dataDir);
+    expect((await app.server.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
+    expect(app.store.loadUsers().some((user) => user.id === "user.old")).toBe(false);
+    expect(readFileSync(join(dataDir, "messages.json"), "utf8")).toBe("not json");
+    expect(existsSync(join(dataDir, "users.json.bak"))).toBe(false);
+  });
+});

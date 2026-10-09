@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { buildApp, type LoamApp } from "./app.js";
+import { openStore } from "./db.js";
 import {
   claim,
   cleanups,
@@ -33,50 +34,15 @@ describe("admin bootstrap", () => {
 
   it("removes legacy demo seed users so a live node ships no fake contacts and bootstrap governs admin", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
-    writeFileSync(
-      join(dataDir, "users.json"),
-      JSON.stringify([
-        {
-          id: "user.1234",
-          displayName: "Seed",
-          type: "human",
-          isAdmin: true,
-          createdAt: 1_704_067_200_000,
-          ephemeral: false,
-        },
-        {
-          id: "user_reactor",
-          displayName: "Reactor",
-          type: "human",
-          isAdmin: false,
-          createdAt: 1_704_067_200_000,
-          ephemeral: true,
-        },
-      ]),
-    );
-    // A DM from the demo user, plus a reaction ON it authored by a real user — the reaction must be
-    // cascaded away with its target (no orphan reaction pointing at a deleted message).
-    writeFileSync(
-      join(dataDir, "messages.json"),
-      JSON.stringify([
-        {
-          id: "msg_demo1",
-          type: "dm",
-          authorId: "user.1234",
-          recipientUserId: "user_reactor",
-          body: "hello",
-          createdAt: 1_704_067_200_000,
-        },
-        {
-          id: "msg_react1",
-          type: "reaction",
-          authorId: "user_reactor",
-          targetMessageId: "msg_demo1",
-          reaction: "👍",
-          createdAt: 1_704_067_200_001,
-        },
-      ]),
-    );
+    // A database an older build left: the demo user (an admin), a real user, a DM from the demo user, and a
+    // reaction ON it authored by the real user — the reaction must be cascaded away with its target (no
+    // orphan reaction pointing at a deleted message).
+    const seed = openStore(join(dataDir, "loam.db"));
+    seed.upsertUser({ id: "user.1234", displayName: "Seed", type: "human", isAdmin: true, createdAt: 1_704_067_200_000, ephemeral: false });
+    seed.upsertUser({ id: "user_reactor", displayName: "Reactor", type: "human", isAdmin: false, createdAt: 1_704_067_200_000, ephemeral: true });
+    seed.insertMessage({ id: "msg_demo1", type: "dm", authorId: "user.1234", recipientUserId: "user_reactor", body: "hello", createdAt: 1_704_067_200_000 });
+    seed.insertMessage({ id: "msg_react1", type: "reaction", authorId: "user_reactor", targetMessageId: "msg_demo1", reaction: "👍", createdAt: 1_704_067_200_001 });
+    seed.close();
 
     const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     cleanups.push(async () => {
