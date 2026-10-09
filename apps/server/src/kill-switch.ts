@@ -401,6 +401,10 @@ export function createKillSwitch(ctx: AppContext) {
           );
         }
         ctx.store.wipeAll();
+        // `secure_delete` zeroed what wipeAll just deleted, but pages an older build freed without it (rows
+        // deleted before this node was upgraded) still hold their content until reused. VACUUM rewrites the
+        // file from the live rows alone, so none of those pages survive the checkpoint below either.
+        ctx.store.vacuum();
         // Make the deletion durable before anything can clear the journal. The store runs WAL with
         // `synchronous = NORMAL`, so `wipeAll()` committed into the write-ahead log without an fsync, while
         // `clearWipePhase()` below removes the journal durably: a power cut in between could roll the deletion

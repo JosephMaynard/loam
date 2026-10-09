@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -488,6 +488,39 @@ describe("emergency reset from the host device", () => {
     // ...but the phone's owner can always wipe it from the host menu.
     expect(await app.emergencyReset()).toEqual({ complete: true, keyClearRequested: false, journaled: false });
     expect(app.store.loadMessages()).toEqual([]);
+  });
+
+  it("leaves nothing in a plaintext database file that an older build deleted without secure_delete", async () => {
+    const { app, dataDir } = await makeApp({ killSwitch: { enabled: true } });
+    const admin = await newSession(app);
+    const needle = "PRE_UPGRADE_NEEDLE_41c9";
+    for (let index = 0; index < 40; index += 1) {
+      const posted = await app.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: admin.cookie },
+        payload: { type: "channelPost", channelId: "general", body: `${needle} ${index} ${"x".repeat(200)}` },
+      });
+      expect(posted.statusCode).toBe(201);
+    }
+    await app.close();
+
+    // An older build deletes those rows with secure_delete off (SQLite's default), leaving their text in
+    // freed pages and cell space.
+    const dbPath = join(dataDir, "loam.db");
+    const { DatabaseSync } = await import("node:sqlite");
+    const older = new DatabaseSync(dbPath);
+    older.exec("PRAGMA secure_delete = OFF");
+    older.exec("DELETE FROM messages");
+    older.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    older.close();
+    expect(readFileSync(dbPath).includes(needle)).toBe(true);
+
+    // This build opens it and runs the plaintext Emergency Reset.
+    const upgraded = await reopenApp(app, dataDir);
+    expect((await upgraded.emergencyReset()).complete).toBe(true);
+    const leftovers = [dbPath, `${dbPath}-wal`].filter((file) => existsSync(file) && readFileSync(file).includes(needle));
+    expect(leftovers).toEqual([]);
   });
 
   it("tells the launcher, and the terminal UI, whether a restart finishes an incomplete wipe", async () => {

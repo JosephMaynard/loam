@@ -392,6 +392,13 @@ export interface LoamStore {
   /** Delete all users, channels, messages, and sessions in one transaction. Config is preserved. */
   wipeAll(): void;
   /**
+   * Rebuild the database file (`VACUUM`), so no page of it holds anything but live rows. The plaintext
+   * Emergency Reset runs it after `wipeAll()`, then `checkpoint()`: `secure_delete` zeroes what is deleted
+   * from now on, but pages a build without it freed earlier (an upgraded node) still hold old rows until
+   * they are reused, and VACUUM rewrites or truncates every one of them. Cheap on an emptied database.
+   */
+  vacuum(): void;
+  /**
    * Fold the write-ahead log back into the main `loam.db` file via `PRAGMA wal_checkpoint(TRUNCATE)`,
    * so that single file is a complete, standalone snapshot with nothing left to lose in `-wal`/`-shm`
    * (TRUNCATE also shrinks the WAL to zero, so a later file-level copy can't pick up stale frames).
@@ -402,7 +409,7 @@ export interface LoamStore {
    * - the passphrase key-migration in `openInitialStore` (store-lifecycle.ts): the crash-atomic
    *   pre-migration backup is a raw copy of `loam.db` alone, which would otherwise MISS committed
    *   transactions still resident in the WAL; this makes the snapshot single-file-consistent first;
-   * - the plaintext Emergency Reset, right after `wipeAll()`: the deletion must be in the main file before
+   * - the plaintext Emergency Reset, right after `wipeAll()` and `vacuum()`: the deletion must be in the main file before
    *   the wipe journal (its only recovery record) is durably removed.
    *
    * Throws if the checkpoint comes back `busy` or with fewer frames folded than the WAL holds: another
@@ -805,8 +812,9 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   if (!pragma) {
     // A plaintext store has only the logical wipe (`wipeAll`) for Emergency Reset, so have SQLite overwrite
     // deleted content with zeros instead of leaving it in free pages and freed cell space, where a copy of
-    // the file would still give it up. Not secure erasure on flash (the device may keep the old blocks; see
-    // docs/02), but nothing readable is left in the database file itself once the wipe is checkpointed.
+    // the file would still give it up. That covers what is deleted from here on; pages an older build freed
+    // without it keep their old content until reused, which is why the reset also runs `vacuum()` before
+    // its checkpoint. Not secure erasure on flash (the device may keep the old blocks; see docs/02).
     // A SQLCipher store's free pages are ciphertext already and its wipes delete the files.
     db.exec("PRAGMA secure_delete = ON");
   }
@@ -1440,6 +1448,9 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       quarantinedUsers.clear();
       quarantinedChannels.clear();
       quarantinedMessages.clear();
+    },
+    vacuum() {
+      db.exec("VACUUM");
     },
     checkpoint() {
       // TRUNCATE folds all committed WAL frames back into the main DB file, syncs it, and resets the WAL to

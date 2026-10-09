@@ -126,9 +126,13 @@ out of scope, note the limitation in user-facing docs rather than overpromising.
 
 **What the plaintext wipe does now.** A plaintext store (`node:sqlite`, or plain `better-sqlite3` on the
 Android host) opens with `PRAGMA secure_delete = ON`, so SQLite overwrites deleted rows with zeros instead
-of leaving them in free pages and freed cell space. After `wipeAll()` the wipe checkpoints the write-ahead
-log into `loam.db` and truncates it, so a copy of the database file taken after the reset no longer holds
-the deleted text (a test checks the file bytes). That is still **not** secure erasure on flash: the zeros
+of leaving them in free pages and freed cell space. That only covers deletes made with it on: a node
+upgraded from a build without it still has the rows it deleted before (expired messages, removed
+channels) in free pages. So after `wipeAll()` the wipe runs `VACUUM`, which rebuilds the file from the
+live rows alone (cheap, since the tables are empty by then), then checkpoints the write-ahead log into
+`loam.db` and truncates it, so a copy of the database file taken after the reset no longer holds the
+deleted text, whenever it was deleted (tests check the file bytes, including after an older build's
+deletes). A wipe interrupted and finished at boot deletes the database files instead. That is still **not** secure erasure on flash: the zeros
 are written to new blocks, and the flash translation layer may keep the old ones until it reuses them, so
 someone who reads the raw chip can still find older copies, as with the WAL frames written before the
 reset. Encryption at rest is still the answer for that. The cost is small: the pragma only adds zeroing to
