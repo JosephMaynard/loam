@@ -656,9 +656,11 @@ function writeConfigFile(next) {
 
 rnBridge.channel.on('loam-model-set-active', (payload) => {
   const requestId = payload && payload.requestId;
-  const reply = (ok, error) => {
+  // `errorCode` names a known failure for the host app's catalog (src/lib/host-errors.ts); `error` is the English
+  // detail, shown only when there is no code (an unexpected exception).
+  const reply = (ok, error, errorCode) => {
     try {
-      rnBridge.channel.post('loam-model-set-active-result', { requestId: requestId, ok: ok, error: error });
+      rnBridge.channel.post('loam-model-set-active-result', { requestId: requestId, ok: ok, error: error, errorCode: errorCode });
     } catch (err) {
       // RN side isn't listening (screen unmounted mid-request) — nothing more to do.
     }
@@ -672,7 +674,7 @@ rnBridge.channel.on('loam-model-set-active', (payload) => {
       onDevice = Object.assign({}, current.llm && current.llm.onDevice, { enabled: false });
     } else if (payload && payload.action === 'set') {
       if (!isValidSetPayload(payload)) {
-        reply(false, 'Invalid model configuration (path/model/contextSize out of range).');
+        reply(false, 'Invalid model configuration (path/model/contextSize out of range).', 'invalid_model_config');
         return;
       }
       onDevice = Object.assign({}, current.llm && current.llm.onDevice, {
@@ -686,7 +688,7 @@ rnBridge.channel.on('loam-model-set-active', (payload) => {
         onDevice.contextSize = payload.contextSize;
       }
     } else {
-      reply(false, 'Unknown action.');
+      reply(false, 'Unknown action.', 'unknown_request');
       return;
     }
 
@@ -697,7 +699,7 @@ rnBridge.channel.on('loam-model-set-active', (payload) => {
     } else if (outcome === 'failed') {
       // Definite failure BEFORE the rename — config.json is untouched. Report it so the model-manager
       // conditionally rolls its local change back rather than believing it committed.
-      reply(false, 'Could not durably save the model configuration; the previous configuration is unchanged.');
+      reply(false, 'Could not durably save the model configuration; the previous configuration is unchanged.', 'model_config_save_failed');
     } else {
       // 'indeterminate': the new config is visible but its survival across power loss is unconfirmed. Do
       // NOT claim durable success (the model-manager would treat it as committed) and do NOT report a plain
@@ -950,19 +952,22 @@ rnBridge.channel.on('loam-db-set-mode-hint', function (payload) {
   var mode = payload && payload.mode;
   var ok = false;
   var error;
+  var errorCode;
   try {
     if (DB_ENCRYPTION_MODES.indexOf(mode) === -1) {
       error = 'Unknown or missing mode.';
+      errorCode = 'unknown_request';
     } else if (writeDbModeHint(mode)) {
       ok = true;
     } else {
       error = 'Could not persist the mode hint.';
+      errorCode = 'mode_hint_save_failed';
     }
   } catch (err) {
     error = String((err && err.message) || err);
   }
   try {
-    rnBridge.channel.post('loam-db-set-mode-hint-result', { requestId: requestId, ok: ok, error: error });
+    rnBridge.channel.post('loam-db-set-mode-hint-result', { requestId: requestId, ok: ok, error: error, errorCode: errorCode });
   } catch (postErr) {
     // RN side isn't listening — nothing more to do.
   }
@@ -1054,7 +1059,7 @@ rnBridge.channel.on('loam-link-code', function (payload) {
       if (!err && status === 200 && json && typeof json.code === 'string' && typeof json.expiresAt === 'number') {
         reply({ ok: true, code: json.code, expiresAt: json.expiresAt });
       } else {
-        reply({ ok: false, error: err ? err.message : 'The host answered ' + status });
+        reply(err ? { ok: false, error: err.message } : { ok: false, error: 'The host answered ' + status, errorCode: 'host_status', status: status });
       }
     });
   } catch (err) {
@@ -1079,7 +1084,7 @@ rnBridge.channel.on('loam-emergency-reset', function (payload) {
   }
   var reset = global.__loamEmergencyReset;
   if (typeof reset !== 'function') {
-    reply({ ok: false, error: 'The host is not running yet, so there is nothing to reset.' });
+    reply({ ok: false, error: 'The host is not running yet, so there is nothing to reset.', errorCode: 'host_not_running' });
     return;
   }
   Promise.resolve()
@@ -1105,6 +1110,7 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
         requestId: requestId,
         ok: false,
         error: 'A start-fresh recovery is already in progress.',
+        errorCode: 'start_fresh_in_progress',
       });
     } catch (postErr) {
       // RN side isn't listening — nothing more to do.
@@ -1153,11 +1159,13 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
         ? 'The reset could NOT be confirmed and MAY still take effect on the next app restart: do NOT ' +
           'assume it was cancelled. Restart the app to let it complete, or check the database state before retrying.'
         : 'The reset was not scheduled: nothing was written to disk. It is safe to try again.';
+    var errorCode = outcome === 'indeterminate' ? 'start_fresh_indeterminate' : 'start_fresh_not_scheduled';
     try {
       rnBridge.channel.post('loam-db-start-fresh-result', {
         requestId: requestId,
         ok: false,
         error: error,
+        errorCode: errorCode,
       });
     } catch (postErr) {
       // RN side isn't listening — nothing more to do.
@@ -1231,6 +1239,7 @@ rnBridge.channel.on('loam-db-unlock', function (payload) {
         requestId: requestId,
         ok: false,
         error: 'An unlock retry is already in progress.',
+        errorCode: 'unlock_in_progress',
       });
     } catch (postErr) {
       // RN side isn't listening — nothing more to do.

@@ -11,6 +11,7 @@ import {
   type HotspotCredentials,
 } from '../../modules/loam-hotspot';
 import { awaitWithin } from '@/lib/await-within';
+import { hotspotError, hotspotErrorKey } from '@/lib/hotspot-errors';
 import {
   eligibleHotspotCandidates,
   mergeHotspotCandidates,
@@ -121,7 +122,7 @@ function startWithTimeout(): Promise<HotspotCredentials> {
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       timedOut = true;
-      reject(new Error(t('hotspot.startTimeout')));
+      reject(hotspotError('ERR_HOTSPOT_TIMEOUT', 'hotspot start timed out'));
     }, START_TIMEOUT_MS);
   });
 
@@ -237,10 +238,9 @@ export async function ensureHotspot(): Promise<void> {
     void trackHotspotAddress(myGen);
   } catch (error) {
     if (myGen === generation) {
-      publish({
-        phase: 'error',
-        error: error instanceof Error ? error.message : String(error),
-      });
+      // The native message is English and meant for logcat; the operator reads the coded catalog text.
+      console.warn(`[loam-hotspot] start failed: ${error instanceof Error ? error.message : String(error)}`);
+      publish({ phase: 'error', error: t(hotspotErrorKey(error, androidApiLevel(Platform.Version))) });
     }
   } finally {
     // Only clear the flag if we're still the current attempt — a newer start owns it otherwise.

@@ -501,8 +501,10 @@ Module** (Kotlin, `LoamHotspotModule.kt`) exposing `startHotspot(): Promise<{ssi
 `stopHotspot(): void`. `startHotspot` calls `WifiManager.startLocalOnlyHotspot(callback, handler)` and,
 on `onStarted`, resolves with the reservation's credentials — `SoftApConfiguration.getSsid()`/
 `getPassphrase()` on API 30+, falling back to `WifiConfiguration.SSID`/`preSharedKey` on older. It holds
-the single reservation, resolves each promise exactly once, and rejects (code `ERR_HOTSPOT`) with a
-readable reason on `onFailed`, a `SecurityException` (missing permission), or any other failure — so the
+the single reservation, resolves each promise exactly once, and rejects with an `ERR_HOTSPOT_*` code
+(busy, unavailable, no credentials, no channel, incompatible mode, tethering disallowed, permission,
+failed; `src/lib/hotspot-errors.ts` maps each to the host catalog, and the English message is for logcat
+only) on `onFailed`, a `SecurityException` (missing permission), or any other failure — so the
 emulator's no-WiFi failure surfaces cleanly instead of hanging. The JS wrapper
 (`modules/loam-hotspot/index.ts`) loads the module with `requireOptionalNativeModule`, so importing it
 off-Android yields `null` rather than a crash. `src/hooks/use-hotspot.ts` requests the runtime

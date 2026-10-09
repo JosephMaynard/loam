@@ -24,7 +24,7 @@ const {
   recordPending,
   pendingProtectedUris,
   POINTER_PENDING_ID,
-  MODEL_LIST_UNREADABLE_MESSAGE,
+  modelListUnreadableMessage,
 } = await import("@/lib/model-manager-store");
 type PendingAction = import("@/lib/model-manager-store").PendingAction;
 type ModelManagerState = import("@/lib/model-manager-store").ModelManagerState;
@@ -457,7 +457,7 @@ describe("readModelManagerState — discriminated ok/empty/error (P1-4)", () => 
     const disposition = dispositionFromLoad(loaded);
     expect(disposition.canSweep).toBe(false);
     expect(disposition.controlsBlocked).toBe(true);
-    expect(disposition.message).toBe(MODEL_LIST_UNREADABLE_MESSAGE);
+    expect(disposition.message).toBe(modelListUnreadableMessage());
 
     // No model file was removed (the store never sweeps; this asserts the read path left them intact).
     clearFileSystemFailure(STATE_PATH);

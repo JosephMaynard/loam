@@ -25,7 +25,8 @@
 
 import type { ActiveModelResult, SetActiveModelRequest } from './model-manager-bridge';
 import type { DownloadedModel, ModelManagerState, MutateResult, PendingAction } from './model-manager-store';
-import { MODEL_LIST_UNREADABLE_MESSAGE, POINTER_PENDING_ID, recordPending } from './model-manager-store';
+import { t } from './i18n';
+import { modelListUnreadableMessage, POINTER_PENDING_ID, recordPending } from './model-manager-store';
 
 /** The store + bridge + filesystem operations each transaction needs, injected so the logic is pure
  * and testable. `model-manager.tsx` binds these to the real implementations (the bridge fns are
@@ -85,8 +86,6 @@ export type ModelActionResult = {
   message: string;
 };
 
-const PERSIST_FAILED_MESSAGE =
-  "Couldn't save that change to the model list: it may not survive an app restart. Try again.";
 
 // ---------------------------------------------------------------------------
 // Global operation mutex — serializes the ENTIRE persist → bridge → rollback transaction.
@@ -139,7 +138,7 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
     };
   });
   if (!persisted) {
-    return { kind: 'persist-failed', message: PERSIST_FAILED_MESSAGE };
+    return { kind: 'persist-failed', message: t('model.persistFailed') };
   }
 
   // At PERSIST, before the fallible bridge: synchronously abandon an in-flight load
@@ -160,13 +159,13 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
       return {
         kind: 'ambiguous',
         state: cleared.state,
-        message: `${model.displayName} is now the active model, but its pending record couldn't be cleared: it'll be reconciled next time you open the model manager. Restart the LOAM host app to load it.`,
+        message: t('model.activatedPendingKept', { name: model.displayName }),
       };
     }
     return {
       kind: 'ok',
       state: cleared.state,
-      message: `${model.displayName} is now the active model. Restart the LOAM host app to load it.`,
+      message: t('model.activated', { name: model.displayName }),
     };
   }
   if (result.status === 'failed') {
@@ -176,8 +175,8 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
       pendingId: POINTER_PENDING_ID,
       failedMessage: (rolledBack) =>
         rolledBack
-          ? `Couldn't set ${model.displayName} active: the host app's config couldn't be refreshed (${result.error ?? 'unknown error'}). No change was made.`
-          : `Couldn't set ${model.displayName} active, and the rollback also failed to save: local state and the host app's config may now disagree. Restart the LOAM host app.`,
+          ? t('model.activateFailed', { name: model.displayName, error: result.error ?? t('common.unknownError') })
+          : t('model.rollbackFailed'),
     });
     // Definite failure → rolled back to the PREVIOUS model. Synchronize the engine to the DISK-CONFIRMED
     // result: if B was still loaded/loading it is now released/abandoned; if the restored model is
@@ -197,7 +196,7 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
   return {
     kind: 'ambiguous',
     state,
-    message: `Set ${model.displayName} active, but couldn't confirm the host app applied it (${result.error ?? 'no response'}). It'll be reconciled next time you open the model manager or restart the host.`,
+    message: t('model.activateUnconfirmed', { name: model.displayName, error: result.error ?? t('hostError.noResponse') }),
   };
 }
 
@@ -218,7 +217,7 @@ export async function performDeactivate(deps: ModelActionDeps): Promise<ModelAct
     };
   });
   if (!persisted) {
-    return { kind: 'persist-failed', message: PERSIST_FAILED_MESSAGE };
+    return { kind: 'persist-failed', message: t('model.persistFailed') };
   }
 
   const result = await deps.clearActiveModel();
@@ -232,14 +231,13 @@ export async function performDeactivate(deps: ModelActionDeps): Promise<ModelAct
       return {
         kind: 'ambiguous',
         state: cleared.state,
-        message:
-          "On-device model deactivated, but its pending record couldn't be cleared: it'll be reconciled next time you open the model manager. Restart the LOAM host app to apply it.",
+        message: t('model.deactivatedPendingKept'),
       };
     }
     return {
       kind: 'ok',
       state: cleared.state,
-      message: 'On-device model deactivated. Restart the LOAM host app to apply it.',
+      message: t('model.deactivated'),
     };
   }
   if (result.status === 'failed') {
@@ -249,8 +247,8 @@ export async function performDeactivate(deps: ModelActionDeps): Promise<ModelAct
       pendingId: POINTER_PENDING_ID,
       failedMessage: (rolledBack) =>
         rolledBack
-          ? `Couldn't deactivate the on-device model: the host app's config couldn't be refreshed (${result.error ?? 'unknown error'}). No change was made.`
-          : `Couldn't deactivate the on-device model, and the rollback also failed to save: local state and the host app's config may now disagree. Restart the LOAM host app.`,
+          ? t('model.deactivateFailed', { error: result.error ?? t('common.unknownError') })
+          : t('model.rollbackFailed'),
     });
     // Rolled back to the PREVIOUS model → synchronize the engine to that disk-confirmed target (target-aware:
     // if it was the loaded model all along, it is left untouched).
@@ -267,7 +265,7 @@ export async function performDeactivate(deps: ModelActionDeps): Promise<ModelAct
   return {
     kind: 'ambiguous',
     state,
-    message: `Deactivated the on-device model, but couldn't confirm the host app applied it (${result.error ?? 'no response'}). It'll be reconciled next time you open the model manager or restart the host.`,
+    message: t('model.deactivateUnconfirmed', { error: result.error ?? t('hostError.noResponse') }),
   };
 }
 
@@ -332,7 +330,7 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
     };
   });
   if (!persisted) {
-    return { kind: 'persist-failed', message: PERSIST_FAILED_MESSAGE };
+    return { kind: 'persist-failed', message: t('model.persistFailed') };
   }
 
   if (wasActive) {
@@ -373,8 +371,8 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
         kind: 'rolled-back',
         state: rolled,
         message: rolledBack
-          ? `Couldn't delete ${model.displayName}: the host app's active-model config couldn't be cleared (${result.error ?? 'unknown error'}). No change was made.`
-          : `Couldn't delete ${model.displayName}, and the rollback also failed to save: local state and the host app's config may now disagree. Restart the LOAM host app.`,
+          ? t('model.deleteFailed', { name: model.displayName, error: result.error ?? t('common.unknownError') })
+          : t('model.rollbackFailed'),
       };
     }
     if (result.status === 'timeout') {
@@ -388,7 +386,7 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
       return {
         kind: 'ambiguous',
         state,
-        message: `Removed ${model.displayName} from the list, but couldn't confirm the host app released it (${result.error ?? 'no response'}), so its file was kept for now. It'll be reconciled next time you open the model manager or restart the host.`,
+        message: t('model.deleteUnconfirmed', { name: model.displayName, error: result.error ?? t('hostError.noResponse') }),
       };
     }
     // Confirmed `ok` — the launcher released the file. Commit the actor to "no active model" FIRST (this
@@ -433,8 +431,8 @@ async function commitByteDeletion(
       state: writeAheadState,
       message:
         released === 'poisoned'
-          ? `Removed ${model.displayName} from the list, but the on-device engine needs a restart before its file can be safely deleted: it'll be cleared after you restart the LOAM host app.`
-          : `Removed ${model.displayName} from the list; its file will be deleted once the on-device engine finishes releasing it (reconciled next time you open the model manager or restart the host).`,
+          ? t('model.deleteNeedsRestart', { name: model.displayName })
+          : t('model.deleteReleasing', { name: model.displayName }),
     };
   }
   try {
@@ -443,7 +441,10 @@ async function commitByteDeletion(
     return {
       kind: 'ambiguous',
       state: writeAheadState,
-      message: `Removed ${model.displayName} from the list, but its file couldn't be deleted (${error instanceof Error ? error.message : String(error)}): it'll be retried next time you open the model manager.`,
+      message: t('model.deleteFileFailed', {
+        name: model.displayName,
+        error: error instanceof Error ? error.message : String(error),
+      }),
     };
   }
   const cleared = await clearPendingEntry(deps, `delete:${model.uri}`);
@@ -451,10 +452,10 @@ async function commitByteDeletion(
     return {
       kind: 'ambiguous',
       state: cleared.state,
-      message: `Deleted ${model.displayName}'s file, but its pending record couldn't be cleared: it'll be reconciled next time you open the model manager.`,
+      message: t('model.deletedPendingKept', { name: model.displayName }),
     };
   }
-  return { kind: 'ok', state: cleared.state, message: `${model.displayName} deleted.` };
+  return { kind: 'ok', state: cleared.state, message: t('model.deleted', { name: model.displayName }) };
 }
 
 /**
@@ -663,7 +664,7 @@ export function reconcilePendingActions(deps: ModelActionDeps): Promise<Reconcil
     // destructive controls, and shows the recovery banner — mirroring the direct-load `error` path.
     const { state: initial, persisted } = await deps.mutate((current) => current);
     if (!persisted) {
-      return { state: initial, settled: false, unreadable: true, message: MODEL_LIST_UNREADABLE_MESSAGE };
+      return { state: initial, settled: false, unreadable: true, message: modelListUnreadableMessage() };
     }
     const pending = initial.pending ?? [];
     if (pending.length === 0) {
@@ -680,7 +681,7 @@ export function reconcilePendingActions(deps: ModelActionDeps): Promise<Reconcil
       message:
         remaining.length === 0
           ? undefined
-          : `${remaining.length} change${remaining.length === 1 ? '' : 's'} still pending: the host app is unreachable. They'll retry the next time you open this.`,
+          : t('model.pendingRemaining', { n: remaining.length }),
     };
   });
 }

@@ -5,6 +5,7 @@
  */
 import { addOwnListener } from './bridge-listener';
 import type { BridgeChannel } from './db-encryption';
+import { hostErrorText, hostNoResponseText } from './host-errors';
 
 export type EmergencyResetResult =
   /**
@@ -76,7 +77,15 @@ export function requestEmergencyReset(channel: BridgeChannel, timeoutMs = DEFAUL
 
     const onResult = (payload: unknown): void => {
       const result = payload as
-        | { requestId?: unknown; ok?: unknown; complete?: unknown; keyClear?: unknown; journaled?: unknown; error?: unknown }
+        | {
+            requestId?: unknown;
+            ok?: unknown;
+            complete?: unknown;
+            keyClear?: unknown;
+            journaled?: unknown;
+            error?: unknown;
+            errorCode?: unknown;
+          }
         | undefined;
       if (!result || result.requestId !== requestId) {
         return;
@@ -90,12 +99,12 @@ export function requestEmergencyReset(channel: BridgeChannel, timeoutMs = DEFAUL
               // Only an explicit false: an answer without it keeps the reopen-to-finish screen, as before.
               journaled: result.journaled !== false,
             }
-          : { ok: false, error: typeof result.error === 'string' ? result.error : 'unknown error' },
+          : { ok: false, error: hostErrorText(result) },
       );
     };
 
     const timer = setTimeout(() => {
-      finish({ ok: false, error: 'The host did not answer in time.' });
+      finish({ ok: false, error: hostNoResponseText() });
     }, timeoutMs);
 
     const removeListener = addOwnListener(channel, 'loam-emergency-reset-result', onResult);

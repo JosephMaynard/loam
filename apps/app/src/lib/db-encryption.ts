@@ -14,6 +14,8 @@ import * as Crypto from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
 
 import { addOwnListener, type BridgeSubscription } from './bridge-listener';
+import { hostErrorText, hostNoResponseText } from './host-errors';
+import { t } from './i18n';
 
 export type DbEncryptionMode = 'off' | 'ephemeral' | 'persistent' | 'passphrase';
 
@@ -206,7 +208,7 @@ export async function setDbEncryptionMode(mode: DbEncryptionMode): Promise<SetDb
     await SecureStore.setItemAsync(MODE_ITEM, mode);
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: t('hostError.secureStore', { error: err instanceof Error ? err.message : String(err) }) };
   }
 }
 
@@ -259,7 +261,8 @@ export async function clearStoredPassphrase(): Promise<ClearDbKeysResult> {
   // The WHOLE forget runs under the passphrase-state lock so a confirmation can't be paused mid-way across
   // this deletion and then write the "set" marker back after we've reported it gone.
   return runPassphraseExclusive(async () => {
-    const errors: string[] = [];
+    // The operator sees which items failed, in their language; the English detail goes to the log.
+    const failedItems: string[] = [];
 
     // Invalidate every outstanding boot attempt: without this, a delayed migration ack for an in-flight
     // attempt could re-create the "set" marker moments after Forget reported it gone. (Under the lock a
@@ -273,22 +276,27 @@ export async function clearStoredPassphrase(): Promise<ClearDbKeysResult> {
       try {
         await SecureStore.deleteItemAsync(item);
       } catch (err) {
-        errors.push(`delete ${item} failed: ${err instanceof Error ? err.message : String(err)}`);
+        failedItems.push(item);
+        console.warn(`[loam-db] delete ${item} failed: ${err instanceof Error ? err.message : String(err)}`);
         continue; // no point verifying a delete that itself threw
       }
       try {
         const remaining = await SecureStore.getItemAsync(item);
         if (remaining !== null) {
-          errors.push(`${item} is still present after delete`);
+          failedItems.push(item);
+          console.warn(`[loam-db] ${item} is still present after delete`);
         }
       } catch (err) {
         // A failed verification READ is not proof the item is gone — surface it as its own failure rather
         // than reporting a verified success.
-        errors.push(`verifying ${item} failed: ${err instanceof Error ? err.message : String(err)}`);
+        failedItems.push(item);
+        console.warn(`[loam-db] verifying ${item} failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
-    return errors.length > 0 ? { ok: false, error: errors.join('; ') } : { ok: true };
+    return failedItems.length > 0
+      ? { ok: false, error: t('hostError.secureStore', { error: failedItems.join(', ') }) }
+      : { ok: true };
   });
 }
 
@@ -408,28 +416,34 @@ export function clearStoredDbKeys(): Promise<ClearDbKeysResult> {
 }
 
 async function clearStoredDbKeysUnlocked(): Promise<ClearDbKeysResult> {
-  const errors: string[] = [];
+  // The operator sees which items failed, in their language; the English detail goes to the log.
+  const failedItems: string[] = [];
 
   for (const item of [DEVICE_SECRET_ITEM, PERSISTENT_KEY_ITEM]) {
     try {
       await SecureStore.deleteItemAsync(item);
     } catch (err) {
-      errors.push(`delete ${item} failed: ${err instanceof Error ? err.message : String(err)}`);
+      failedItems.push(item);
+      console.warn(`[loam-db] delete ${item} failed: ${err instanceof Error ? err.message : String(err)}`);
       continue; // no point verifying a delete that itself threw
     }
     try {
       const remaining = await SecureStore.getItemAsync(item);
       if (remaining !== null) {
-        errors.push(`${item} is still present after delete`);
+        failedItems.push(item);
+        console.warn(`[loam-db] ${item} is still present after delete`);
       }
     } catch (err) {
       // A failed verification READ is not proof the item is still there — but it's also not proof it's
       // gone, so it can't be reported as a verified success either. Surface it as its own failure.
-      errors.push(`verifying ${item} failed: ${err instanceof Error ? err.message : String(err)}`);
+      failedItems.push(item);
+      console.warn(`[loam-db] verifying ${item} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  return errors.length > 0 ? { ok: false, error: errors.join('; ') } : { ok: true };
+  return failedItems.length > 0
+    ? { ok: false, error: t('hostError.secureStore', { error: failedItems.join(', ') }) }
+    : { ok: true };
 }
 
 /** The stored device-key items, exactly as they were (null = absent), so setup can put them back. */
@@ -777,15 +791,15 @@ export function requestDbStartFresh(
     };
 
     const onResult = (payload: unknown): void => {
-      const result = payload as { requestId?: unknown; ok?: unknown; error?: unknown } | undefined;
+      const result = payload as { requestId?: unknown; ok?: unknown; error?: unknown; errorCode?: unknown } | undefined;
       if (!result || result.requestId !== requestId) {
         return;
       }
-      finish({ ok: result.ok === true, error: typeof result.error === 'string' ? result.error : undefined });
+      finish(result.ok === true ? { ok: true } : { ok: false, error: hostErrorText(result) });
     };
 
     const timer = setTimeout(() => {
-      finish({ ok: false, error: 'The embedded host did not respond (it may not be running yet).' });
+      finish({ ok: false, error: hostNoResponseText() });
     }, timeoutMs);
 
     const removeListener = addOwnListener(channel, 'loam-db-start-fresh-result', onResult);
@@ -830,15 +844,15 @@ export function requestDbUnlock(channel: BridgeChannel, timeoutMs = 5000): Promi
     };
 
     const onResult = (payload: unknown): void => {
-      const result = payload as { requestId?: unknown; ok?: unknown; error?: unknown } | undefined;
+      const result = payload as { requestId?: unknown; ok?: unknown; error?: unknown; errorCode?: unknown } | undefined;
       if (!result || result.requestId !== requestId) {
         return;
       }
-      finish({ ok: result.ok === true, error: typeof result.error === 'string' ? result.error : undefined });
+      finish(result.ok === true ? { ok: true } : { ok: false, error: hostErrorText(result) });
     };
 
     const timer = setTimeout(() => {
-      finish({ ok: false, error: 'The embedded host did not respond (it may not be running yet).' });
+      finish({ ok: false, error: hostNoResponseText() });
     }, timeoutMs);
 
     const removeListener = addOwnListener(channel, 'loam-db-unlock-result', onResult);
@@ -885,15 +899,15 @@ export function setDbModeHint(channel: BridgeChannel, mode: DbEncryptionMode, ti
     };
 
     const onResult = (payload: unknown): void => {
-      const result = payload as { requestId?: unknown; ok?: unknown; error?: unknown } | undefined;
+      const result = payload as { requestId?: unknown; ok?: unknown; error?: unknown; errorCode?: unknown } | undefined;
       if (!result || result.requestId !== requestId) {
         return;
       }
-      finish({ ok: result.ok === true, error: typeof result.error === 'string' ? result.error : undefined });
+      finish(result.ok === true ? { ok: true } : { ok: false, error: hostErrorText(result) });
     };
 
     const timer = setTimeout(() => {
-      finish({ ok: false, error: 'The embedded host did not respond (it may not be running yet).' });
+      finish({ ok: false, error: hostNoResponseText() });
     }, timeoutMs);
 
     const removeListener = addOwnListener(channel, 'loam-db-set-mode-hint-result', onResult);
@@ -1049,7 +1063,7 @@ async function applyDbModeChangeLocked(
   if (previous === DB_ENCRYPTION_MODE_READ_ERROR) {
     return {
       applied: false,
-      error: 'Could not read the current encryption setting (a device security-store error). The change was NOT applied.',
+      error: t('encryption.modeReadFailedNotApplied'),
     };
   }
 

@@ -26,6 +26,7 @@
 // Because nodejs-mobile can't restart its runtime in-process (see index.tsx), this takes effect the
 // NEXT time the app (re)starts the embedded server — the caller is expected to say so in the UI.
 import { addOwnListener, type BridgeSubscription } from './bridge-listener';
+import { hostErrorText, hostNoResponseText } from './host-errors';
 
 export interface BridgeChannel {
   // Returns RN's EventSubscription at runtime (see bridge-listener.ts); `void` covers test doubles.
@@ -62,14 +63,13 @@ export type ActiveModelResult =
   | { status: 'failed'; error?: string }
   | { status: 'timeout'; error?: string };
 
-type ResultPayload = { requestId?: unknown; ok?: unknown; error?: unknown };
+type ResultPayload = { requestId?: unknown; ok?: unknown; error?: unknown; errorCode?: unknown };
 
 /** How many times a timed-out (ack-lost) round trip is retried before giving up as "couldn't confirm".
  * Bounded so a genuinely-dead launcher can't loop forever; safe to retry because the underlying
  * launcher writes (`llm.onDevice` set/clear) are idempotent — writing the same value again is a no-op. */
 export const MAX_BRIDGE_ATTEMPTS = 3;
 
-const TIMEOUT_ERROR = 'The embedded host did not respond (it may not be running yet).';
 
 /** Correlate a single request/result round trip over the channel, with a timeout so an old/missing
  * launcher build can't hang the UI forever. Resolves `'timeout'` on ack loss (AMBIGUOUS — see
@@ -100,14 +100,13 @@ function roundTrip(
       if (!result || result.requestId !== requestId) {
         return;
       }
-      const error = typeof result.error === 'string' ? result.error : undefined;
-      finish(result.ok === true ? { status: 'ok' } : { status: 'failed', error });
+      finish(result.ok === true ? { status: 'ok' } : { status: 'failed', error: hostErrorText(result) });
     };
 
     const timer = setTimeout(() => {
       // Ack loss / no response — AMBIGUOUS, not a confirmed failure (the config.json write may already
       // have landed). Reported as its own status so the caller never rolls back on it.
-      finish({ status: 'timeout', error: TIMEOUT_ERROR });
+      finish({ status: 'timeout', error: hostNoResponseText() });
     }, timeoutMs);
 
     const removeListener = addOwnListener(channel, 'loam-model-set-active-result', onResult);
@@ -135,7 +134,7 @@ async function roundTripWithRetry(
   timeoutMs: number,
   maxAttempts: number,
 ): Promise<ActiveModelResult> {
-  let last: ActiveModelResult = { status: 'timeout', error: TIMEOUT_ERROR };
+  let last: ActiveModelResult = { status: 'timeout', error: hostNoResponseText() };
   for (let attempt = 0; attempt < Math.max(1, maxAttempts); attempt += 1) {
     const result = await roundTrip(channel, payload, timeoutMs);
     if (result.status !== 'timeout') {

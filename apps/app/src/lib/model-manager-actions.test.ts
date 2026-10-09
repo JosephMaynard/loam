@@ -28,7 +28,7 @@ import {
 } from "@/lib/model-manager-actions";
 import {
   loadModelManagerState,
-  MODEL_LIST_UNREADABLE_MESSAGE,
+  modelListUnreadableMessage,
   mutateModelManagerState,
   POINTER_PENDING_ID,
 } from "@/lib/model-manager-store";
@@ -824,7 +824,7 @@ describe("reconcile refuses to settle (or let the caller sweep) when its state r
 
     expect(result.unreadable).toBe(true);
     expect(result.settled).toBe(false);
-    expect(result.message).toBe(MODEL_LIST_UNREADABLE_MESSAGE);
+    expect(result.message).toBe(modelListUnreadableMessage());
     // Bailed BEFORE the bridge/file — the "delete every model" vector is closed.
     expect(clear).not.toHaveBeenCalled();
     expect(deleteFile).not.toHaveBeenCalled();

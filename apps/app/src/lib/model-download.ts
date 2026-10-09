@@ -7,6 +7,9 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { sha256 } from 'js-sha256';
 
+import { formatBytes } from './format-bytes';
+import { t } from './i18n';
+
 /** Where downloaded model files live — inside this app's own sandboxed document directory. */
 export const MODELS_DIR = `${FileSystem.documentDirectory}models/`;
 
@@ -136,17 +139,15 @@ export async function downloadModel(
   const finalUri = `${MODELS_DIR}${fileName}`;
   const destUri = `${finalUri}${PARTIAL_SUFFIX}`;
   if (!isWithinModelsDir(destUri) || !isWithinModelsDir(finalUri)) {
-    return { ok: false, error: 'Refusing to download: the resolved file name would escape the models directory.' };
+    return { ok: false, error: t('model.errOutsideDir') };
   }
   if (signal?.aborted) {
-    return { ok: false, error: 'Cancelled before the download started.' };
+    return { ok: false, error: t('model.errCancelledBeforeStart') };
   }
 
   /** Uniform message when `maxBytes` is breached — the file was/would be too large for the
    * free space that must remain after headroom. */
-  const overLimitError = () =>
-    `The download exceeded the ${maxBytes} bytes of free space available (after reserving headroom) and ` +
-    'was stopped before it could fill the device.';
+  const overLimitError = () => t('model.errTooLarge', { size: formatBytes(maxBytes ?? null) });
 
   // Set once the download's declared or written size crosses `maxBytes`. Checked BEFORE the
   // generic cancel/`!result` handling below so the failure reports the size limit, not a bare "cancelled".
@@ -190,17 +191,17 @@ export async function downloadModel(
   }
   if (!result || signal?.aborted) {
     await safeDelete(destUri);
-    return { ok: false, error: 'The download was cancelled.' };
+    return { ok: false, error: t('model.errCancelled') };
   }
   if (result.status >= 400) {
     await safeDelete(destUri);
-    return { ok: false, error: `Server returned HTTP ${result.status}.` };
+    return { ok: false, error: t('model.errHttp', { status: result.status }) };
   }
 
   // `size` is always present on an existing-file result — no option needed to request it.
   const info = await FileSystem.getInfoAsync(destUri);
   if (!info.exists || info.isDirectory) {
-    return { ok: false, error: 'The downloaded file is missing.' };
+    return { ok: false, error: t('model.errMissing') };
   }
   const sizeBytes = info.size;
 
@@ -215,9 +216,7 @@ export async function downloadModel(
     await safeDelete(destUri);
     return {
       ok: false,
-      error:
-        `Downloaded file size (${sizeBytes} bytes) doesn't match the expected ${expectedSizeBytes} ` +
-        'bytes: the download may be truncated, or the upstream file changed.',
+      error: t('model.errSizeMismatch', { actual: sizeBytes, expected: expectedSizeBytes }),
     };
   }
 
@@ -237,10 +236,7 @@ export async function downloadModel(
       await safeDelete(destUri);
       return {
         ok: false,
-        error:
-          signal?.aborted
-            ? 'Verification was cancelled: the partial file was deleted.'
-            : 'SHA-256 checksum did not match (or could not be verified): the file was deleted.',
+        error: signal?.aborted ? t('model.errVerifyCancelled') : t('model.errChecksum'),
       };
     }
   }
@@ -257,7 +253,7 @@ export async function downloadModel(
     await safeDelete(destUri);
     return {
       ok: false,
-      error: `Verified download, but couldn't finalize the file (${error instanceof Error ? error.message : String(error)}).`,
+      error: t('model.errFinalize', { error: error instanceof Error ? error.message : String(error) }),
     };
   }
 
@@ -356,12 +352,12 @@ export async function deleteModelFileChecked(uri: string): Promise<void> {
   // `deleteAsync`. A corrupted persisted-state file (or a bug upstream) must not be able to make this
   // unlink an unrelated file elsewhere in the app's document directory — refuse rather than delete.
   if (!isWithinModelsDir(uri)) {
-    throw new Error(`Refusing to delete a path outside the models directory: ${uri}`);
+    throw new Error(t('model.errDeleteOutsideDir'));
   }
   await FileSystem.deleteAsync(uri, { idempotent: true });
   const info = await FileSystem.getInfoAsync(uri);
   if (info.exists) {
-    throw new Error(`Failed to delete model file: ${uri} still exists after deletion.`);
+    throw new Error(t('model.errStillThere'));
   }
 }
 
@@ -516,18 +512,18 @@ export function redactCustomSourceUrl(sourceUrl: string): string {
 export function prepareCustomModelDownload(rawUrl: string): CustomModelUrlResult {
   const trimmed = rawUrl.trim();
   if (!trimmed) {
-    return { ok: false, error: 'Enter a link to a .gguf model file.' };
+    return { ok: false, error: t('model.urlEmpty') };
   }
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
   } catch {
-    return { ok: false, error: "That doesn't look like a valid URL." };
+    return { ok: false, error: t('model.urlInvalid') };
   }
   // Require HTTPS AND an allowlisted host (see `isAllowedCustomDownloadHost`). `http:` is dropped
   // entirely for custom URLs.
   if (parsed.protocol !== 'https:') {
-    return { ok: false, error: 'Only https:// links are supported for custom models.' };
+    return { ok: false, error: t('model.urlHttps') };
   }
   // Reject userinfo BEFORE anything else trusts the host: `user:pass@huggingface.co` would otherwise
   // pass the allowlist (hostname is still `huggingface.co`) and smuggle a plaintext credential into the
@@ -535,13 +531,13 @@ export function prepareCustomModelDownload(rawUrl: string): CustomModelUrlResult
   if (parsed.username || parsed.password) {
     return {
       ok: false,
-      error: 'Remove the username/password from the link: credentials embedded in a URL are not allowed.',
+      error: t('model.urlCredentials'),
     };
   }
   if (!isAllowedCustomDownloadHost(parsed.hostname)) {
     return {
       ok: false,
-      error: `Custom downloads are limited to ${CUSTOM_DOWNLOAD_ALLOWED_HOST} (and its subdomains). Host the .gguf there, or request it be added to the catalog.`,
+      error: t('model.urlHost', { host: CUSTOM_DOWNLOAD_ALLOWED_HOST }),
     };
   }
 
@@ -554,10 +550,10 @@ export function prepareCustomModelDownload(rawUrl: string): CustomModelUrlResult
     const decodedName = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() ?? 'model') || 'model';
     guessedName = sanitizeModelFileName(decodedName);
   } catch {
-    return { ok: false, error: "That URL's file name isn't valid: try a direct link with a plain file name." };
+    return { ok: false, error: t('model.urlNameInvalid') };
   }
   if (!guessedName) {
-    return { ok: false, error: "That URL's file name isn't safe to use: try a direct link with a plain file name." };
+    return { ok: false, error: t('model.urlNameUnsafe') };
   }
 
   return {

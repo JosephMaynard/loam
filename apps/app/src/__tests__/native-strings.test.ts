@@ -1,7 +1,9 @@
 // The native screens' text lives in the catalogs (src/lib/i18n), not in the source. This pins that for the
 // files that used to carry English literals: no JSX text node, placeholder, accessibility label or Alert
-// title written in English, no long English sentence in a quoted string, and none of the phrases that were
-// moved into `en.ts` left behind. The Kotlin foreground service keeps English defaults only for a start that
+// title written in English, no long English sentence in a quoted or template string, and none of the
+// phrases that were moved into `en.ts` left behind. That covers the lib modules whose messages reach the
+// screen (model manager, downloads, encryption and launcher round trips), and the native and launcher
+// errors that now travel as codes. The Kotlin foreground service keeps English defaults only for a start that
 // carries no labels. Heuristic by design (there is no renderer in this harness); the catalogs' own parity
 // test covers the translations.
 import { readFileSync } from 'node:fs';
@@ -13,8 +15,9 @@ import { en } from '@/lib/i18n/en';
 
 const APP_ROOT = join(__dirname, '..', '..');
 
-/** The files whose user-facing text moved into the catalogs, with the catalog sections that now hold it. */
-const SOURCES: { file: string; sections: string[] }[] = [
+/** The files whose user-facing text moved into the catalogs, with the catalog sections that now hold it.
+ * `viaT: false` marks a file that names catalog keys without calling t() itself. */
+const SOURCES: { file: string; sections: string[]; viaT?: boolean }[] = [
   { file: 'src/app/index.tsx', sections: ['boot.', 'common.'] },
   { file: 'src/lib/host-service.ts', sections: ['notify.'] },
   { file: 'src/hooks/use-hotspot.ts', sections: ['hotspot.'] },
@@ -23,6 +26,18 @@ const SOURCES: { file: string; sections: string[] }[] = [
   { file: 'src/components/db-encryption-settings.tsx', sections: ['encryption.'] },
   { file: 'src/components/model-manager.tsx', sections: ['model.'] },
   { file: 'src/lib/model-download-disclosure.ts', sections: ['model.disclosure'] },
+  { file: 'src/lib/model-manager-actions.ts', sections: ['model.'] },
+  { file: 'src/lib/model-manager-store.ts', sections: ['model.listUnreadable'] },
+  { file: 'src/lib/model-download.ts', sections: ['model.err', 'model.url'] },
+  { file: 'src/lib/model-catalog.ts', sections: ['model.note'], viaT: false },
+  { file: 'src/lib/device-capabilities.ts', sections: ['model.acceleratorNote'], viaT: false },
+  { file: 'src/lib/format-bytes.ts', sections: ['common.unknown'] },
+  { file: 'src/lib/db-encryption.ts', sections: ['hostError.', 'encryption.'] },
+  { file: 'src/lib/model-manager-bridge.ts', sections: ['hostError.'], viaT: false },
+  { file: 'src/lib/emergency-reset.ts', sections: ['hostError.'], viaT: false },
+  { file: 'src/lib/link-code.ts', sections: ['hostError.'], viaT: false },
+  { file: 'src/lib/host-errors.ts', sections: ['hostError.'] },
+  { file: 'src/lib/hotspot-errors.ts', sections: ['hotspot.'], viaT: false },
 ];
 
 function read(file: string): string {
@@ -65,6 +80,19 @@ function englishSentenceLiterals(code: string): string[] {
     .flatMap((line) => [...line.matchAll(/(['"])([A-Z][a-z]+(?:\s+[A-Za-z'’]+){3,}[^'"]*)\1/g)].map((match) => match[2]));
 }
 
+/** Template literals that read as an English sentence, the form the model-manager messages used to take:
+ * a capitalised word (or a `${…}` placeholder) then three more words, on one line. */
+function englishTemplateLiterals(code: string): string[] {
+  return code
+    .split('\n')
+    .filter((line) => !line.includes('console.'))
+    .flatMap((line) =>
+      [...line.matchAll(/`((?:[A-Z][a-z]+|\$\{[^}]+\})(?:[\s,]+(?:[A-Za-z'’]+|\$\{[^}]+\})){3,}[^`]*)`/g)]
+        .map((match) => match[1])
+        .filter((text) => /[a-z]{3,}\s+[a-z]{2,}\s+[a-z]{2,}/.test(text.replace(/\$\{[^}]+\}/g, ''))),
+    );
+}
+
 /** The English catalog values (3+ words) of the given sections, as they must not appear verbatim in code. */
 function movedPhrases(sections: string[]): string[] {
   return Object.entries(en)
@@ -74,7 +102,8 @@ function movedPhrases(sections: string[]): string[] {
 }
 
 describe('native screens take their text from the catalogs', () => {
-  for (const { file, sections } of SOURCES) {
+  for (const sources of SOURCES) {
+    const { file, sections } = sources;
     describe(file, () => {
       const source = read(file);
       const code = stripComments(source);
@@ -93,6 +122,7 @@ describe('native screens take their text from the catalogs', () => {
 
       it('has no quoted English sentence left in the code', () => {
         expect(englishSentenceLiterals(code)).toEqual([]);
+        expect(englishTemplateLiterals(code)).toEqual([]);
       });
 
       it('no longer carries the phrases that moved into the catalog', () => {
@@ -100,7 +130,7 @@ describe('native screens take their text from the catalogs', () => {
         expect(leftovers).toEqual([]);
       });
 
-      it('reads its text through t()', () => {
+      it.skipIf(sources.viaT === false)('reads its text through t()', () => {
         expect(source).toMatch(/\bt\('(?:[a-zA-Z]+)\.[A-Za-z0-9]+'/);
       });
     });

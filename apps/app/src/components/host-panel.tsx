@@ -85,7 +85,7 @@ const STATUS_LABEL: Record<HostMode, Record<HostState['status'], AppCatalogKey>>
   wifi: {
     starting: 'host.starting',
     running: 'host.runningWifi',
-    stopped: 'host.notOnWifi',
+    stopped: 'host.noNetwork',
   },
 };
 

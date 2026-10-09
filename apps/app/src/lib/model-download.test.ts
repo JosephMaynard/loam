@@ -114,7 +114,7 @@ describe("deleteModelFileChecked — strict, verified deletion (Finding 1)", () 
     // A driver quirk: delete claims success but the bytes remain. `safeDelete` would have reported done.
     vi.spyOn(fileSystemMock, "deleteAsync").mockResolvedValueOnce(undefined);
 
-    await expect(deleteModelFileChecked(target)).rejects.toThrow(/still exists/);
+    await expect(deleteModelFileChecked(target)).rejects.toThrow(/still there after deleting/);
     // The file really is still there — proving the check caught a silent no-op delete.
     expect((await fileSystemMock.getInfoAsync(target)).exists).toBe(true);
   });
@@ -126,7 +126,7 @@ describe("deleteModelFileChecked — strict, verified deletion (Finding 1)", () 
     seedFile(outside, "sensitive");
     const deleteSpy = vi.spyOn(fileSystemMock, "deleteAsync");
 
-    await expect(deleteModelFileChecked(outside)).rejects.toThrow(/outside the models directory/);
+    await expect(deleteModelFileChecked(outside)).rejects.toThrow(/outside the models folder/);
     expect(deleteSpy).not.toHaveBeenCalled();
     // The unrelated file is untouched.
     expect((await fileSystemMock.getInfoAsync(outside)).exists).toBe(true);
