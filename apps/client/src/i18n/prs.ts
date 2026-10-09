@@ -252,6 +252,11 @@ export const prs: Translation = {
   "admin.strategy": "راهبرد",
   "admin.newPassphrase": "عبارت عبور نو مدیر (حداقل ۸ حرف؛ برای نگه‌داشتن فعلی خالی بگذارید)",
   "admin.bootstrapNote": "راهبرد کود راه‌اندازی، یک کود یک‌بارمصرف را هنگام آغاز در راپورهای سرور چاپ می‌کند.",
+  "admin.bootstrapOption.firstUser": "اولین کسی که می‌پیوندد",
+  "admin.bootstrapOption.setupCode": "کود راه‌اندازی یک‌بارمصرف",
+  "admin.bootstrapOption.passphrase": "عبارت عبور",
+  "admin.bootstrapOption.hostDevice": "این دستگاه (میزبان)",
+  "admin.bootstrapOption.none": "هیچ‌کس",
   "admin.saveConfig": "ذخیرهٔ پیکربندی گره",
   "admin.saved": "ذخیره شد. کلاینت‌های وصل تغییر را زنده می‌گیرند.",
   "admin.peerUrl": "نشانی همتا (نشانی پیوستن آن)",
@@ -379,6 +384,7 @@ export const prs: Translation = {
   "avatarEditor.invalidType": "یک تصویر PNG، JPEG یا WebP انتخاب کنید.",
 
   "app.userUnrecognised": "سرور کاربر ناشناخته بازگرداند.",
+  "app.configUnrecognised": "سرور پیکربندی ناشناخته بازگرداند.",
   "app.deleteError": "حذف پیام ممکن نشد.",
   "app.editError": "ویرایش پیام ممکن نشد.",
   "app.sendError": "ارسال پیام ممکن نشد.",
@@ -398,11 +404,13 @@ export const prs: Translation = {
   "gate.pendingBody":
     "منتظرید کسی در این گره شما را راه دهد. این صفحه به‌مجرد تأیید شما تازه می‌شود.",
   "gate.inviteRefused": "این کد دعوت منقضی شده است. کد روی صفحهٔ میزبان را دوباره اسکن کنید یا همین‌جا منتظر بمانید تا اجازهٔ ورود بگیرید.",
+  "join.linkCodeOpened": "این کود QR نود LOAM دیگری را به این شبکه وصل می‌کند. کود پیوستن نیست، پس چیزی وصل نشد. شما به‌عنوان عضو پیوستید.",
   "gate.connection": "اتصال: {status}",
   "gate.needsQrTitle": "برای اتصال امن، کد QR پیوستن را سکن کنید",
   "gate.needsQrBody": "با دستگاه خود کد QR پیوستن این گره را سکن کنید. راه امن دیگری برای اتصال شدن وجود ندارد.",
 
   "confirm.deleteMessage": "این پیام حذف شود؟ این کار بیرته نمی‌شود.",
+  "confirm.deleteMessageTitle": "حذف پیام",
 
   "error.admin_required": "دسترسی مدیر ضرور است",
   "error.admin_claim_disabled": "به‌دست‌آوردن دسترسی مدیر روی این گرهِ LOAM فعال نیست",
@@ -654,6 +662,8 @@ export const prs: Translation = {
   "message.emojiFieldRefused": "تنها با ایموجی می‌توان واکنش نشان داد.",
   "message.copyText": "کاپی متن",
   "messageList.newMessages": "پیام‌های نو",
+  "liveRegion.newMessage": "پیام نو از {name}",
+  "liveRegion.newMessages": { one: "{n} پیام نو", other: "{n} پیام نو" },
   "thread.inChannel": "در #{name}",
   "report.done": "انجام شد",
   "settings.title": "تنظیمات",

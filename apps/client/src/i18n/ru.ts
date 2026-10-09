@@ -256,6 +256,11 @@ export const ru: Translation = {
   "admin.strategy": "Стратегия",
   "admin.newPassphrase": "Новая парольная фраза администратора (мин. 8 символов; пусто, чтобы сохранить текущую)",
   "admin.bootstrapNote": "Стратегия кода настройки печатает одноразовый код в журналах сервера при запуске.",
+  "admin.bootstrapOption.firstUser": "Первый, кто присоединится",
+  "admin.bootstrapOption.setupCode": "Одноразовый код настройки",
+  "admin.bootstrapOption.passphrase": "Парольная фраза",
+  "admin.bootstrapOption.hostDevice": "Это устройство (хост)",
+  "admin.bootstrapOption.none": "Никто",
   "admin.saveConfig": "Сохранить конфигурацию узла",
   "admin.saved": "Сохранено. Подключённые клиенты применяют изменение вживую.",
   "admin.peerUrl": "URL партнёра (его URL присоединения)",
@@ -388,6 +393,7 @@ export const ru: Translation = {
   "avatarEditor.invalidType": "Выберите изображение PNG, JPEG или WebP.",
 
   "app.userUnrecognised": "Сервер вернул нераспознанного пользователя.",
+  "app.configUnrecognised": "Сервер вернул нераспознанную конфигурацию.",
   "app.deleteError": "Не удалось удалить сообщение.",
   "app.editError": "Не удалось отредактировать сообщение.",
   "app.sendError": "Не удалось отправить сообщение.",
@@ -407,11 +413,13 @@ export const ru: Translation = {
   "gate.pendingBody":
     "Ожидаем, пока кто-нибудь на этом узле впустит вас. Этот экран обновится, как только вас одобрят.",
   "gate.inviteRefused": "Срок действия этого кода приглашения истёк. Отсканируйте код на экране хоста ещё раз или подождите здесь, пока вас впустят.",
+  "join.linkCodeOpened": "Этот QR-код подключает другой узел LOAM к этой сети. Это не код для входа, поэтому ничего не подключено. Вы присоединились как участник.",
   "gate.connection": "Соединение: {status}",
   "gate.needsQrTitle": "Отсканируйте QR-код приглашения для безопасного подключения",
   "gate.needsQrBody": "Отсканируйте QR-код приглашения этого узла своим устройством, чтобы подключиться. Другого безопасного способа нет.",
 
   "confirm.deleteMessage": "Удалить это сообщение? Это нельзя отменить.",
+  "confirm.deleteMessageTitle": "Удалить сообщение",
 
   "error.admin_required": "Требуется доступ администратора",
   "error.admin_claim_disabled": "Получение доступа администратора не включено на этом узле LOAM",
@@ -668,6 +676,13 @@ export const ru: Translation = {
   "message.emojiFieldRefused": "Реакцией может быть только эмодзи.",
   "message.copyText": "Копировать текст",
   "messageList.newMessages": "Новые сообщения",
+  "liveRegion.newMessage": "Новое сообщение от {name}",
+  "liveRegion.newMessages": {
+    one: "{n} новое сообщение",
+    few: "{n} новых сообщения",
+    many: "{n} новых сообщений",
+    other: "{n} нового сообщения",
+  },
   "thread.inChannel": "в #{name}",
   "report.done": "Готово",
   "settings.title": "Настройки",

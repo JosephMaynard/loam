@@ -251,6 +251,11 @@ export const sw: Translation = {
   "admin.strategy": "Mkakati",
   "admin.newPassphrase": "Kaulisiri mpya ya msimamizi (angalau herufi 8; acha wazi kubaki na ya sasa)",
   "admin.bootstrapNote": "Mkakati wa msimbo wa usanidi huchapisha msimbo wa matumizi moja kwenye kumbukumbu za seva wakati wa kuanza.",
+  "admin.bootstrapOption.firstUser": "Mtu wa kwanza kujiunga",
+  "admin.bootstrapOption.setupCode": "Msimbo wa usanidi wa matumizi moja",
+  "admin.bootstrapOption.passphrase": "Kaulisiri",
+  "admin.bootstrapOption.hostDevice": "Kifaa hiki (mwenyeji)",
+  "admin.bootstrapOption.none": "Hakuna mtu",
   "admin.saveConfig": "Hifadhi usanidi wa nodi",
   "admin.saved": "Imehifadhiwa. Wateja walioungana huchukua mabadiliko papo hapo.",
   "admin.peerUrl": "URL ya mwenza (URL yake ya kujiunga)",
@@ -378,6 +383,7 @@ export const sw: Translation = {
   "avatarEditor.invalidType": "Chagua picha ya PNG, JPEG au WebP.",
 
   "app.userUnrecognised": "Seva ilirudisha mtumiaji asiyetambulika.",
+  "app.configUnrecognised": "Seva ilirudisha mipangilio isiyotambulika.",
   "app.deleteError": "Imeshindwa kufuta ujumbe.",
   "app.editError": "Imeshindwa kuhariri ujumbe.",
   "app.sendError": "Imeshindwa kutuma ujumbe.",
@@ -397,11 +403,13 @@ export const sw: Translation = {
   "gate.pendingBody":
     "Unasubiri mtu kwenye nodi hii akuruhusu kuingia. Skrini hii inasasishwa mara tu unapoidhinishwa.",
   "gate.inviteRefused": "Msimbo huo wa mwaliko umeisha muda. Changanua tena msimbo ulio kwenye skrini ya mwenyeji, au subiri hapa uruhusiwe kuingia.",
+  "join.linkCodeOpened": "Msimbo huo wa QR huunganisha nodi nyingine ya LOAM na mtandao huu. Si msimbo wa kujiunga, kwa hivyo hakuna kilichounganishwa. Umejiunga kama mwanachama.",
   "gate.connection": "Muunganisho: {status}",
   "gate.needsQrTitle": "Changanua QR ya kujiunga ili kuunganisha kwa usalama",
   "gate.needsQrBody": "Changanua QR ya kujiunga ya nodi hii kwa kifaa chako ili kuunganisha. Hakuna njia nyingine salama ya kuunganisha.",
 
   "confirm.deleteMessage": "Futa ujumbe huu? Hili haliwezi kutenduliwa.",
+  "confirm.deleteMessageTitle": "Futa ujumbe",
 
   "error.admin_required": "Ufikiaji wa msimamizi unahitajika",
   "error.admin_claim_disabled": "Kupata ufikiaji wa msimamizi hakujawezeshwa kwenye nodi hii ya LOAM",
@@ -653,6 +661,8 @@ export const sw: Translation = {
   "message.emojiFieldRefused": "Emoji pekee inaweza kutumika kama mwitikio.",
   "message.copyText": "Nakili maandishi",
   "messageList.newMessages": "Ujumbe mpya",
+  "liveRegion.newMessage": "Ujumbe mpya kutoka kwa {name}",
+  "liveRegion.newMessages": { one: "ujumbe mpya {n}", other: "jumbe mpya {n}" },
   "thread.inChannel": "katika #{name}",
   "report.done": "Imekamilika",
   "settings.title": "Mipangilio",

@@ -41,7 +41,7 @@ async function requestUser(method: "POST" | "PATCH", path: string, body?: unknow
     const payload: unknown = await response.json().catch(() => undefined);
 
     if (!response.ok) {
-      const message = errorText(payload, `Request failed: ${response.status}`);
+      const message = errorText(payload, t("common.requestFailed", { status: response.status }));
       throw new Error(message);
     }
 

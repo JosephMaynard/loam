@@ -251,6 +251,11 @@ export const fa: Translation = {
   "admin.strategy": "راهبرد",
   "admin.newPassphrase": "عبارت عبور جدید مدیر (حداقل ۸ نویسه؛ برای نگه‌داشتن فعلی خالی بگذارید)",
   "admin.bootstrapNote": "راهبرد کد راه‌اندازی، یک کد یک‌بارمصرف را هنگام شروع در گزارش‌های سرور چاپ می‌کند.",
+  "admin.bootstrapOption.firstUser": "اولین کسی که می‌پیوندد",
+  "admin.bootstrapOption.setupCode": "کد راه‌اندازی یک‌بارمصرف",
+  "admin.bootstrapOption.passphrase": "عبارت عبور",
+  "admin.bootstrapOption.hostDevice": "این دستگاه (میزبان)",
+  "admin.bootstrapOption.none": "هیچ‌کس",
   "admin.saveConfig": "ذخیرهٔ پیکربندی گره",
   "admin.saved": "ذخیره شد. کلاینت‌های متصل تغییر را زنده دریافت می‌کنند.",
   "admin.peerUrl": "نشانی همتا (نشانی پیوستن آن)",
@@ -378,6 +383,7 @@ export const fa: Translation = {
   "avatarEditor.invalidType": "یک تصویر PNG، JPEG یا WebP انتخاب کنید.",
 
   "app.userUnrecognised": "سرور کاربر ناشناخته‌ای بازگرداند.",
+  "app.configUnrecognised": "سرور پیکربندی ناشناخته‌ای بازگرداند.",
   "app.deleteError": "حذف پیام ممکن نشد.",
   "app.editError": "ویرایش پیام ممکن نشد.",
   "app.sendError": "ارسال پیام ممکن نشد.",
@@ -397,11 +403,13 @@ export const fa: Translation = {
   "gate.pendingBody":
     "منتظرید کسی در این گره شما را راه دهد. این صفحه به‌محض تأیید شما به‌روز می‌شود.",
   "gate.inviteRefused": "این کد دعوت منقضی شده است. کد روی صفحهٔ میزبان را دوباره اسکن کنید یا همین‌جا منتظر بمانید تا راهتان بدهند.",
+  "join.linkCodeOpened": "این کد QR گرهٔ LOAM دیگری را به این شبکه پیوند می‌دهد. کد پیوستن نیست، پس چیزی پیوند نشد. شما به‌عنوان عضو پیوستید.",
   "gate.connection": "اتصال: {status}",
   "gate.needsQrTitle": "برای اتصال امن، کد QR پیوستن را اسکن کنید",
   "gate.needsQrBody": "با دستگاه خود کد QR پیوستن این گره را اسکن کنید. راه امن دیگری برای اتصال وجود ندارد.",
 
   "confirm.deleteMessage": "این پیام حذف شود؟ این کار قابل بازگشت نیست.",
+  "confirm.deleteMessageTitle": "حذف پیام",
 
   "error.admin_required": "دسترسی مدیر لازم است",
   "error.admin_claim_disabled": "دریافت دسترسی مدیر روی این گرهِ LOAM فعال نیست",
@@ -653,6 +661,8 @@ export const fa: Translation = {
   "message.emojiFieldRefused": "فقط با ایموجی می‌توان واکنش داد.",
   "message.copyText": "کپی متن",
   "messageList.newMessages": "پیام‌های جدید",
+  "liveRegion.newMessage": "پیام تازه از {name}",
+  "liveRegion.newMessages": { one: "{n} پیام تازه", other: "{n} پیام تازه" },
   "thread.inChannel": "در #{name}",
   "report.done": "انجام شد",
   "settings.title": "تنظیمات",

@@ -5,6 +5,7 @@ import {
   LocaleSchema,
   securityProfilePreset,
   SecurityProfileSchema,
+  type AdminBootstrapStrategy,
   type Channel,
   type FeatureFlags,
   type IdentityConfig,
@@ -17,6 +18,7 @@ import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 
 import { LOCALE_LABELS, errorText, t } from "../i18n";
+import type { CatalogKey } from "../i18n/en";
 import { fetchJson, REQUEST_TIMEOUT_MS } from "../lib/api";
 import { encryptedFetch } from "../lib/transport";
 import { AddSyncPeerControl } from "./AddSyncPeerControl";
@@ -44,6 +46,20 @@ function featureFlagLabels(): [keyof FeatureFlags, string][] {
     ["enablePresence", t("admin.flagPresence")],
     ["enableLocationSharing", t("admin.flagLocationSharing")],
   ];
+}
+
+/** Who may become the node's first admin, as people read it (the enum values are config identifiers). */
+const BOOTSTRAP_STRATEGY_LABEL_KEYS: Record<AdminBootstrapStrategy, CatalogKey> = {
+  firstUser: "admin.bootstrapOption.firstUser",
+  setupCode: "admin.bootstrapOption.setupCode",
+  passphrase: "admin.bootstrapOption.passphrase",
+  hostDevice: "admin.bootstrapOption.hostDevice",
+  none: "admin.bootstrapOption.none",
+};
+
+/** The admin bootstrap strategy's label, resolved against the active locale at render time. */
+function bootstrapStrategyLabel(strategy: AdminBootstrapStrategy): string {
+  return t(BOOTSTRAP_STRATEGY_LABEL_KEYS[strategy]);
 }
 
 /** Identity-permission toggle labels, resolved against the active locale at render time. */
@@ -507,7 +523,7 @@ export function AdminView({
                     >
                       {AdminBootstrapStrategySchema.options.map((strategy) => (
                         <option key={strategy} value={strategy}>
-                          {strategy}
+                          {bootstrapStrategyLabel(strategy)}
                         </option>
                       ))}
                     </select>

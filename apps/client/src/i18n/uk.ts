@@ -256,6 +256,11 @@ export const uk: Translation = {
   "admin.strategy": "Стратегія",
   "admin.newPassphrase": "Нова парольна фраза адміністратора (мін. 8 символів; порожньо, щоб зберегти поточну)",
   "admin.bootstrapNote": "Стратегія коду налаштування друкує одноразовий код у журналах сервера під час запуску.",
+  "admin.bootstrapOption.firstUser": "Перша особа, що приєднається",
+  "admin.bootstrapOption.setupCode": "Одноразовий код налаштування",
+  "admin.bootstrapOption.passphrase": "Парольна фраза",
+  "admin.bootstrapOption.hostDevice": "Цей пристрій (хост)",
+  "admin.bootstrapOption.none": "Ніхто",
   "admin.saveConfig": "Зберегти конфігурацію вузла",
   "admin.saved": "Збережено. Підключені клієнти отримують зміну наживо.",
   "admin.peerUrl": "URL однолітка (його URL приєднання)",
@@ -388,6 +393,7 @@ export const uk: Translation = {
   "avatarEditor.invalidType": "Виберіть зображення PNG, JPEG або WebP.",
 
   "app.userUnrecognised": "Сервер повернув нерозпізнаного користувача.",
+  "app.configUnrecognised": "Сервер повернув нерозпізнану конфігурацію.",
   "app.deleteError": "Не вдалося видалити повідомлення.",
   "app.editError": "Не вдалося відредагувати повідомлення.",
   "app.sendError": "Не вдалося надіслати повідомлення.",
@@ -407,11 +413,13 @@ export const uk: Translation = {
   "gate.pendingBody":
     "Очікуємо, поки хтось на цьому вузлі впустить вас. Цей екран оновиться щойно вас схвалять.",
   "gate.inviteRefused": "Термін дії цього коду запрошення минув. Відскануйте код на екрані хоста ще раз або зачекайте тут, доки вас впустять.",
+  "join.linkCodeOpened": "Цей QR-код підключає інший вузол LOAM до цієї мережі. Це не код приєднання, тому нічого не підключено. Ви приєдналися як учасник.",
   "gate.connection": "З’єднання: {status}",
   "gate.needsQrTitle": "Відскануйте QR-код приєднання для безпечного підключення",
   "gate.needsQrBody": "Відскануйте QR-код приєднання цього вузла своїм пристроєм, щоб підключитися. Іншого безпечного способу немає.",
 
   "confirm.deleteMessage": "Видалити це повідомлення? Це не можна скасувати.",
+  "confirm.deleteMessageTitle": "Видалити повідомлення",
 
   "error.admin_required": "Потрібен доступ адміністратора",
   "error.admin_claim_disabled": "Отримання доступу адміністратора не ввімкнено на цьому вузлі LOAM",
@@ -668,6 +676,13 @@ export const uk: Translation = {
   "message.emojiFieldRefused": "Реакцією може бути лише емодзі.",
   "message.copyText": "Копіювати текст",
   "messageList.newMessages": "Нові повідомлення",
+  "liveRegion.newMessage": "Нове повідомлення від {name}",
+  "liveRegion.newMessages": {
+    one: "{n} нове повідомлення",
+    few: "{n} нові повідомлення",
+    many: "{n} нових повідомлень",
+    other: "{n} нового повідомлення",
+  },
   "thread.inChannel": "у #{name}",
   "report.done": "Готово",
   "settings.title": "Налаштування",

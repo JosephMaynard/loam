@@ -251,6 +251,11 @@ export const my: Translation = {
   "admin.strategy": "နည်းဗျူဟာ",
   "admin.newPassphrase": "အက်ဒမင် passphrase အသစ် (အနည်းဆုံး ၈ လုံး၊ လက်ရှိကို ဆက်ထားရန် အလွတ်ထား)",
   "admin.bootstrapNote": "Setup-code နည်းဗျူဟာသည် စတင်ချိန်တွင် တစ်ကြိမ်သုံး claim code ကို ဆာဗာ log များတွင် ရိုက်ထုတ်သည်။",
+  "admin.bootstrapOption.firstUser": "ပထမဆုံး ပါဝင်သူ",
+  "admin.bootstrapOption.setupCode": "တစ်ကြိမ်သုံး setup code",
+  "admin.bootstrapOption.passphrase": "Passphrase",
+  "admin.bootstrapOption.hostDevice": "ဤစက် (host)",
+  "admin.bootstrapOption.none": "မည်သူမျှ",
   "admin.saveConfig": "Node config သိမ်းရန်",
   "admin.saved": "သိမ်းပြီး။ ချိတ်ဆက်ထားသော client များ ပြောင်းလဲမှုကို တိုက်ရိုက် ရယူသည်။",
   "admin.peerUrl": "Peer URL (၎င်း၏ ဝင်ရောက်ရန် URL)",
@@ -378,6 +383,7 @@ export const my: Translation = {
   "avatarEditor.invalidType": "PNG၊ JPEG သို့မဟုတ် WebP ပုံ ရွေးပါ။",
 
   "app.userUnrecognised": "ဆာဗာက အသိအမှတ်မပြုနိုင်သော အသုံးပြုသူ ပြန်ပို့သည်။",
+  "app.configUnrecognised": "ဆာဗာက အသိအမှတ်မပြုနိုင်သော ဆက်တင် ပြန်ပို့သည်။",
   "app.deleteError": "စာ ဖျက်၍မရပါ။",
   "app.editError": "စာ တည်းဖြတ်၍မရပါ။",
   "app.sendError": "မက်ဆေ့ချ် ပို့၍ မရပါ။",
@@ -397,11 +403,13 @@ export const my: Translation = {
   "gate.pendingBody":
     "ဤ node ရှိ တစ်စုံတစ်ဦးက သင့်ကို ဝင်ခွင့်ပေးရန် စောင့်နေသည်။ သင် အတည်ပြုခံရသည်နှင့် ဤစာမျက်နှာ ချက်ချင်း အပ်ဒိတ်ဖြစ်သည်။",
   "gate.inviteRefused": "ဤဖိတ်ကြားကုဒ် သက်တမ်းကုန်သွားပြီ။ လက်ခံစက်၏ မျက်နှာပြင်ပေါ်ရှိ ကုဒ်ကို ထပ်မံ စကင်ဖတ်ပါ၊ သို့မဟုတ် ဝင်ခွင့်ပေးသည်အထိ ဤနေရာတွင် စောင့်ပါ။",
+  "join.linkCodeOpened": "ဤ QR ကုဒ်သည် အခြား LOAM node တစ်ခုကို ဤကွန်ရက်နှင့် ချိတ်ဆက်ပေးသည်။ ပါဝင်ရန် ကုဒ် မဟုတ်သောကြောင့် မည်သည့်အရာမှ မချိတ်ဆက်ပါ။ သင် အဖွဲ့ဝင်အဖြစ် ပါဝင်ပြီးပါပြီ။",
   "gate.connection": "ချိတ်ဆက်မှု- {status}",
   "gate.needsQrTitle": "လုံခြုံစွာ ချိတ်ဆက်ရန် join QR ကို စကင်ဖတ်ပါ",
   "gate.needsQrBody": "ဤနုဒ်နှင့် ချိတ်ဆက်ရန် သင့်စက်ပစ္စည်းဖြင့် join QR ကို စကင်ဖတ်ပါ. အခြားလုံခြုံသော နည်းလမ်း မရှိပါ။",
 
   "confirm.deleteMessage": "ဤစာကို ဖျက်မလား။ ၎င်းကို ပြန်ပြင်၍မရပါ။",
+  "confirm.deleteMessageTitle": "စာ ဖျက်ရန်",
 
   "error.admin_required": "အက်ဒမင် ဝင်ရောက်ခွင့် လိုအပ်သည်",
   "error.admin_claim_disabled": "ဤ LOAM node တွင် အက်ဒမင် ဝင်ရောက်ခွင့်ရယူခြင်း ဖွင့်မထားပါ",
@@ -653,6 +661,8 @@ export const my: Translation = {
   "message.emojiFieldRefused": "တုံ့ပြန်ရန် အီမိုဂျီကိုသာ သုံးနိုင်သည်။",
   "message.copyText": "စာသား ကူးယူရန်",
   "messageList.newMessages": "စာအသစ်များ",
+  "liveRegion.newMessage": "{name} ထံမှ စာအသစ်",
+  "liveRegion.newMessages": { other: "စာအသစ် {n} စောင်" },
   "thread.inChannel": "#{name} တွင်",
   "report.done": "ပြီးပါပြီ",
   "settings.title": "ဆက်တင်များ",

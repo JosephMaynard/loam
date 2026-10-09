@@ -1,10 +1,12 @@
+import { generateDisplayName } from "@loam/display-name";
 import type { Channel, Message, MessageAttachment, MessageLocation, User } from "@loam/schema";
 import { useLocation } from "preact-iso";
-import { useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import { t } from "../i18n";
 import { withoutBlockedAuthors, withoutBlockedReactions } from "../lib/blocks";
 import { dayLabel } from "../lib/dates";
+import { ArrivalCoalescer } from "../lib/live-announcer";
 import { groupMessages } from "../lib/message-groups";
 import {
   groupReactionsByTarget,
@@ -146,8 +148,10 @@ function ConversationPane({
   // The user the report dialog was opened for — bound to that id (and, via the key, to this conversation).
   const [reportUserId, setReportUserId] = useState<string>();
   // Blocking interrupts with a ConfirmDialog (alertdialog) rather than window.confirm, like every other
-  // consequential action in the app.
+  // consequential action in the app. So does deleting a message: the id awaiting confirmation lives here,
+  // so the one dialog serves the list and the thread panel, and a conversation switch drops it with the pane.
   const [blockConfirmOpen, setBlockConfirmOpen] = useState(false);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string>();
   const timedOut = useIsTimedOut(currentUser);
   const topMessages = useMemo(() => topLevelMessages(messages, conversation), [conversation, messages]);
   // Grouped once per `messages` change so the render loop below can look up each message's
@@ -304,7 +308,7 @@ function ConversationPane({
           blockedUserIds={hiddenAuthors}
           conversation={conversation}
           currentUser={currentUser}
-          onDelete={onDelete}
+          onDelete={setPendingDeleteId}
           onEdit={onEdit}
           onOpenThread={(messageId) => {
             if (conversation.kind === "channel") {
@@ -344,7 +348,7 @@ function ConversationPane({
           currentUser={currentUser}
           key={threadParent.id}
           onClose={() => location.route(backRouteForThread(conversation))}
-          onDelete={onDelete}
+          onDelete={setPendingDeleteId}
           onEdit={onEdit}
           onReact={onReact}
           composerDisabledReason={activeChannel?.archived ? t("composer.archived") : undefined}
@@ -384,6 +388,20 @@ function ConversationPane({
           title={t("block.block")}
         >
           {t("block.confirm", { name: title })}
+        </ConfirmDialog>
+      ) : null}
+      {pendingDeleteId !== undefined ? (
+        <ConfirmDialog
+          confirmLabel={t("common.delete")}
+          onCancel={() => setPendingDeleteId(undefined)}
+          onConfirm={() => {
+            const messageId = pendingDeleteId;
+            setPendingDeleteId(undefined);
+            onDelete(messageId);
+          }}
+          title={t("confirm.deleteMessageTitle")}
+        >
+          <p>{t("confirm.deleteMessage")}</p>
         </ConfirmDialog>
       ) : null}
     </>
@@ -544,6 +562,7 @@ function MessageList({
   const [reportMessage, setReportMessage] = useState<Message | undefined>(undefined);
   const typing = typers.length > 0;
   const pin = useBottomPin(listRef, topMessages, currentUser.id, typing);
+  const announcement = useArrivalAnnouncements(topMessages, currentUser.id, blockedUserIds, usersById);
   const grouped = useMemo(
     () => groupMessages(topMessages, { isolate: (message) => blockedUserIds.has(message.authorId) }),
     [blockedUserIds, topMessages],
@@ -551,6 +570,11 @@ function MessageList({
 
   return (
     <div className={typing ? "message-list-wrap is-typing" : "message-list-wrap"}>
+      {/* Screen readers hear what arrives in the open conversation; sighted readers see it in the list. A
+          keyed span is a fresh node each time, so two identical announcements in a row both read. */}
+      <p aria-live="polite" className="sr-only message-announcer">
+        {announcement ? <span key={announcement.seq}>{announcement.text}</span> : null}
+      </p>
       <div className="message-list" onLoadCapture={pin.onLoadCapture} onScroll={pin.onScroll} ref={listRef}>
         {grouped.length ? (
           grouped.map(({ first, last, message, newDay }) => (
@@ -615,6 +639,68 @@ function MessageList({
       ) : null}
     </div>
   );
+}
+
+/** One screen-reader announcement; `seq` makes each a fresh DOM node even when the text repeats. */
+type Announcement = { text: string; seq: number };
+
+/**
+ * What to announce to screen readers about messages arriving in the open conversation: "New message from
+ * Ada" for one, "3 new messages" for a burst (one announcement per quiet window, see `ArrivalCoalescer`).
+ * What the list holds when it mounts is history, not news; so are older messages a history fetch fills in,
+ * your own messages, and anything from someone you blocked.
+ *
+ * @param topMessages - The list's top-level messages, oldest first.
+ * @param currentUserId - Your own messages are never announced.
+ * @param blockedUserIds - Nor are a blocked person's.
+ * @param usersById - For the author's name (a deterministic name stands in for an unknown author).
+ */
+function useArrivalAnnouncements(
+  topMessages: Message[],
+  currentUserId: string,
+  blockedUserIds: ReadonlySet<string>,
+  usersById: Map<string, User>,
+): Announcement | undefined {
+  const [announcement, setAnnouncement] = useState<Announcement>();
+  const seenRef = useRef<{ ids: Set<string>; newest: number }>();
+  const usersByIdRef = useRef(usersById);
+  usersByIdRef.current = usersById;
+  const coalescerRef = useRef<ArrivalCoalescer<Message>>();
+  if (!coalescerRef.current) {
+    coalescerRef.current = new ArrivalCoalescer<Message>((arrivals) => {
+      const last = arrivals[arrivals.length - 1]!;
+      const name = usersByIdRef.current.get(last.authorId)?.displayName ?? generateDisplayName(last.authorId);
+      const text =
+        arrivals.length === 1 ? t("liveRegion.newMessage", { name }) : t("liveRegion.newMessages", { n: arrivals.length });
+      setAnnouncement((previous) => ({ text, seq: (previous?.seq ?? 0) + 1 }));
+    });
+  }
+
+  useEffect(() => () => coalescerRef.current?.dispose(), []);
+
+  useEffect(() => {
+    const seen = seenRef.current;
+    const ids = new Set(topMessages.map((message) => message.id));
+    let newest = seen?.newest ?? 0;
+    for (const message of topMessages) {
+      newest = Math.max(newest, message.createdAt);
+    }
+    if (!seen) {
+      seenRef.current = { ids, newest }; // The opening state of the list is not news.
+      return;
+    }
+    const arrivals = topMessages.filter(
+      (message) =>
+        !seen.ids.has(message.id) &&
+        message.createdAt > seen.newest &&
+        message.authorId !== currentUserId &&
+        !blockedUserIds.has(message.authorId),
+    );
+    seenRef.current = { ids, newest };
+    coalescerRef.current?.add(arrivals);
+  }, [blockedUserIds, currentUserId, topMessages]);
+
+  return announcement;
 }
 
 interface ThreadPanelProps {

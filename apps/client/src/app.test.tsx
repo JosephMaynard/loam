@@ -1,5 +1,5 @@
 import { createTransportIdentity, openTransport, sealTransport, transportServerAccept } from "@loam/crypto";
-import type { Channel, Message, User } from "@loam/schema";
+import type { Channel, Message, NetworkConfig, User } from "@loam/schema";
 import { IDBFactory } from "fake-indexeddb";
 import { render } from "preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,12 +7,45 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app";
 import { captureAdminClaimCode, takeAdminClaimCode } from "./lib/admin-link";
 import { CONFIRMED_USER_KEY } from "./lib/identity";
+import { linkCodePresentAtStartup } from "./lib/link-code-fragment";
 import { destroyDatabase, getAllRecords, putRecord, putRecords, resetLocalStoreForTests } from "./lib/local-store";
 import { captureJoinKey, resetTransportStateForTests } from "./lib/transport";
 import { isWipeTombstoned, setWipeTombstone } from "./lib/wipe";
 
 // App-level boot tests (pre-release review 2026-09-25): mount the real `App` against a stubbed node (fetch +
 // WebSocket) and a fresh fake IndexedDB, to check what the boot does with the cache it hydrates.
+
+// Whether the page was opened from a "link another node" QR is module state set by main.tsx; stub it so a test
+// can flip it without touching the URL.
+vi.mock("./lib/link-code-fragment", () => ({ linkCodePresentAtStartup: vi.fn(() => false) }));
+
+/** The full flag set a real node advertises; the boot validates it against the shared schema. */
+const networkConfig: NetworkConfig = {
+  nodeName: "Test node",
+  enablePublicChannels: true,
+  enablePrivateChannels: true,
+  enableUserChannels: true,
+  enableReplies: true,
+  enableDMs: true,
+  enableReactions: true,
+  enableMarkdown: true,
+  enableAttachments: true,
+  enableLocationSharing: false,
+  enablePresence: true,
+  enableMesh: false,
+  enableLLMChat: false,
+  enableLLMStreaming: false,
+  allowUserDisplayNameEdit: true,
+  allowUserAvatarEdit: true,
+  allowUserAvatarUpload: true,
+  allowAdminClaim: false,
+  joinPolicy: "open",
+  securityProfile: "custom",
+  transportEncryption: "off",
+  dbEncryption: "off",
+  locale: "en",
+  devMode: false,
+};
 
 // Agreed to the member rules, so the app opens on its content rather than the Welcome screen.
 const me: User = { id: "user.me", displayName: "Me", type: "human", isAdmin: false, createdAt: 1, ephemeral: true, rulesVersion: 1 };
@@ -42,15 +75,13 @@ interface NodeOptions {
   searchResults?: Message[];
   /** `POST /api/admin/claim`: the status to answer (200 = the caller becomes admin). */
   claimStatus?: number;
+  /** What `/api/bootstrap` answers instead of a well-formed bootstrap. */
+  bootstrapBody?: unknown;
 }
 
 function stubNode(options: NodeOptions = {}) {
   let currentUser = options.currentUser ?? me;
-  const bootstrap = {
-    joinUrl: "http://node.test/",
-    websocketPath: "/ws",
-    networkConfig: { transportEncryption: "off", nodeName: "Test node", enableDMs: true, enableReplies: true },
-  };
+  const bootstrap = { joinUrl: "http://node.test/", websocketPath: "/ws", networkConfig };
   const fetchMock = vi.fn(async (input: string, _init?: RequestInit) => {
     const url = String(input);
     if (url === "/api/admin/claim") {
@@ -63,7 +94,7 @@ function stubNode(options: NodeOptions = {}) {
       return json(currentUser);
     }
     if (url === "/api/bootstrap") {
-      return json(bootstrap);
+      return json("bootstrapBody" in options ? options.bootstrapBody : bootstrap);
     }
     if (url === "/api/config") {
       return json({ ...bootstrap, currentUser });
@@ -341,13 +372,7 @@ describe("a wiped device rejoining by its join QR", () => {
     const bootstrap = {
       joinUrl: "http://node.test/",
       websocketPath: "/ws",
-      networkConfig: {
-        transportEncryption: "required",
-        transportPublicKey: host.publicKey,
-        nodeName: "Test node",
-        enableDMs: true,
-        enableReplies: true,
-      },
+      networkConfig: { ...networkConfig, transportEncryption: "required", transportPublicKey: host.publicKey },
     };
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
       const url = String(input);
@@ -434,5 +459,33 @@ describe("a wiped device rejoining by its join QR", () => {
     expect(root.textContent).not.toContain("Device wiped");
     expect(handshakes(fetchMock)).toHaveLength(1);
     await vi.waitFor(() => expect(isWipeTombstoned()).toBe(false));
+  });
+});
+
+describe("the boot validates what the node sends", () => {
+  it("a bootstrap of the wrong shape is a readable boot error, not a TypeError", async () => {
+    stubNode({ bootstrapBody: { joinUrl: "http://node.test/", websocketPath: "/ws", networkConfig: { nodeName: "x" } } });
+    const host = await boot("/channels");
+    expect(host.textContent).toContain("The server returned an unrecognised configuration payload.");
+  });
+
+  it("a page opened from a node-link QR says the code was for another node, once connected", async () => {
+    vi.mocked(linkCodePresentAtStartup).mockReturnValue(true);
+    try {
+      // The block list must answer: the boot pass only ends (and says this) once the roster has loaded.
+      stubNode({ content: true, blocks: [] });
+      const host = await boot("/channels");
+      expect(host.querySelector(".connection-error")?.textContent).toContain(
+        "That QR code links another LOAM node to this network.",
+      );
+    } finally {
+      vi.mocked(linkCodePresentAtStartup).mockReturnValue(false);
+    }
+  });
+
+  it("says nothing about node links on an ordinary join", async () => {
+    stubNode({ content: true, blocks: [] });
+    const host = await boot("/channels");
+    expect(host.textContent).not.toContain("That QR code links another LOAM node");
   });
 });

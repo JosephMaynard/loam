@@ -13,11 +13,13 @@ import {
   isJumboEmoji,
   LiveChangeJournal,
   mergeMessagesInOrder,
+  messageCacheOverflow,
   messageConversationKey,
   newestMessageTimestamp,
   reactionSummary,
   reconcileConversationSnapshot,
   repliesFor,
+  staleConversationMessageIds,
   topLevelMessages,
 } from "./messages";
 
@@ -516,5 +518,60 @@ describe("read markers use server timestamps (review 2026-09-25)", () => {
     expect(countUnreadByConversation([peerPost], serverMarker, ME).get(`channel:${CHANNEL.id}`)).toBe(1);
     // Own messages and reactions never count.
     expect(countUnreadByConversation([post("mine", 2_000)], serverMarker, "user.1").size).toBe(0);
+  });
+});
+
+describe("messageCacheOverflow (the per-conversation on-disk cap)", () => {
+  it("keeps the newest N per conversation and drops the rest, with the reactions on them", () => {
+    const channel = [post("c1", 100), post("c2", 200), reply("c3", 300, "c1"), post("c4", 400)];
+    const dms = [dm("d1", 110, "user.peer", ME), dm("d2", 120, ME, "user.peer"), dm("d3", 130, "user.peer", ME)];
+    const reactions = [reaction("r-old", 500, "c1", "👍", ME), reaction("r-new", 500, "c4", "👍", ME)];
+    // Deliberately out of order: the helper must not rely on the array being sorted.
+    const overflow = messageCacheOverflow([...reactions, ...dms.reverse(), ...channel.reverse()], ME, 2);
+
+    // Channel: c3 and c4 are the newest two; c1, c2 and the reaction on c1 go. DM: d2 and d3 stay.
+    expect([...overflow].sort()).toEqual(["c1", "c2", "d1", "r-old"]);
+  });
+
+  it("is empty while every conversation is within the cap (default 500)", () => {
+    const many = Array.from({ length: 500 }, (_, index) => post(`m${index}`, index));
+    expect(messageCacheOverflow(many, ME).size).toBe(0);
+    expect(messageCacheOverflow([...many, post("m500", 500)], ME)).toEqual(new Set(["m0"]));
+  });
+
+  it("counts the two directions of one DM as one conversation", () => {
+    const thread = [dm("a", 1, ME, "user.peer"), dm("b", 2, "user.peer", ME), dm("c", 3, ME, "user.peer")];
+    expect(messageCacheOverflow(thread, ME, 2)).toEqual(new Set(["a"]));
+  });
+});
+
+describe("staleConversationMessageIds (conversations the node no longer lists)", () => {
+  const history = [
+    post("keep", 100),
+    { ...post("gone", 100), channelId: "channel.deleted" } as Message,
+    reply("gone-reply", 110, "gone", "channel.deleted"),
+    reaction("gone-reaction", 120, "gone", "👍", ME),
+    reaction("keep-reaction", 120, "keep", "👍", ME),
+    dm("dm-keep", 130, "user.peer", ME),
+    dm("dm-gone", 140, ME, "user.vanished"),
+    reaction("dm-gone-reaction", 150, "dm-gone", "❤️", "user.vanished"),
+  ];
+
+  it("drops posts, replies and reactions of a channel the node did not return", () => {
+    const stale = staleConversationMessageIds(history, new Set(["channel.general"]), undefined, ME);
+    expect([...stale].sort()).toEqual(["gone", "gone-reaction", "gone-reply"]);
+  });
+
+  it("drops DMs with a partner missing from the inbox, but only once the inbox is known", () => {
+    const channels = new Set(["channel.general", "channel.deleted"]);
+    expect(staleConversationMessageIds(history, channels, undefined, ME).size).toBe(0);
+    const stale = staleConversationMessageIds(history, channels, new Set(["user.peer"]), ME);
+    expect([...stale].sort()).toEqual(["dm-gone", "dm-gone-reaction"]);
+  });
+
+  it("leaves channel messages alone while the channel list is unknown", () => {
+    const stale = staleConversationMessageIds(history, undefined, new Set(["user.peer"]), ME);
+    expect([...stale].sort()).toEqual(["dm-gone", "dm-gone-reaction"]);
+    expect(staleConversationMessageIds(history, undefined, undefined, ME).size).toBe(0);
   });
 });

@@ -51,10 +51,18 @@ function isSafeImageSrc(src: string): boolean {
   }
 }
 
+/**
+ * Attributes a message may never carry into the page. snarkdown emits a fenced block's language tag as
+ * `<pre class="code <lang>">`, and DOMPurify's defaults keep `class`, so a fence tagged `dialog`, `notice` or
+ * `btn` would borrow the app's own styles and let a post impersonate a system notice or a control. The
+ * markdown CSS styles `pre`/`code` by element, so nothing is lost by dropping the class.
+ */
+const FORBIDDEN_ATTRIBUTES = ["class", "id", "style"];
+
 export function renderMarkdown(markdown: string): string {
   const html = snarkdown(escapeHtml(markdown));
   const template = document.createElement("template");
-  template.innerHTML = DOMPurify.sanitize(html);
+  template.innerHTML = DOMPurify.sanitize(html, { FORBID_ATTR: FORBIDDEN_ATTRIBUTES });
 
   for (const link of Array.from(template.content.querySelectorAll("a"))) {
     const href = link.getAttribute("href") ?? "";

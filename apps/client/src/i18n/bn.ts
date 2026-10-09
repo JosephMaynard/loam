@@ -251,6 +251,11 @@ export const bn: Translation = {
   "admin.strategy": "কৌশল",
   "admin.newPassphrase": "নতুন অ্যাডমিন পাসফ্রেজ (ন্যূনতম ৮ অক্ষর; বর্তমানটি রাখতে খালি রাখুন)",
   "admin.bootstrapNote": "সেটআপ-কোড কৌশল শুরুর সময় সার্ভার লগে একটি এককালীন দাবি কোড ছাপে।",
+  "admin.bootstrapOption.firstUser": "প্রথম যে যোগ দেবেন",
+  "admin.bootstrapOption.setupCode": "এককালীন সেটআপ কোড",
+  "admin.bootstrapOption.passphrase": "পাসফ্রেজ",
+  "admin.bootstrapOption.hostDevice": "এই ডিভাইস (হোস্ট)",
+  "admin.bootstrapOption.none": "কেউ না",
   "admin.saveConfig": "নোড কনফিগ সংরক্ষণ",
   "admin.saved": "সংরক্ষিত। সংযুক্ত ক্লায়েন্টরা পরিবর্তন সরাসরি নেয়।",
   "admin.peerUrl": "সমকক্ষ URL (তার যোগদান URL)",
@@ -378,6 +383,7 @@ export const bn: Translation = {
   "avatarEditor.invalidType": "একটি PNG, JPEG বা WebP ছবি বেছে নিন।",
 
   "app.userUnrecognised": "সার্ভার অচেনা ব্যবহারকারী ফেরত দিয়েছে।",
+  "app.configUnrecognised": "সার্ভার অচেনা কনফিগারেশন ফেরত দিয়েছে।",
   "app.deleteError": "বার্তা মোছা যায়নি।",
   "app.editError": "বার্তা সম্পাদনা করা যায়নি।",
   "app.sendError": "বার্তা পাঠানো যায়নি।",
@@ -397,11 +403,13 @@ export const bn: Translation = {
   "gate.pendingBody":
     "এই নোডের কেউ আপনাকে ঢুকতে দেওয়ার অপেক্ষায়। অনুমোদিত হওয়া মাত্রই এই স্ক্রিন আপডেট হবে।",
   "gate.inviteRefused": "এই আমন্ত্রণ কোডের মেয়াদ শেষ হয়ে গেছে। হোস্টের স্ক্রিনের কোডটি আবার স্ক্যান করুন, বা ভেতরে আসতে দেওয়া পর্যন্ত এখানে অপেক্ষা করুন।",
+  "join.linkCodeOpened": "এই QR কোড অন্য একটি LOAM নোডকে এই নেটওয়ার্কে যুক্ত করে। এটি যোগ দেওয়ার কোড নয়, তাই কিছুই যুক্ত হয়নি। আপনি সদস্য হিসেবে যোগ দিয়েছেন।",
   "gate.connection": "সংযোগ: {status}",
   "gate.needsQrTitle": "নিরাপদে সংযোগ করতে যোগদান QR স্ক্যান করুন",
   "gate.needsQrBody": "এই নোডের সাথে সংযোগ করতে আপনার ডিভাইস দিয়ে যোগদান QR স্ক্যান করুন. নিরাপদে সংযোগের অন্য কোনো উপায় নেই।",
 
   "confirm.deleteMessage": "এই বার্তা মুছবেন? এটি ফেরানো যাবে না।",
+  "confirm.deleteMessageTitle": "বার্তা মুছুন",
 
   "error.admin_required": "অ্যাডমিন অ্যাক্সেস প্রয়োজন",
   "error.admin_claim_disabled": "এই LOAM নোডে অ্যাডমিন অ্যাক্সেস নেওয়া সক্ষম নয়",
@@ -653,6 +661,8 @@ export const bn: Translation = {
   "message.emojiFieldRefused": "প্রতিক্রিয়া হিসেবে শুধু ইমোজি ব্যবহার করা যায়।",
   "message.copyText": "লেখা কপি করুন",
   "messageList.newMessages": "নতুন বার্তা",
+  "liveRegion.newMessage": "{name}-এর কাছ থেকে নতুন বার্তা",
+  "liveRegion.newMessages": { one: "{n}টি নতুন বার্তা", other: "{n}টি নতুন বার্তা" },
   "thread.inChannel": "#{name}-এ",
   "report.done": "হয়ে গেছে",
   "settings.title": "সেটিংস",

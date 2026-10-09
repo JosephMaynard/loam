@@ -251,6 +251,11 @@ export const fr: Translation = {
   "admin.strategy": "Stratégie",
   "admin.newPassphrase": "Nouvelle phrase secrète admin (min. 8 caractères ; laissez vide pour conserver l’actuelle)",
   "admin.bootstrapNote": "La stratégie code de configuration imprime un code de réclamation à usage unique dans les journaux du serveur au démarrage.",
+  "admin.bootstrapOption.firstUser": "La première personne à rejoindre",
+  "admin.bootstrapOption.setupCode": "Code de configuration à usage unique",
+  "admin.bootstrapOption.passphrase": "Phrase secrète",
+  "admin.bootstrapOption.hostDevice": "Cet appareil (l’hôte)",
+  "admin.bootstrapOption.none": "Personne",
   "admin.saveConfig": "Enregistrer la configuration du nœud",
   "admin.saved": "Enregistré. Les clients connectés appliquent le changement en direct.",
   "admin.peerUrl": "URL du pair (son URL d’accès)",
@@ -378,6 +383,7 @@ export const fr: Translation = {
   "avatarEditor.invalidType": "Choisissez une image PNG, JPEG ou WebP.",
 
   "app.userUnrecognised": "Le serveur a renvoyé un utilisateur non reconnu.",
+  "app.configUnrecognised": "Le serveur a renvoyé une configuration non reconnue.",
   "app.deleteError": "Impossible de supprimer le message.",
   "app.editError": "Impossible de modifier le message.",
   "app.sendError": "Impossible d'envoyer le message.",
@@ -397,11 +403,13 @@ export const fr: Translation = {
   "gate.pendingBody":
     "En attente que quelqu’un de ce nœud vous laisse entrer. Cet écran se met à jour dès que vous êtes approuvé.",
   "gate.inviteRefused": "Ce code d'invitation a expiré. Scannez à nouveau le code sur l'écran de l'hôte, ou attendez ici qu'on vous laisse entrer.",
+  "join.linkCodeOpened": "Ce code QR relie un autre nœud LOAM à ce réseau. Ce n’est pas un code d’accès, donc rien n’a été relié. Vous avez rejoint le réseau en tant que membre.",
   "gate.connection": "Connexion : {status}",
   "gate.needsQrTitle": "Scannez le QR d'accès pour vous connecter en toute sécurité",
   "gate.needsQrBody": "Scannez le QR d'accès de ce nœud avec votre appareil pour vous connecter. Il n'y a pas d'autre moyen sûr de le faire.",
 
   "confirm.deleteMessage": "Supprimer ce message ? Cette action est irréversible.",
+  "confirm.deleteMessageTitle": "Supprimer le message",
 
   "error.admin_required": "Accès administrateur requis",
   "error.admin_claim_disabled": "L’obtention de l’accès admin n’est pas activée sur ce nœud LOAM",
@@ -657,6 +665,8 @@ export const fr: Translation = {
   "message.emojiFieldRefused": "Seul un emoji peut servir de réaction.",
   "message.copyText": "Copier le texte",
   "messageList.newMessages": "Nouveaux messages",
+  "liveRegion.newMessage": "Nouveau message de {name}",
+  "liveRegion.newMessages": { one: "{n} nouveau message", many: "{n} nouveaux messages", other: "{n} nouveaux messages" },
   "thread.inChannel": "dans #{name}",
   "report.done": "Terminé",
   "settings.title": "Paramètres",

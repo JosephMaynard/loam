@@ -251,6 +251,11 @@ export const ps: Translation = {
   "admin.strategy": "ستراتیژي",
   "admin.newPassphrase": "د اډمین نوی پټ عبارت (لږ تر لږه ۸ توري؛ د اوسني ساتلو لپاره تش پرېږدئ)",
   "admin.bootstrapNote": "د تنظیم‌کوډ ستراتیژي په پیل کې د سرور په لاګونو کې یو یو‌ځلي ادعا کوډ چاپوي.",
+  "admin.bootstrapOption.firstUser": "لومړی کس چې ګډون کوي",
+  "admin.bootstrapOption.setupCode": "د یو ځل تنظیم کوډ",
+  "admin.bootstrapOption.passphrase": "پټ عبارت",
+  "admin.bootstrapOption.hostDevice": "دا وسیله (کوربه)",
+  "admin.bootstrapOption.none": "هیڅوک",
   "admin.saveConfig": "د نوډ پیکربندي خوندي کول",
   "admin.saved": "خوندي شو. وصل کلاینټونه بدلون ژوندی اخلي.",
   "admin.peerUrl": "د همتا URL (د هغه د یوځای کیدو URL)",
@@ -378,6 +383,7 @@ export const ps: Translation = {
   "avatarEditor.invalidType": "د PNG، JPEG یا WebP انځور وټاکئ.",
 
   "app.userUnrecognised": "سرور ناپېژندلی کاروونکی راستون کړ.",
+  "app.configUnrecognised": "سرور ناپېژندلی ترتیب راستون کړ.",
   "app.deleteError": "پیغام ړنګ نشو.",
   "app.editError": "پیغام سم نشو.",
   "app.sendError": "پیغام لېږل ونشو.",
@@ -397,11 +403,13 @@ export const ps: Translation = {
   "gate.pendingBody":
     "منتظر یاست چې پر دې نوډ څوک تاسو دننه پرېږدي. ستاسو له تصویب سره سم دا پرده سمدلاسه تازه کیږي.",
   "gate.inviteRefused": "د دې بلنې کوډ موده تېره شوې. د کوربه پر پرده کوډ بیا سکن کړئ، یا دلته انتظار وکړئ تر هغه چې دننه پرېښودل شئ.",
+  "join.linkCodeOpened": "دا QR کوډ د LOAM بله نوډ له دې شبکې سره نښلوي. دا د ګډون کوډ نه دی، نو هیڅ شی ونه نښلول شو. تاسو د غړي په توګه ګډون کړی.",
   "gate.connection": "اړیکه: {status}",
   "gate.needsQrTitle": "د خوندي نښلولو لپاره د یوځای کیدو QR سکین کړئ",
   "gate.needsQrBody": "د دې نوډ سره د خوندي نښلېدو لپاره، د خپل وسیلې سره د یوځای کیدو QR سکین کړئ. د نښلېدو بله خوندي لار نشته.",
 
   "confirm.deleteMessage": "دا پیغام ړنګ کړئ؟ دا بیرته نشي کیدی.",
+  "confirm.deleteMessageTitle": "پیغام ړنګ کړئ",
 
   "error.admin_required": "د اډمین لاسرسی ته اړتیا ده",
   "error.admin_claim_disabled": "پر دې LOAM نوډ د اډمین لاسرسي ترلاسه کول فعال نه دي",
@@ -653,6 +661,8 @@ export const ps: Translation = {
   "message.emojiFieldRefused": "یوازې ایموجي د غبرګون لپاره کارول کیدی شي.",
   "message.copyText": "متن کاپي کړئ",
   "messageList.newMessages": "نوي پیغامونه",
+  "liveRegion.newMessage": "له {name} نوی پیغام",
+  "liveRegion.newMessages": { one: "{n} نوی پیغام", other: "{n} نوي پیغامونه" },
   "thread.inChannel": "په #{name} کې",
   "report.done": "بشپړ شو",
   "settings.title": "امستنې",

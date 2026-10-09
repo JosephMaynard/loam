@@ -251,6 +251,11 @@ export const tr: Translation = {
   "admin.strategy": "Strateji",
   "admin.newPassphrase": "Yeni yönetici parolası (min. 8 karakter; mevcut olanı korumak için boş bırakın)",
   "admin.bootstrapNote": "Kurulum kodu stratejisi, başlangıçta sunucu günlüklerine tek kullanımlık bir talep kodu yazdırır.",
+  "admin.bootstrapOption.firstUser": "Katılan ilk kişi",
+  "admin.bootstrapOption.setupCode": "Tek kullanımlık kurulum kodu",
+  "admin.bootstrapOption.passphrase": "Parola",
+  "admin.bootstrapOption.hostDevice": "Bu cihaz (ana makine)",
+  "admin.bootstrapOption.none": "Hiç kimse",
   "admin.saveConfig": "Düğüm yapılandırmasını kaydet",
   "admin.saved": "Kaydedildi. Bağlı istemciler değişikliği canlı olarak alır.",
   "admin.peerUrl": "Eş URL’si (katılma URL’si)",
@@ -378,6 +383,7 @@ export const tr: Translation = {
   "avatarEditor.invalidType": "PNG, JPEG veya WebP görsel seçin.",
 
   "app.userUnrecognised": "Sunucu tanınmayan bir kullanıcı döndürdü.",
+  "app.configUnrecognised": "Sunucu tanınmayan bir yapılandırma döndürdü.",
   "app.deleteError": "Mesaj silinemedi.",
   "app.editError": "Mesaj düzenlenemedi.",
   "app.sendError": "Mesaj gönderilemedi.",
@@ -397,11 +403,13 @@ export const tr: Translation = {
   "gate.pendingBody":
     "Bu düğümdeki birinin sizi içeri almasını bekliyorsunuz. Onaylandığınız anda bu ekran güncellenir.",
   "gate.inviteRefused": "Bu davet kodunun süresi doldu. Sunucunun ekranındaki kodu yeniden tarayın veya içeri alınmayı burada bekleyin.",
+  "join.linkCodeOpened": "Bu QR kodu başka bir LOAM düğümünü bu ağa bağlar. Katılma kodu değildir, bu yüzden hiçbir şey bağlanmadı. Üye olarak katıldınız.",
   "gate.connection": "Bağlantı: {status}",
   "gate.needsQrTitle": "Güvenli bağlanmak için katılım QR kodunu tarayın",
   "gate.needsQrBody": "Bağlanmak için bu düğümün katılım QR kodunu cihazınızla tarayın. Güvenli başka bir yol yok.",
 
   "confirm.deleteMessage": "Bu mesaj silinsin mi? Bu geri alınamaz.",
+  "confirm.deleteMessageTitle": "Mesajı sil",
 
   "error.admin_required": "Yönetici erişimi gerekli",
   "error.admin_claim_disabled": "Yönetici erişimi alma bu LOAM düğümünde etkin değil",
@@ -653,6 +661,8 @@ export const tr: Translation = {
   "message.emojiFieldRefused": "Tepki olarak yalnızca emoji kullanılabilir.",
   "message.copyText": "Metni kopyala",
   "messageList.newMessages": "Yeni mesajlar",
+  "liveRegion.newMessage": "{name} kişisinden yeni mesaj",
+  "liveRegion.newMessages": { one: "{n} yeni mesaj", other: "{n} yeni mesaj" },
   "thread.inChannel": "#{name} kanalında",
   "report.done": "Tamam",
   "settings.title": "Ayarlar",

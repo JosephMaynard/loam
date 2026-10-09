@@ -1,7 +1,7 @@
 import type { Channel, Message, NetworkConfig, User } from "@loam/schema";
 import { describe, expect, it } from "vitest";
 
-import { parseMessageResponse, parseRoute, parseSocketEvent } from "./protocol";
+import { parseBootstrapResponse, parseConfigResponse, parseMessageResponse, parseRoute, parseSocketEvent } from "./protocol";
 
 const message: Message = {
   id: "msg_1",
@@ -250,5 +250,33 @@ describe("parseMessageResponse", () => {
     expect(parseMessageResponse({})).toBeUndefined();
     expect(parseMessageResponse(null)).toBeUndefined();
     expect(parseMessageResponse("nope")).toBeUndefined();
+  });
+});
+
+describe("parseBootstrapResponse / parseConfigResponse", () => {
+  const bootstrap = { version: "0.6.0", joinUrl: "http://192.168.0.10:3000/", websocketPath: "/ws", networkConfig };
+
+  it("accepts a well-formed bootstrap, with or without a version", () => {
+    expect(parseBootstrapResponse(bootstrap)).toEqual(bootstrap);
+    const { version: _omitted, ...unversioned } = bootstrap;
+    expect(parseBootstrapResponse(unversioned)).toEqual(unversioned);
+  });
+
+  it("refuses a malformed body instead of letting it into app state", () => {
+    expect(parseBootstrapResponse(undefined)).toBeUndefined();
+    expect(parseBootstrapResponse("<!doctype html>")).toBeUndefined();
+    expect(parseBootstrapResponse({})).toBeUndefined();
+    // A partial network config (a field missing) fails the shared schema.
+    expect(parseBootstrapResponse({ ...bootstrap, networkConfig: { nodeName: "x" } })).toBeUndefined();
+    expect(parseBootstrapResponse({ ...bootstrap, joinUrl: 42 })).toBeUndefined();
+    expect(parseBootstrapResponse({ ...bootstrap, websocketPath: undefined })).toBeUndefined();
+    expect(parseBootstrapResponse({ ...bootstrap, version: 7 })).toBeUndefined();
+  });
+
+  it("the config reply additionally needs a valid currentUser", () => {
+    expect(parseConfigResponse({ ...bootstrap, currentUser: user })).toEqual({ ...bootstrap, currentUser: user });
+    expect(parseConfigResponse(bootstrap)).toBeUndefined();
+    expect(parseConfigResponse({ ...bootstrap, currentUser: { id: "user.1" } })).toBeUndefined();
+    expect(parseConfigResponse({ ...bootstrap, currentUser: user, networkConfig: {} })).toBeUndefined();
   });
 });

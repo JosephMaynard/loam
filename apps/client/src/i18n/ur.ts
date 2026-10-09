@@ -251,6 +251,11 @@ export const ur: Translation = {
   "admin.strategy": "حکمتِ عملی",
   "admin.newPassphrase": "نیا منتظم پاس فریز (کم از کم ۸ حروف؛ موجودہ رکھنے کے لیے خالی چھوڑیں)",
   "admin.bootstrapNote": "سیٹ اپ کوڈ حکمتِ عملی آغاز پر سرور لاگز میں ایک بار استعمال کوڈ پرنٹ کرتی ہے۔",
+  "admin.bootstrapOption.firstUser": "شامل ہونے والا پہلا شخص",
+  "admin.bootstrapOption.setupCode": "ایک بار استعمال سیٹ اپ کوڈ",
+  "admin.bootstrapOption.passphrase": "پاس فریز",
+  "admin.bootstrapOption.hostDevice": "یہ آلہ (میزبان)",
+  "admin.bootstrapOption.none": "کوئی نہیں",
   "admin.saveConfig": "نوڈ کی ترتیب محفوظ کریں",
   "admin.saved": "محفوظ ہو گیا۔ جڑے کلائنٹس تبدیلی براہِ راست لے لیتے ہیں۔",
   "admin.peerUrl": "ہم مرتبہ URL (اس کا جوائن URL)",
@@ -378,6 +383,7 @@ export const ur: Translation = {
   "avatarEditor.invalidType": "PNG، JPEG یا WebP تصویر منتخب کریں۔",
 
   "app.userUnrecognised": "سرور نے ناقابلِ شناخت صارف واپس کیا۔",
+  "app.configUnrecognised": "سرور نے ناقابلِ شناخت ترتیب واپس کی۔",
   "app.deleteError": "پیغام حذف نہیں ہو سکا۔",
   "app.editError": "پیغام میں ترمیم نہیں ہو سکی۔",
   "app.sendError": "پیغام بھیجا نہیں جا سکا۔",
@@ -397,11 +403,13 @@ export const ur: Translation = {
   "gate.pendingBody":
     "اِس نوڈ پر کسی کے آپ کو داخل کرنے کا انتظار ہے۔ منظوری ملتے ہی یہ اسکرین اپ ڈیٹ ہو جائے گی۔",
   "gate.inviteRefused": "اس دعوتی کوڈ کی میعاد ختم ہو چکی ہے۔ میزبان کی اسکرین پر موجود کوڈ دوبارہ اسکین کریں، یا یہاں انتظار کریں جب تک آپ کو اندر آنے دیا جائے۔",
+  "join.linkCodeOpened": "یہ QR کوڈ ایک اور LOAM نوڈ کو اس نیٹ ورک سے جوڑتا ہے۔ یہ شمولیت کا کوڈ نہیں، اس لیے کچھ نہیں جڑا۔ آپ رکن کے طور پر شامل ہو گئے ہیں۔",
   "gate.connection": "کنکشن: {status}",
   "gate.needsQrTitle": "محفوظ طریقے سے جڑنے کے لیے جوائن QR اسکین کریں",
   "gate.needsQrBody": "اس نوڈ کا جوائن QR اپنے ڈیوائس سے اسکین کریں تاکہ محفوظ طریقے سے جڑ سکیں. جڑنے کا کوئی اور محفوظ طریقہ نہیں ہے۔",
 
   "confirm.deleteMessage": "یہ پیغام حذف کریں؟ یہ واپس نہیں ہو سکتا۔",
+  "confirm.deleteMessageTitle": "پیغام حذف کریں",
 
   "error.admin_required": "منتظم رسائی درکار ہے",
   "error.admin_claim_disabled": "اِس LOAM نوڈ پر منتظم رسائی حاصل کرنا فعال نہیں",
@@ -653,6 +661,8 @@ export const ur: Translation = {
   "message.emojiFieldRefused": "ردِعمل کے لیے صرف ایموجی استعمال ہو سکتا ہے۔",
   "message.copyText": "متن کاپی کریں",
   "messageList.newMessages": "نئے پیغامات",
+  "liveRegion.newMessage": "{name} کی طرف سے نیا پیغام",
+  "liveRegion.newMessages": { one: "{n} نیا پیغام", other: "{n} نئے پیغامات" },
   "thread.inChannel": "#{name} میں",
   "report.done": "ہو گیا",
   "settings.title": "ترتیبات",

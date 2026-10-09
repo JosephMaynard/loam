@@ -251,6 +251,11 @@ export const es: Translation = {
   "admin.strategy": "Estrategia",
   "admin.newPassphrase": "Nueva frase de acceso de administrador (mín. 8 caracteres; en blanco para conservar la actual)",
   "admin.bootstrapNote": "La estrategia de código de configuración imprime un código de un solo uso en los registros del servidor al arrancar.",
+  "admin.bootstrapOption.firstUser": "La primera persona en unirse",
+  "admin.bootstrapOption.setupCode": "Código de configuración de un solo uso",
+  "admin.bootstrapOption.passphrase": "Frase de acceso",
+  "admin.bootstrapOption.hostDevice": "Este dispositivo (el anfitrión)",
+  "admin.bootstrapOption.none": "Nadie",
   "admin.saveConfig": "Guardar configuración del nodo",
   "admin.saved": "Guardado. Los clientes conectados aplican el cambio en directo.",
   "admin.peerUrl": "URL del par (su URL de acceso)",
@@ -378,6 +383,7 @@ export const es: Translation = {
   "avatarEditor.invalidType": "Elige una imagen PNG, JPEG o WebP.",
 
   "app.userUnrecognised": "El servidor devolvió un usuario no reconocido.",
+  "app.configUnrecognised": "El servidor devolvió una configuración no reconocida.",
   "app.deleteError": "No se pudo eliminar el mensaje.",
   "app.editError": "No se pudo editar el mensaje.",
   "app.sendError": "No se pudo enviar el mensaje.",
@@ -397,11 +403,13 @@ export const es: Translation = {
   "gate.pendingBody":
     "Esperando a que alguien de este nodo te deje entrar. Esta pantalla se actualiza en cuanto te aprueben.",
   "gate.inviteRefused": "Ese código de invitación ha caducado. Vuelve a escanear el código de la pantalla del anfitrión o espera aquí a que te dejen entrar.",
+  "join.linkCodeOpened": "Ese código QR enlaza otro nodo LOAM con esta red. No es un código para unirse, así que no se enlazó nada. Te has unido como miembro.",
   "gate.connection": "Conexión: {status}",
   "gate.needsQrTitle": "Escanea el QR de acceso para conectarte de forma segura",
   "gate.needsQrBody": "Escanea el QR de acceso de este nodo con tu dispositivo para conectarte. No hay otra forma segura de hacerlo.",
 
   "confirm.deleteMessage": "¿Eliminar este mensaje? No se puede deshacer.",
+  "confirm.deleteMessageTitle": "Eliminar mensaje",
 
   "error.admin_required": "Se requiere acceso de administrador",
   "error.admin_claim_disabled": "La obtención de acceso de administrador no está habilitada en este nodo LOAM",
@@ -657,6 +665,8 @@ export const es: Translation = {
   "message.emojiFieldRefused": "Solo se puede usar un emoji como reacción.",
   "message.copyText": "Copiar texto",
   "messageList.newMessages": "Mensajes nuevos",
+  "liveRegion.newMessage": "Mensaje nuevo de {name}",
+  "liveRegion.newMessages": { one: "{n} mensaje nuevo", many: "{n} mensajes nuevos", other: "{n} mensajes nuevos" },
   "thread.inChannel": "en #{name}",
   "report.done": "Listo",
   "settings.title": "Ajustes",

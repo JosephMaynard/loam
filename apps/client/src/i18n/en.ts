@@ -304,6 +304,11 @@ export const en = {
   "admin.strategy": "Strategy",
   "admin.newPassphrase": "New admin passphrase (min 8 chars; leave blank to keep the current one)",
   "admin.bootstrapNote": "The setup-code strategy prints a one-time claim code in the server logs at startup.",
+  "admin.bootstrapOption.firstUser": "First person to join",
+  "admin.bootstrapOption.setupCode": "One-time setup code",
+  "admin.bootstrapOption.passphrase": "Passphrase",
+  "admin.bootstrapOption.hostDevice": "This device (the host)",
+  "admin.bootstrapOption.none": "Nobody",
   "admin.saveConfig": "Save node config",
   "admin.saved": "Saved. Connected clients pick the change up live.",
   // Add-a-peer control.
@@ -447,6 +452,7 @@ export const en = {
 
   // App-level error fallbacks.
   "app.userUnrecognised": "The server returned an unrecognised user payload.",
+  "app.configUnrecognised": "The server returned an unrecognised configuration payload.",
   "app.deleteError": "Unable to delete the message.",
   "app.editError": "Unable to edit the message.",
   "app.sendError": "Unable to send the message.",
@@ -467,6 +473,8 @@ export const en = {
   "gate.pendingBody":
     "Waiting for someone on this node to let you in. This screen updates the moment you're approved.",
   "gate.inviteRefused": "That invite code has expired. Scan the code on the host's screen again, or wait here to be let in.",
+  // A "link another node" QR opened in a browser (lib/link-code-fragment.ts): the key joined, the code did nothing.
+  "join.linkCodeOpened": "That QR code links another LOAM node to this network. It is not a join code, so nothing was linked. You have joined as a member.",
   "gate.connection": "Connection: {status}",
   // Shown when this node requires transport encryption (docs/08) but no host key was ever delivered
   // by a scanned join QR — there is no safe way to connect without one.
@@ -476,6 +484,7 @@ export const en = {
 
   // Confirmation dialogs.
   "confirm.deleteMessage": "Delete this message? This can't be undone.",
+  "confirm.deleteMessageTitle": "Delete message",
 
   // Server error codes (localized from the {error, code} envelope; English mirrors the server text).
   "error.admin_required": "Admin access required",
@@ -726,6 +735,9 @@ export const en = {
   "message.emojiFieldRefused": "Only an emoji can be used as a reaction.",
   "message.copyText": "Copy text",
   "messageList.newMessages": "New messages",
+  // Screen-reader announcement of messages arriving in the open conversation (one per quiet window).
+  "liveRegion.newMessage": "New message from {name}",
+  "liveRegion.newMessages": { one: "{n} new message", other: "{n} new messages" },
   "thread.inChannel": "in #{name}",
   "report.done": "Done",
   "settings.title": "Settings",

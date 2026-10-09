@@ -251,6 +251,11 @@ export const pt: Translation = {
   "admin.strategy": "Estratégia",
   "admin.newPassphrase": "Nova frase secreta de administrador (mín. 8 caracteres; em branco para manter a atual)",
   "admin.bootstrapNote": "A estratégia de código de configuração imprime um código de uso único nos logs do servidor na inicialização.",
+  "admin.bootstrapOption.firstUser": "A primeira pessoa a entrar",
+  "admin.bootstrapOption.setupCode": "Código de configuração de uso único",
+  "admin.bootstrapOption.passphrase": "Frase secreta",
+  "admin.bootstrapOption.hostDevice": "Este dispositivo (o anfitrião)",
+  "admin.bootstrapOption.none": "Ninguém",
   "admin.saveConfig": "Salvar configuração do nó",
   "admin.saved": "Salvo. Os clientes conectados aplicam a alteração ao vivo.",
   "admin.peerUrl": "URL do par (sua URL de acesso)",
@@ -378,6 +383,7 @@ export const pt: Translation = {
   "avatarEditor.invalidType": "Escolha uma imagem PNG, JPEG ou WebP.",
 
   "app.userUnrecognised": "O servidor retornou um usuário não reconhecido.",
+  "app.configUnrecognised": "O servidor retornou uma configuração não reconhecida.",
   "app.deleteError": "Não foi possível excluir a mensagem.",
   "app.editError": "Não foi possível editar a mensagem.",
   "app.sendError": "Não foi possível enviar a mensagem.",
@@ -397,11 +403,13 @@ export const pt: Translation = {
   "gate.pendingBody":
     "Aguardando alguém deste nó deixar você entrar. Esta tela é atualizada assim que você for aprovado.",
   "gate.inviteRefused": "Esse código de convite expirou. Leia novamente o código no ecrã do anfitrião ou espere aqui até o deixarem entrar.",
+  "join.linkCodeOpened": "Esse código QR vincula outro nó LOAM a esta rede. Não é um código de entrada, então nada foi vinculado. Você entrou como membro.",
   "gate.connection": "Conexão: {status}",
   "gate.needsQrTitle": "Escaneie o QR de acesso para se conectar com segurança",
   "gate.needsQrBody": "Leia o QR de acesso deste nó com o seu dispositivo para se conectar. Não há outra forma segura de fazer isso.",
 
   "confirm.deleteMessage": "Excluir esta mensagem? Isto não pode ser desfeito.",
+  "confirm.deleteMessageTitle": "Excluir mensagem",
 
   "error.admin_required": "Acesso de administrador necessário",
   "error.admin_claim_disabled": "A obtenção de acesso de administrador não está habilitada neste nó LOAM",
@@ -657,6 +665,8 @@ export const pt: Translation = {
   "message.emojiFieldRefused": "Só é possível reagir com um emoji.",
   "message.copyText": "Copiar texto",
   "messageList.newMessages": "Novas mensagens",
+  "liveRegion.newMessage": "Nova mensagem de {name}",
+  "liveRegion.newMessages": { one: "{n} mensagem nova", many: "{n} mensagens novas", other: "{n} mensagens novas" },
   "thread.inChannel": "em #{name}",
   "report.done": "Concluído",
   "settings.title": "Configurações",
