@@ -56,11 +56,12 @@ import { type ClientFiles, registerClientFiles } from "./static-files.js";
 import { createTransportServer, loamLogController, loamLoggerOptions, registerTransportHooks, registerTransportRoutes } from "./transport-server.js";
 import { createSyncEngine } from "./sync.js";
 import { resolveLanIPv4 } from "./net.js";
+import { addressKey, ipv6SubnetKey } from "./rate-limit.js";
 
 import type { AppData, AppOptions, LoamApp, PendingUpload } from "./types.js";
 
 import { IdentityLimitError, errorBody } from "./errors.js";
-import { sessionCookieName, sessionCookieMaxAge, claimAttemptLimit, claimAttemptWindowMs, defaultTombstoneHorizonMs, defaultChannels, legacyDemoUserIds } from "./defaults.js";
+import { sessionCookieName, sessionCookieMaxAge, claimAttemptLimit, claimAttemptWindowMs, subnetAttemptFactor, defaultTombstoneHorizonMs, defaultChannels, legacyDemoUserIds } from "./defaults.js";
 import { defaultLoamConfig, mergeConfig, reconcileLegacyProfile, sanitizeLegacyConfigJson, withoutLauncherOwnedKeys } from "./config.js";
 
 import { makeUser, makeSessionUserId, makeSessionToken, makeAdminSetupCode, encodeCookieValue, readCookie } from "./identity.js";
@@ -1054,7 +1055,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     changes: Partial<Pick<User, "roles" | "banned" | "shadowBanned" | "pending" | "timeoutUntil">>,
   ): User {
     const next = UserSchema.parse({ ...user, ...changes });
+    const admitted = user.pending === true && next.pending !== true;
     store.upsertUser(next);
+    if (admitted) {
+      // Let in from the approval queue (approved, redeemed an invite, or promoted): the reaper measures
+      // "never used" from here, not from when the record joined the queue.
+      store.markUserAdmitted(user.id, Date.now());
+    }
     // Clearing works without deleting keys: a change like `timeoutUntil: undefined` is kept by Zod as an
     // undefined-valued key, Object.assign copies it onto the live record (so `isTimedOut` reads false), and
     // JSON.stringify omits it from what's persisted/broadcast.
@@ -2056,10 +2063,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Track a secret-guess attempt under the given key (session user id or IP) and report whether
-   * that key is over the limit for the current window.
+   * Track a secret-guess attempt (an admin claim, a panic token) from peer address `ip` and report whether
+   * it is over the limit for the current window. Two bounds:
+   *
+   * - `claimAttemptLimit` per ADDRESS. Not per IPv6 /64 like the HTTP limiter: a SLAAC LAN is one /64, and
+   *   keying on it let any member spend the bucket and lock everyone else, the operator's real panic token
+   *   included, out for the window, renewably.
+   * - `subnetAttemptFactor` times that per /64, so cycling addresses inside a subnet still doesn't buy
+   *   unlimited guesses. Only attempts the address bound let through count here, so one address can spend
+   *   at most its own share of it; locking a /64 out takes many addresses.
    */
-  function attemptRateLimited(attempts: Map<string, { count: number; resetAt: number }>, key: string): boolean {
+  function attemptRateLimited(attempts: Map<string, { count: number; resetAt: number }>, ip: string): boolean {
     const now = Date.now();
 
     // Opportunistic pruning so a long-lived node doesn't accumulate one entry per source IP forever.
@@ -2071,6 +2085,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
+    if (countAttempt(attempts, `address:${addressKey(ip)}`, claimAttemptLimit, now)) {
+      return true;
+    }
+    const subnet = ipv6SubnetKey(ip);
+    return subnet !== undefined && countAttempt(attempts, `subnet:${subnet}`, claimAttemptLimit * subnetAttemptFactor, now);
+  }
+
+  /** Count one attempt against `key`'s window and report whether that puts it over `limit`. */
+  function countAttempt(attempts: Map<string, { count: number; resetAt: number }>, key: string, limit: number, now: number): boolean {
     const entry = attempts.get(key);
 
     if (!entry || entry.resetAt <= now) {
@@ -2079,7 +2102,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     entry.count += 1;
-    return entry.count > claimAttemptLimit;
+    return entry.count > limit;
   }
 
   /**
@@ -2395,7 +2418,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * (the same criteria) is therefore reaped too, after the longer `pendingIdentityMaxAgeMs`, and its queue
    * entry goes with it (the queue is the pending records themselves). A pending record that did agree to
    * the rules is a person waiting and is never reaped; nothing queues such a record today, so that guard is
-   * defensive.
+   * defensive. Once let in, a record's window starts again from the admission (`markUserAdmitted`), and a
+   * live bound transport session counts as connected like a socket does.
    *
    * A block is deliberately NOT a sign of use: the Welcome screen keeps a real member from blocking anyone
    * before agreeing, so a block-list row on an unagreed record is a probe's, and counting it would let a
@@ -2415,6 +2439,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
     for (const pending of pendingSockets) {
       connected.add(pending.userId);
+    }
+    // A pinned client between socket connections (backgrounded, reconnecting) still holds a bound session.
+    for (const session of transportSessions.values()) {
+      if (session.authMode === "bound" && session.userId !== undefined && session.expiresAt > now) {
+        connected.add(session.userId);
+      }
     }
     const referenced = new Set<string>();
     for (const message of data.messages) {
@@ -2445,7 +2475,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         user.createdAt < (user.pending ? pendingCutoff : cutoff) &&
         !connected.has(user.id) &&
         !referenced.has(user.id) &&
-        // Last, so only the few records that are otherwise ghosts cost a query (the indexed reporter column).
+        // Last, so only the few records that are otherwise ghosts cost a query each: someone let in from the
+        // approval queue gets the full window from that moment (they may have waited longer than it, and
+        // can't agree to the rules until they next open the app), and an open report keeps its reporter.
+        (store.userAdmittedAt(user.id) ?? Number.NEGATIVE_INFINITY) < cutoff &&
         store.countOpenReports(user.id) === 0,
     );
 

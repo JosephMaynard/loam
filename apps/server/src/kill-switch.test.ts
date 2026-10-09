@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -490,6 +490,39 @@ describe("emergency reset from the host device", () => {
     expect(app.store.loadMessages()).toEqual([]);
   });
 
+  it("leaves nothing in a plaintext database file that an older build deleted without secure_delete", async () => {
+    const { app, dataDir } = await makeApp({ killSwitch: { enabled: true } });
+    const admin = await newSession(app);
+    const needle = "PRE_UPGRADE_NEEDLE_41c9";
+    for (let index = 0; index < 40; index += 1) {
+      const posted = await app.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: admin.cookie },
+        payload: { type: "channelPost", channelId: "general", body: `${needle} ${index} ${"x".repeat(200)}` },
+      });
+      expect(posted.statusCode).toBe(201);
+    }
+    await app.close();
+
+    // An older build deletes those rows with secure_delete off (SQLite's default), leaving their text in
+    // freed pages and cell space.
+    const dbPath = join(dataDir, "loam.db");
+    const { DatabaseSync } = await import("node:sqlite");
+    const older = new DatabaseSync(dbPath);
+    older.exec("PRAGMA secure_delete = OFF");
+    older.exec("DELETE FROM messages");
+    older.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    older.close();
+    expect(readFileSync(dbPath).includes(needle)).toBe(true);
+
+    // This build opens it and runs the plaintext Emergency Reset.
+    const upgraded = await reopenApp(app, dataDir);
+    expect((await upgraded.emergencyReset()).complete).toBe(true);
+    const leftovers = [dbPath, `${dbPath}-wal`].filter((file) => existsSync(file) && readFileSync(file).includes(needle));
+    expect(leftovers).toEqual([]);
+  });
+
   it("tells the launcher, and the terminal UI, whether a restart finishes an incomplete wipe", async () => {
     const app = await makeApp({ killSwitch: { enabled: false } });
     app.store.wipeAll = () => {
@@ -583,6 +616,24 @@ describe("panic endpoint", () => {
     // and the node is NOT wiped.
     expect((await panic(app, "panic-token-0123456789")).statusCode).toBe(404);
     expect(app.store.loadMessages().length).toBe(1);
+  });
+
+  it("counts wrong tokens per address: a neighbour on the same IPv6 /64 can't lock the operator's real token out", async () => {
+    const app = await makeApp({
+      killSwitch: { enabled: true, panicToken: "panic-token-0123456789" },
+    });
+    const from = (remoteAddress: string, token: string) =>
+      app.server.inject({ method: "POST", url: "/api/panic", payload: { token }, remoteAddress });
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect((await from("2001:db8:9:9::66", `wrong-${attempt}`)).statusCode).toBe(404);
+    }
+    // That address is now locked out, still with the same 404 and no limiter headers...
+    const locked = await from("2001:db8:9:9::66", "panic-token-0123456789");
+    expect(locked.statusCode).toBe(404);
+    expect(Object.keys(locked.headers).filter((name) => name.startsWith("x-ratelimit") || name === "retry-after")).toEqual([]);
+    // ...but the operator's phone on the same LAN still fires the wipe.
+    expect((await from("2001:db8:9:9::5", "panic-token-0123456789")).statusCode).toBe(200);
   });
 
   it("answers 404 (never 429) even past the route-level rate limit", async () => {

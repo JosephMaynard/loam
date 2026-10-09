@@ -6,6 +6,7 @@ import { MEMBER_RULES_VERSION, ModerationReportSchema, UserSchema } from "@loam/
 import { afterEach, describe, expect, it } from "vitest";
 
 import { buildApp, type LoamApp } from "./app.js";
+import { openTransport08, resumeIdentity, sealSeq } from "./test-support/app-harness.js";
 import type { AppOptions, SocketSession } from "./types.js";
 
 /**
@@ -128,6 +129,55 @@ describe("identities nobody ever used", () => {
     expect(userIds(app)).not.toContain(waiting.userId);
     expect(await queued()).not.toContain(waiting.userId);
     expect(app.store.loadSessions().some((session) => session.userId === waiting.userId)).toBe(false);
+  });
+
+  it("gives someone let in from the queue the full window from that moment, across a restart", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "loam-rules-"));
+    cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
+    const windows = { unusedIdentityMaxAgeMs: 300, pendingIdentityMaxAgeMs: 100_000 };
+    const first = await buildApp({ dataDir, logger: false, maxNewIdentitiesPerWindow: 1_000_000, ...windows });
+    const admin = await newSession(first);
+    expect((await request(first, admin.cookie, "PATCH", "/api/admin/config", { access: { joinPolicy: "approval" } })).statusCode).toBe(200);
+    const waited = await newSession(first); // waits in the queue longer than the unused-identity window
+    await sleep(350);
+    // Approved while their app is closed: no socket, rules not agreed yet (they couldn't while pending).
+    expect((await request(first, admin.cookie, "POST", `/api/access/users/${waited.userId}/approve`)).statusCode).toBe(200);
+    first.reapUnusedIdentities();
+    expect(userIds(first)).toContain(waited.userId);
+    await first.close();
+
+    const app = await buildApp({ dataDir, logger: false, ...windows });
+    cleanups.push(() => app.close());
+    app.reapUnusedIdentities();
+    expect(userIds(app)).toContain(waited.userId);
+
+    // The window still ends: unused for that long after being let in, the record goes like any other.
+    await sleep(350);
+    app.reapUnusedIdentities();
+    expect(userIds(app)).not.toContain(waited.userId);
+  });
+
+  it("counts a live bound transport session as connected, like a socket", async () => {
+    const app = await makeApp({ unusedIdentityMaxAgeMs: 60 });
+    await newSession(app); // the admin
+    const transport = await openTransport08(app);
+    const resumed = await resumeIdentity(app, transport, 1);
+    expect(resumed.status).toBe(200);
+
+    await sleep(120);
+    app.reapUnusedIdentities();
+    expect(userIds(app)).toContain(resumed.currentUser.id);
+
+    // Once that session is gone (the device logged out), nothing keeps the record.
+    const logout = await app.server.inject({
+      method: "POST",
+      url: "/api/session/logout",
+      headers: { "x-loam-enc": transport.sessionId, "content-type": "application/json" },
+      payload: { enc: sealSeq(transport.key, 2, "POST /api/session/logout", {}) },
+    });
+    expect(logout.statusCode).toBe(200);
+    app.reapUnusedIdentities();
+    expect(userIds(app)).not.toContain(resumed.currentUser.id);
   });
 
   it("never removes a newcomer in the queue who agreed to the rules", async () => {

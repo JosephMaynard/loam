@@ -9,6 +9,9 @@ export const defaultChannelCreatedAt = 1_704_067_200_000;
 
 export const claimAttemptLimit = 5;
 
+/** How many times `claimAttemptLimit` a whole IPv6 /64 may spend on claim / panic guesses per window. */
+export const subnetAttemptFactor = 8;
+
 export const claimAttemptWindowMs = 5 * 60_000;
 
 // Default for `AppOptions.tombstoneHorizonMs` (docs/15 #7): how long a tombstone blocks re-import

@@ -109,20 +109,47 @@ function ipv6Groups(address: string): number[] | undefined {
  * IPv6 address as its /64 prefix (so one host can't dodge the limit by cycling addresses in its subnet).
  */
 export function rateLimitKey(ip: string): string {
+  return ipv6SubnetKey(ip) ?? addressKey(ip);
+}
+
+/** The groups of an IPv6 address that isn't IPv4-mapped, or undefined for anything else. */
+function nativeIPv6Groups(ip: string): number[] | undefined {
+  if (isIPv4(ip) || !isIPv6(ip.split("%")[0]!)) {
+    return undefined;
+  }
+  const groups = ipv6Groups(ip);
+  if (!groups || (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff)) {
+    return undefined;
+  }
+  return groups;
+}
+
+/**
+ * One peer address as a key: IPv4 as-is, an IPv4-mapped IPv6 address as its IPv4 form, any other IPv6
+ * address in one canonical spelling (zone id dropped). For the strict per-attempt limiters, which a whole
+ * IPv6 LAN (one SLAAC /64) must not share: see {@link ipv6SubnetKey} for their coarser second bound.
+ */
+export function addressKey(ip: string): string {
+  const native = nativeIPv6Groups(ip);
+  if (native) {
+    return native.map((group) => group.toString(16)).join(":");
+  }
   if (isIPv4(ip) || !isIPv6(ip.split("%")[0]!)) {
     return ip.toLowerCase();
   }
   const groups = ipv6Groups(ip);
-  if (!groups) {
-    return ip.toLowerCase();
-  }
-  if (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff) {
-    return [groups[6]! >> 8, groups[6]! & 0xff, groups[7]! >> 8, groups[7]! & 0xff].join(".");
-  }
-  return `${groups
-    .slice(0, 4)
-    .map((group) => group.toString(16))
-    .join(":")}::/64`;
+  return groups ? [groups[6]! >> 8, groups[6]! & 0xff, groups[7]! >> 8, groups[7]! & 0xff].join(".") : ip.toLowerCase();
+}
+
+/** The /64 prefix of an IPv6 address that isn't IPv4-mapped, or undefined (IPv4 has no wider bucket here). */
+export function ipv6SubnetKey(ip: string): string | undefined {
+  const native = nativeIPv6Groups(ip);
+  return native
+    ? `${native
+        .slice(0, 4)
+        .map((group) => group.toString(16))
+        .join(":")}::/64`
+    : undefined;
 }
 
 /** One fixed-window counter table, LRU-bounded (a Map iterates in insertion order; a hit re-inserts). */

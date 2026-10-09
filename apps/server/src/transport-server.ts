@@ -9,7 +9,7 @@ import { TransportHandshakeRequestSchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { IdentityLimitError, errorBody } from "./errors.js";
 import { hashIdentityToken, makeIdentityToken } from "./identity.js";
-import { registerRateLimit } from "./rate-limit.js";
+import { rateLimitKey, registerRateLimit } from "./rate-limit.js";
 import { type FastifyRequest, LogController } from "fastify";
 
 // Live transport sessions: sessionId → derived key + expiry + anti-replay window. In-memory only;
@@ -35,6 +35,9 @@ export interface TransportSession {
   userId?: string;
   identityTokenHash?: string;
   resumeResult?: { s?: number; m: string; p: string; currentUser: unknown; token: string };
+  /** The handshake's source, keyed like the HTTP limiter (`rateLimitKey`): groups anonymous sessions for
+   *  eviction at the session cap. */
+  sourceKey?: string;
 }
 
 // Every live app's per-boot internal tunnel token (normally one per process; tests build many). The request
@@ -790,29 +793,57 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
 
   ctx.server.addHook("onSend", async (request, reply, payload) => {
     const key = ctx.transportRequestKeys.get(request);
-    // Only seal string payloads (JSON) — binary bodies (images, static files) pass through, and can't
-    // be app-decrypted by a browser <img> anyway (a documented Layer-1 limitation).
-    if (!key || typeof payload !== "string") {
+    if (!key) {
       return payload;
     }
-    // Bind the RESPONSE to the request's authenticated sequence (docs/08, "Response binding"): sealing under
-    // `${method} ${url}#${seq}` means a captured response can't be replayed or cross-fed to a different
-    // request on the same route (the caller opens with the exact seq it sent). Always for the direct-sealed
-    // sync routes (every sealed sync request carries a `{ s }` envelope); for any other direct request when
-    // its envelope asked (`r: 1`, the browser client in `optional` mode). The tunnel binds its responses
-    // inside the sealed descriptor instead, and resume/logout carry their own `{ s, m, p }`. A request refused
-    // before its sequence was authenticated (a 429, a malformed body) has none, so it gets the bare aad.
-    const seq = ctx.transportRequestSeq.get(request);
-    const routeUrl = request.routeOptions?.url;
-    const bindToSequence =
-      seq !== undefined &&
-      (responseBoundRequests.has(request) || (routeUrl !== undefined && ctx.DIRECT_SEALED_SYNC_ROUTES.has(routeUrl)));
-    const responseAad = bindToSequence ? `${request.method} ${request.url}#${seq}` : `${request.method} ${request.url}`;
-    const sealed = sealTransport(key, payload, responseAad);
+    // A bodyless answer (a 204) to a client that asked for a bound response is sealed as an empty 200: that
+    // client refuses any unsealed reply but the few pre-session refusals, so a bare 204 would read as a
+    // forgery. Older clients still get the 204.
+    if (payload === undefined && responseBoundRequests.has(request) && reply.statusCode === 204) {
+      reply.code(200);
+      payload = "";
+    }
+    // Only seal string payloads (JSON) — binary bodies (images, static files) pass through, and can't
+    // be app-decrypted by a browser <img> anyway (a documented Layer-1 limitation).
+    if (typeof payload !== "string") {
+      return payload;
+    }
     reply.header("content-type", "application/json; charset=utf-8");
     reply.header("x-loam-enc", "1");
-    return JSON.stringify({ enc: sealed });
+    return JSON.stringify(sealResponse(request, key, payload, reply.statusCode));
   });
+
+  /**
+   * Seal a direct response (docs/08, "Response binding"). The aad says which request it answers, so a
+   * captured response can't be replayed or cross-fed to another request on the same route, and (for a
+   * client that asked) which status it carries, so the outer status, which is outside the AEAD, can't be
+   * relabelled:
+   *
+   * - a request whose envelope asked (`r: 1`, the browser client in `optional` mode): `METHOD url#seq#status`;
+   * - a direct-sealed sync request (every one carries a `{ s }` envelope; peers since 0.6.0 open this):
+   *   `METHOD url#seq`;
+   * - any other request with an authenticated sequence (an older client, the tunnel, whose descriptor
+   *   carries its own binding, resume/logout with their own `{ s, m, p }`): the bare `METHOD url`;
+   * - a request with no authenticated sequence (refused before it was read: a 429, a 400 or 409 for a bad
+   *   envelope; or a bare GET from an older client): sealed twice, `enc` under the bare aad for older
+   *   clients and `encStatus` under `METHOD url!status` for current ones, which never open `enc`. Whether
+   *   the client asked isn't known yet at that point, so both go out.
+   */
+  function sealResponse(request: FastifyRequest, key: string, payload: string, status: number): { enc: string; encStatus?: string } {
+    const aad = `${request.method} ${request.url}`;
+    const seq = ctx.transportRequestSeq.get(request);
+    if (seq === undefined) {
+      return { enc: sealTransport(key, payload, aad), encStatus: sealTransport(key, payload, `${aad}!${status}`) };
+    }
+    if (responseBoundRequests.has(request)) {
+      return { enc: sealTransport(key, payload, `${aad}#${seq}#${status}`) };
+    }
+    const routeUrl = request.routeOptions?.url;
+    if (routeUrl !== undefined && ctx.DIRECT_SEALED_SYNC_ROUTES.has(routeUrl)) {
+      return { enc: sealTransport(key, payload, `${aad}#${seq}`) };
+    }
+    return { enc: sealTransport(key, payload, aad) };
+  }
 
   ctx.server.addHook("onSend", async (request, reply) => {
     reply.header("x-content-type-options", "nosniff");
@@ -853,19 +884,59 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
 /** Register the handshake, sealed resume, logout, and path-hiding tunnel routes. */
 export function registerTransportRoutes(ctx: AppContext): void {
   /**
-   * The transport session to evict when the session map is at its cap: the oldest anonymous one (a
-   * handshake that never resumed an identity, which is all an unauthenticated flood can create), else the
-   * oldest bound one. Undefined only when the map is empty.
+   * Eviction policy for the transport session map, which is bounded (`TRANSPORT_SESSION_CAP`) because the
+   * handshake is unauthenticated:
+   *
+   * - One identity token binds at most `MAX_SESSIONS_PER_IDENTITY_TOKEN` live sessions; a further bind
+   *   evicts that token's own oldest. Resuming with an existing token costs no identity budget, so without
+   *   this one attacker token could bind every slot.
+   * - At the cap, a new handshake evicts the oldest session of the GROUP holding the most sessions: a
+   *   bound session's group is its identity token, an anonymous one's is its source address (keyed like
+   *   the HTTP limiter, so cycling addresses inside an IPv6 /64 doesn't split a flood). A flood from one
+   *   source or one token therefore pays for itself before a person holding one or two sessions is touched,
+   *   and anonymous sessions include every unpinned cookie client, so they get no blanket priority either.
+   *   On a tie the anonymous group goes first, then the group whose oldest session is oldest.
    */
-  function oldestEvictableTransportSession(): string | undefined {
-    let oldestBound: string | undefined;
+  const MAX_SESSIONS_PER_IDENTITY_TOKEN = 4;
+
+  /** The eviction group of a session (see the policy above). */
+  function evictionGroup(session: TransportSession): string {
+    return session.authMode === "bound" && session.identityTokenHash !== undefined
+      ? `token:${session.identityTokenHash}`
+      : `source:${session.sourceKey ?? ""}`;
+  }
+
+  /** The session to evict at the cap (see the policy above), or undefined when the map is empty. */
+  function transportSessionToEvict(): string | undefined {
+    const groups = new Map<string, { count: number; oldest: string; anonymous: boolean }>();
     for (const [id, session] of ctx.transportSessions) {
-      if (session.authMode === "anonymous") {
-        return id;
+      const key = evictionGroup(session);
+      const group = groups.get(key);
+      if (group) {
+        group.count += 1;
+      } else {
+        groups.set(key, { count: 1, oldest: id, anonymous: session.authMode !== "bound" });
       }
-      oldestBound ??= id;
     }
-    return oldestBound;
+    // Groups iterate in order of their oldest session (insertion order), so a strict comparison keeps the
+    // oldest among equals.
+    let pick: { count: number; oldest: string; anonymous: boolean } | undefined;
+    for (const group of groups.values()) {
+      if (!pick || group.count > pick.count || (group.count === pick.count && group.anonymous && !pick.anonymous)) {
+        pick = group;
+      }
+    }
+    return pick?.oldest;
+  }
+
+  /** Make room for one more session bound by `tokenHash`: evict that token's oldest others past the cap. */
+  function enforceIdentityTokenCap(tokenHash: string, binding: TransportSession): void {
+    const mine = [...ctx.transportSessions].filter(([, session]) => session !== binding && session.identityTokenHash === tokenHash);
+    while (mine.length >= MAX_SESSIONS_PER_IDENTITY_TOKEN) {
+      const [victim] = mine.shift()!;
+      ctx.transportSessions.delete(victim);
+      ctx.closeSocketsForTransportSession(victim);
+    }
   }
 
   // Transport handshake (docs/08): client sends its ephemeral X25519 public key; the host derives a
@@ -898,11 +969,9 @@ export function registerTransportRoutes(ctx: AppContext): void {
 
       // Prune expired sessions on every handshake (cheap — handshakes are already rate-limited per
       // IP), then enforce a hard cap: if still at/over it, evict live sessions to make room rather than
-      // letting the map grow without bound. The handshake is unauthenticated, so a flood of them must not
-      // push out the people already using the node: the oldest ANONYMOUS session (one that never resumed an
-      // identity) goes first, and a bound session only when no anonymous one is left. Map iteration order
-      // is insertion order, and every session shares the same TTL, so within each kind the earliest-inserted
-      // entry is also the earliest-expiring.
+      // letting the map grow without bound, by the policy above `transportSessionToEvict`. Map iteration
+      // order is insertion order, and every session shares the same TTL, so within a group the
+      // earliest-inserted entry is also the earliest-expiring.
       const now = Date.now();
       for (const [id, existingSession] of ctx.transportSessions) {
         if (existingSession.expiresAt <= now) {
@@ -911,7 +980,7 @@ export function registerTransportRoutes(ctx: AppContext): void {
         }
       }
       while (ctx.transportSessions.size >= ctx.TRANSPORT_SESSION_CAP) {
-        const victim = oldestEvictableTransportSession();
+        const victim = transportSessionToEvict();
         if (victim === undefined) {
           break;
         }
@@ -926,6 +995,7 @@ export function registerTransportRoutes(ctx: AppContext): void {
         maxSeq: 0,
         seen: new Set(),
         authMode: "anonymous",
+        sourceKey: rateLimitKey(request.ip),
       });
       return {
         sessionId,
@@ -1004,6 +1074,7 @@ export function registerTransportRoutes(ctx: AppContext): void {
     }
 
     const currentUser = ctx.ensureSessionUser(userId);
+    enforceIdentityTokenCap(tokenHash, activeSession);
     // Bind identity to this transport session — `authMode:"bound"` is what activates the secure rules
     // (content only via the tunnel, no cookie, WS key-confirmation) for this session, independent of the
     // node's global mode.

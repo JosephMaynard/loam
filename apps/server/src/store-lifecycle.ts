@@ -633,10 +633,13 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
    * reject directory fsync with EINVAL; a caller may choose to tolerate that, but the wipe/config paths
    * here do not (correctness over availability on those platforms).
    *
-   * On Windows this reports success without flushing: Node exposes no directory flush there (a directory
-   * handle can't be flushed with FlushFileBuffers, so the call would always fail), and NTFS journals the
-   * metadata of a create, rename or delete itself. Failing here would make every durable write "not
-   * durable" and lock a Windows host on its first Emergency Reset or config save.
+   * On Windows this reports success without flushing, so there the rename's durability is best-effort: Node
+   * exposes no directory flush (a directory handle can't be flushed with FlushFileBuffers, so the call would
+   * always fail), and Node's rename (MoveFileExW without MOVEFILE_WRITE_THROUGH) may return before the change
+   * reaches the disk. NTFS journaling keeps the file system's metadata consistent after a crash, but it doesn't
+   * promise that a rename which had returned survives a power cut: the old or the new file can be there
+   * afterwards, never a torn one. Failing here would make every durable write "not durable" and lock a
+   * Windows host on its first Emergency Reset or config save, so the weaker guarantee is accepted there.
    */
   function fsyncDir(dir: string): boolean {
     if (process.platform === "win32") {

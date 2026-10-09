@@ -707,11 +707,16 @@ export function createMeshLayer(rt: Runtime) {
     // Rebuild the carried row from the fields that matter rather than spreading the peer's object:
     // unauthenticated extras ride along otherwise — `meta.streaming`, say, which `isSyncableMessage`
     // treats as "never export", turning a carried copy into a dead one that blocks the genuine mail.
+    // `createdAt` is this node's intake time (the round's clock), not the peer's: the seal doesn't cover it
+    // (neither the AAD nor the replay key holds it), retention ages the row by it, and the origin backdates
+    // it, so keeping the peer's value would let a relay with a short retention TTL reap fresh mail on its
+    // next tick and, having marked it seen, never take it back. It is also what the next carrier is told,
+    // so the send time hides behind one more hop.
     const relayed = MessageSchema.parse({
       id: message.id,
       type: "sealed",
       authorId: MESH_SENTINEL_AUTHOR,
-      createdAt: message.createdAt,
+      createdAt: Math.min(seenAt, now),
       toTag: message.toTag,
       sealed: message.sealed,
       ttlExpiresAt: message.ttlExpiresAt,
@@ -803,8 +808,10 @@ export function createMeshLayer(rt: Runtime) {
   const ORIGIN_HOP_FLOOR = 2;
   /** The send time behind `ttlExpiresAt` / `createdAt` moves back by up to this share of the lifetime… */
   const ORIGIN_BACKDATE_FRACTION = 5;
-  /** …and never by more than this. */
-  const ORIGIN_BACKDATE_MAX_MS = 12 * 3_600_000;
+  /** …and never by more than this. Kept small: where a sealed id first appears in a digest already dates a
+   *  send to within a poll interval, so a longer step hides little, while a relay running an older build
+   *  (which ages carried mail by the origin's stated time) with a retention TTL loses that much of it. */
+  const ORIGIN_BACKDATE_MAX_MS = 3_600_000;
 
   /**
    * The hop budget a message sealed here starts with: uniform (CSPRNG) over [max − ORIGIN_HOP_SPREAD, max],
@@ -818,9 +825,10 @@ export function createMeshLayer(rt: Runtime) {
 
   /**
    * How far back (ms, uniform via CSPRNG) a fresh message's stated send time goes: up to a fifth of its
-   * lifetime, at most 12 hours, and at most a fifth of the node's retention TTL when one is set, since
+   * lifetime, at most an hour, and at most a fifth of the node's retention TTL when one is set, since
    * retention ages sealed rows by `createdAt` and a larger step would let the reaper take mail before anyone
-   * carried it. `ttlExpiresAt` = stated send time + `ttlMs`, so the message lives up to that much less, and
+   * carried it. (Relays restamp `createdAt` with their intake time, so this bound protects the origin's own
+   * copy; see `ORIGIN_BACKDATE_MAX_MS` for older relays.) `ttlExpiresAt` = stated send time + `ttlMs`, so the message lives up to that much less, and
    * since `ttlMs` ≥ 60 s it always leaves at least four fifths of it.
    */
   function originBackdateMs(ttlMs: number): number {

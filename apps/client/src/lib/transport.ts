@@ -849,20 +849,23 @@ function restAad(method: string, path: string): string {
 
 /**
  * Open a direct sealed response (docs/08, "Response binding"). The server seals the answer to a request
- * under `${aad}#${seq}`, the sequence that request carried, so a response captured earlier on the same
- * route can't be passed off as this one: it opens under another sequence or not at all. The one exception
- * is a refusal the server made before it could authenticate the request's sequence (a 429 from the rate
- * limiter, a 400 for a malformed envelope, a 409 for a replay), sealed under the bare aad; that is accepted
- * only with an error status, so the worst a replay of one can do is fail a request, never feed it old data.
+ * under `${aad}#${seq}#${status}`: the sequence that request carried, so a response captured earlier on the
+ * same route can't be passed off as this one, and the status it was sent with, so the outer status (outside
+ * the AEAD) can't be relabelled. The one exception is a refusal the server made before it could
+ * authenticate the request's sequence (a 429 from the rate limiter, a 400 for a malformed envelope, a 409
+ * for a replay): its `encStatus` is sealed under `${aad}!${status}`, and is accepted only with an error
+ * status, so the worst a replay of one can do is fail a request, never feed it old data. The bare-aad `enc`
+ * that rides beside it is for older clients and is never opened here.
  *
- * @returns The plaintext, or null when it opens under neither.
+ * @returns The plaintext, or null when neither opens.
  */
-function openBoundResponse(key: string, enc: string, aad: string, seq: number, status: number): string | null {
-  const bound = openTransport(key, enc, `${aad}#${seq}`);
+function openBoundResponse(key: string, payload: unknown, aad: string, seq: number, status: number): string | null {
+  const record = payload && typeof payload === "object" ? (payload as { enc?: unknown; encStatus?: unknown }) : {};
+  const bound = typeof record.enc === "string" ? openTransport(key, record.enc, `${aad}#${seq}#${status}`) : null;
   if (bound !== null) {
     return bound;
   }
-  return status >= 400 ? openTransport(key, enc, aad) : null;
+  return status >= 400 && typeof record.encStatus === "string" ? openTransport(key, record.encStatus, `${aad}!${status}`) : null;
 }
 
 export interface EncryptedFetchInit {
@@ -947,7 +950,7 @@ async function attemptFetch(
   const aad = restAad(method, path);
   // Every request carries a sealed `{ s, r: 1, b? }` envelope: `s` is this session's next monotonic
   // sequence number (for the server's replay window), `r: 1` asks the server to bind its response to that
-  // sequence (docs/08, "Response binding"), and `b` is the actual body (omitted when there is none).
+  // sequence and to its status (docs/08, "Response binding"), and `b` is the actual body (omitted when there is none).
   // `++active.seq` is atomic under JS's single thread, so concurrent in-flight requests each get a
   // distinct, ever-increasing number. A safe (GET/HEAD) call with no body can't carry one in the body, so
   // the envelope rides the `x-loam-seq` header instead. Every other method is ALWAYS sealed in the body,
@@ -972,9 +975,7 @@ async function attemptFetch(
 
   if (response.headers.get("x-loam-enc") === "1") {
     const payload: unknown = await response.json().catch(() => undefined);
-    const enc =
-      payload && typeof payload === "object" ? (payload as { enc?: unknown }).enc : undefined;
-    const opened = typeof enc === "string" ? openBoundResponse(active.key, enc, aad, seq, response.status) : null;
+    const opened = openBoundResponse(active.key, payload, aad, seq, response.status);
 
     if (opened === null) {
       // The server replied `x-loam-enc: 1` — i.e. its handler already ran and produced a response —
@@ -1000,7 +1001,38 @@ async function attemptFetch(
     return attemptFetch(method, path, body, init, true);
   }
 
-  return response;
+  // Under a live session the server seals everything it answers once it has looked the session up, so an
+  // unsealed reply can only be one of the refusals it makes before that (`unsealedRefusal`). Any other
+  // unsealed reply is refused: passing it through would let an on-path attacker strip the seal and serve
+  // forged plaintext (messages, a mesh identity card), which would make the response binding moot.
+  const refusal = unsealedRefusal(response.status);
+  if (refusal) {
+    return refusal;
+  }
+  throw new UnsealedResponseError(response.status);
+}
+
+/**
+ * The refusals a node sends UNSEALED to a client that holds a live session, because it makes them before it
+ * has resolved that session's key: a 401 for a session it doesn't know (a restart, the 12 h TTL), a 421 for
+ * a Host name it doesn't serve, a 503 while an Emergency Reset is in flight.
+ */
+const UNSEALED_REFUSAL_CODES: ReadonlyMap<number, { error: string; code: string }> = new Map([
+  [401, { error: "Transport session expired", code: "session_invalid" }],
+  [421, { error: "This address isn't served by this LOAM node", code: "host_not_allowed" }],
+  [503, { error: "This network is resetting. Try again in a moment.", code: "node_resetting" }],
+]);
+
+/**
+ * A content-free stand-in for an unsealed refusal (see `UNSEALED_REFUSAL_CODES`), or undefined for any other
+ * status. The wire body is dropped: it is unauthenticated, so its text never reaches the screen. The caller
+ * gets the status and the stable code, which is all those refusals carry.
+ */
+function unsealedRefusal(status: number): Response | undefined {
+  const body = UNSEALED_REFUSAL_CODES.get(status);
+  return body
+    ? new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
+    : undefined;
 }
 
 /** The single opaque endpoint every `required`-mode request is tunnelled through (docs/08). */
@@ -1106,15 +1138,16 @@ async function tunnelFetch(
   // content the caller needs. Passing any other unsealed reply through would let an on-path attacker forge
   // it: a fake `GET /api/mesh/identity` card (mesh contact key substitution), fake messages, fake images.
   // So an unsealed reply is only ever a typed error, never a Response.
-  throw new UnsealedTunnelResponseError(response.status);
+  throw new UnsealedResponseError(response.status);
 }
 
 /**
- * Thrown by the tunnel when a reply arrives WITHOUT the session seal (see `tunnelFetch`). Carries the outer
- * status for diagnostics only — it is unauthenticated, so callers must not branch on it for anything that
- * matters; the message is a fixed, human-readable description.
+ * Thrown when a reply to a request made under a live session arrives WITHOUT the session seal (see
+ * `tunnelFetch` and `attemptFetch`). Carries the outer status for diagnostics only — it is unauthenticated,
+ * so callers must not branch on it for anything that matters; the message is a fixed, human-readable
+ * description.
  */
-export class UnsealedTunnelResponseError extends Error {
+export class UnsealedResponseError extends Error {
   readonly status: number;
 
   constructor(status: number) {
@@ -1127,7 +1160,7 @@ export class UnsealedTunnelResponseError extends Error {
             ? "Too many requests; try again in a moment."
             : `The node sent an unencrypted reply (${status}), which was refused.`,
     );
-    this.name = "UnsealedTunnelResponseError";
+    this.name = "UnsealedResponseError";
     this.status = status;
   }
 }
