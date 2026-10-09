@@ -507,6 +507,33 @@ describe("transport encryption transparent round-trip", () => {
     expect(openTransport(session.key, enc(bareGet), getAad)).not.toBeNull();
   });
 
+  it("seals a bodyless answer as an empty 200 for a client that asked for a bound response; an older client still gets the 204", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const user = await newSession(app);
+    const session = await openSession(app);
+    const headers = { cookie: user.cookie, "x-loam-enc": session.sessionId, "content-type": "application/json" };
+    const aad = "POST /api/typing";
+
+    const bound = await app.server.inject({
+      method: "POST",
+      url: "/api/typing",
+      headers,
+      payload: { enc: sealTransport(session.key, JSON.stringify({ s: 1, r: 1, b: { channelId: "general" } }), aad) },
+    });
+    expect(bound.statusCode).toBe(200);
+    expect(bound.headers["x-loam-enc"]).toBe("1");
+    expect(openTransport(session.key, (bound.json() as { enc: string }).enc, `${aad}#1`)).toBe("");
+
+    const legacy = await app.server.inject({
+      method: "POST",
+      url: "/api/typing",
+      headers,
+      payload: { enc: sealRequest(session.key, 2, aad, { channelId: "general" }) },
+    });
+    expect(legacy.statusCode).toBe(204);
+    expect(legacy.headers["x-loam-enc"]).toBeUndefined();
+  });
+
   it("required mode: only the public bootstrap is directly reachable; all content is tunnel-only", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
 

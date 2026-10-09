@@ -33,7 +33,7 @@ import {
   wipeServerCredentials,
   SERVER_URL_KEY,
   TransportNeedsQrError,
-  UnsealedTunnelResponseError,
+  UnsealedResponseError,
   wsUrl,
 } from "./transport";
 
@@ -324,9 +324,10 @@ describe("transport", () => {
       vi.stubGlobal("fetch", fetchMock);
 
       await ensureSession("optional", host.publicKey);
-      await encryptedFetch("POST", "/api/messages", { n: 1 });
-      await encryptedFetch("POST", "/api/messages", { n: 2 });
-      await encryptedFetch("DELETE", "/api/messages/x");
+      // The fake node answers unsealed, which the client refuses; only the requests matter here.
+      await encryptedFetch("POST", "/api/messages", { n: 1 }).catch(() => undefined);
+      await encryptedFetch("POST", "/api/messages", { n: 2 }).catch(() => undefined);
+      await encryptedFetch("DELETE", "/api/messages/x").catch(() => undefined);
 
       expect(seqs).toEqual([1, 2, 3]);
     });
@@ -547,7 +548,7 @@ describe("transport", () => {
       vi.stubGlobal("fetch", fetchMock);
 
       await ensureSession("optional", host.publicKey);
-      await encryptedFetch("POST", "/api/admin/sync/run", undefined);
+      await encryptedFetch("POST", "/api/admin/sync/run", undefined).catch(() => undefined);
 
       // A plaintext-injected mutation body is rejected server-side unless it's `{ enc }` — a bodyless
       // mutation must still carry a (empty) envelope, never a bare absent body, to pass that gate.
@@ -579,7 +580,7 @@ describe("transport", () => {
       vi.stubGlobal("fetch", fetchMock);
 
       await ensureSession("optional", host.publicKey);
-      await encryptedFetch("GET", "/api/channels");
+      await encryptedFetch("GET", "/api/channels").catch(() => undefined);
 
       expect(capturedBody).toBeUndefined();
       const opened = openTransport(getSession()!.key, capturedSeq!, "GET /api/channels");
@@ -616,6 +617,83 @@ describe("transport", () => {
       fetchMock.mockImplementation(async () => new Response(JSON.stringify({ enc: refusal }), { status: 429, headers: { "x-loam-enc": "1" } }));
       const limited = await encryptedFetch("POST", "/api/messages/general", { body: "z" });
       expect(limited.status).toBe(429);
+    });
+  });
+
+  describe("an optional-mode session never accepts an unsealed reply as content", () => {
+    /** A fake node that handshakes as `host` and answers every content request with `reply`. */
+    function optionalNode(host: ReturnType<typeof createTransportIdentity>, reply: (url: string, init: RequestInit) => Response) {
+      return vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+          return new Response(JSON.stringify(json), { status });
+        }
+        return reply(url, init);
+      });
+    }
+
+    it("refuses a forged plaintext 200 (a stripped seal) instead of returning it", async () => {
+      const host = createTransportIdentity();
+      const forgedCard = { meshId: "mesh.attacker", signPublicKey: "attacker", kxPublicKey: "attacker" };
+      vi.stubGlobal(
+        "fetch",
+        optionalNode(host, () => new Response(JSON.stringify(forgedCard), { status: 200, headers: { "content-type": "application/json" } })),
+      );
+
+      await ensureSession("optional", host.publicKey);
+      const failure = await encryptedFetch("GET", "/api/mesh/identity").catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(UnsealedResponseError);
+      expect((failure as UnsealedResponseError).status).toBe(200);
+      // A mutation's forged plaintext error is refused the same way: its text never reaches the screen.
+      await expect(
+        encryptedFetch("POST", "/api/messages", { body: "hi" }).then(() => "accepted"),
+      ).rejects.toBeInstanceOf(UnsealedResponseError);
+    });
+
+    it("passes the pre-session refusals (401, 421, 503) through as content-free responses carrying only the stable code", async () => {
+      const host = createTransportIdentity();
+      let status = 421;
+      vi.stubGlobal(
+        "fetch",
+        optionalNode(host, () => new Response(JSON.stringify({ error: "Attacker text", code: "attacker" }), { status })),
+      );
+
+      await ensureSession("optional", host.publicKey);
+      for (const [refused, code] of [[421, "host_not_allowed"], [503, "node_resetting"], [401, "session_invalid"]] as const) {
+        status = refused;
+        const response = await encryptedFetch("POST", "/api/messages", { body: "hi" });
+        expect(response.status).toBe(refused);
+        const body = (await response.json()) as { error: string; code: string };
+        expect(body.code).toBe(code);
+        expect(body.error).not.toContain("Attacker");
+      }
+    });
+
+    it("accepts the sealed empty 200 a node sends for a bodyless answer", async () => {
+      const host = createTransportIdentity();
+      vi.stubGlobal(
+        "fetch",
+        optionalNode(host, (url, init) => {
+          const sealed = sealTransport(getSession()!.key, "", `${init.method} ${url}#${getSession()!.seq}`);
+          return new Response(JSON.stringify({ enc: sealed }), { status: 200, headers: { "x-loam-enc": "1" } });
+        }),
+      );
+
+      await ensureSession("optional", host.publicKey);
+      const response = await encryptedFetch("POST", "/api/typing", { channelId: "general" });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("");
+    });
+
+    it("leaves images and file downloads on the direct URL: they never pass through the sealed fetch", async () => {
+      const host = createTransportIdentity();
+      const node = optionalNode(host, () => new Response(new Uint8Array([0x89, 0x50]), { status: 200 }));
+      vi.stubGlobal("fetch", node);
+
+      await ensureSession("optional", host.publicKey);
+      expect(await encryptedImageUrl("/api/avatars/avt_0123456789abcdef.webp")).toBe("/api/avatars/avt_0123456789abcdef.webp");
+      expect(await encryptedImageUrl("/api/attachments/att_0123456789abcdef.bin")).toBe("/api/attachments/att_0123456789abcdef.bin");
+      expect(node.mock.calls.filter(([url]) => url !== "/api/transport/handshake")).toHaveLength(0);
     });
   });
 

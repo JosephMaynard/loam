@@ -790,9 +790,19 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
 
   ctx.server.addHook("onSend", async (request, reply, payload) => {
     const key = ctx.transportRequestKeys.get(request);
+    if (!key) {
+      return payload;
+    }
+    // A bodyless answer (a 204) to a client that asked for a bound response is sealed as an empty 200: that
+    // client refuses any unsealed reply but the few pre-session refusals, so a bare 204 would read as a
+    // forgery. Older clients still get the 204.
+    if (payload === undefined && responseBoundRequests.has(request) && reply.statusCode === 204) {
+      reply.code(200);
+      payload = "";
+    }
     // Only seal string payloads (JSON) — binary bodies (images, static files) pass through, and can't
     // be app-decrypted by a browser <img> anyway (a documented Layer-1 limitation).
-    if (!key || typeof payload !== "string") {
+    if (typeof payload !== "string") {
       return payload;
     }
     // Bind the RESPONSE to the request's authenticated sequence (docs/08, "Response binding"): sealing under

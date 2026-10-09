@@ -1000,7 +1000,38 @@ async function attemptFetch(
     return attemptFetch(method, path, body, init, true);
   }
 
-  return response;
+  // Under a live session the server seals everything it answers once it has looked the session up, so an
+  // unsealed reply can only be one of the refusals it makes before that (`unsealedRefusal`). Any other
+  // unsealed reply is refused: passing it through would let an on-path attacker strip the seal and serve
+  // forged plaintext (messages, a mesh identity card), which would make the response binding moot.
+  const refusal = unsealedRefusal(response.status);
+  if (refusal) {
+    return refusal;
+  }
+  throw new UnsealedResponseError(response.status);
+}
+
+/**
+ * The refusals a node sends UNSEALED to a client that holds a live session, because it makes them before it
+ * has resolved that session's key: a 401 for a session it doesn't know (a restart, the 12 h TTL), a 421 for
+ * a Host name it doesn't serve, a 503 while an Emergency Reset is in flight.
+ */
+const UNSEALED_REFUSAL_CODES: ReadonlyMap<number, { error: string; code: string }> = new Map([
+  [401, { error: "Transport session expired", code: "session_invalid" }],
+  [421, { error: "This address isn't served by this LOAM node", code: "host_not_allowed" }],
+  [503, { error: "This network is resetting. Try again in a moment.", code: "node_resetting" }],
+]);
+
+/**
+ * A content-free stand-in for an unsealed refusal (see `UNSEALED_REFUSAL_CODES`), or undefined for any other
+ * status. The wire body is dropped: it is unauthenticated, so its text never reaches the screen. The caller
+ * gets the status and the stable code, which is all those refusals carry.
+ */
+function unsealedRefusal(status: number): Response | undefined {
+  const body = UNSEALED_REFUSAL_CODES.get(status);
+  return body
+    ? new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
+    : undefined;
 }
 
 /** The single opaque endpoint every `required`-mode request is tunnelled through (docs/08). */
@@ -1106,15 +1137,16 @@ async function tunnelFetch(
   // content the caller needs. Passing any other unsealed reply through would let an on-path attacker forge
   // it: a fake `GET /api/mesh/identity` card (mesh contact key substitution), fake messages, fake images.
   // So an unsealed reply is only ever a typed error, never a Response.
-  throw new UnsealedTunnelResponseError(response.status);
+  throw new UnsealedResponseError(response.status);
 }
 
 /**
- * Thrown by the tunnel when a reply arrives WITHOUT the session seal (see `tunnelFetch`). Carries the outer
- * status for diagnostics only — it is unauthenticated, so callers must not branch on it for anything that
- * matters; the message is a fixed, human-readable description.
+ * Thrown when a reply to a request made under a live session arrives WITHOUT the session seal (see
+ * `tunnelFetch` and `attemptFetch`). Carries the outer status for diagnostics only — it is unauthenticated,
+ * so callers must not branch on it for anything that matters; the message is a fixed, human-readable
+ * description.
  */
-export class UnsealedTunnelResponseError extends Error {
+export class UnsealedResponseError extends Error {
   readonly status: number;
 
   constructor(status: number) {
@@ -1127,7 +1159,7 @@ export class UnsealedTunnelResponseError extends Error {
             ? "Too many requests; try again in a moment."
             : `The node sent an unencrypted reply (${status}), which was refused.`,
     );
-    this.name = "UnsealedTunnelResponseError";
+    this.name = "UnsealedResponseError";
     this.status = status;
   }
 }

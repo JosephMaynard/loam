@@ -182,7 +182,7 @@ client → server   AAD "loam.ws.proof.v1"        { type:"proof",     connection
 - **Unsealed tunnel replies are never used** (pre-release review 2026-09-25). On a live tunnel session the
   client acts on exactly one unsealed reply: a `401` to a `GET`/`HEAD`, which triggers one re-handshake +
   retry (an unsafe method is never retried — the outer status is unauthenticated and the request may already
-  have run). Every other unsealed reply (403, 409, 429, 503, …) surfaces as an `UnsealedTunnelResponseError`,
+  have run). Every other unsealed reply (403, 409, 429, 503, …) surfaces as an `UnsealedResponseError`,
   never as a `Response` — otherwise an on-path attacker could forge content such as a `GET /api/mesh/identity`
   card (mesh contact key substitution), messages or images.
 

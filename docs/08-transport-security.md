@@ -71,6 +71,15 @@
 > a request, which an on-path attacker can do anyway, but never pass old data as a success. An envelope
 > without `r` (an older client still open in a tab across an upgrade) gets the bare aad as before, so the
 > server stays compatible; the client and server ship together because the node serves the client.
+> Binding only helps if the client also refuses a reply with the seal stripped off. Under a live session
+> it accepts an unsealed reply only for the three refusals the node makes before it has looked the session
+> up: a `401` for a session it doesn't know, a `421` for a Host name it doesn't serve, and a `503` while an
+> Emergency Reset is in flight. Even those reach the caller as a stand-in carrying only the status and the
+> stable error code (the wire body is unauthenticated and is dropped). Every other unsealed reply is an
+> `UnsealedResponseError`. A `204` would otherwise be the one unsealed answer to a bound request, so the
+> server seals a bodyless answer to an `r: 1` request as an empty `200` (an older client still gets the
+> `204`). Images and file downloads are unaffected: in `optional` mode they load from their direct URL,
+> never through the sealed fetch.
 >
 > **Client pin rules (pre-release review 2026-09-25).** A `#k=` fragment only ever *establishes* a pin for
 > an origin that has none (or re-confirms the same key). A **different** key never silently replaces the
@@ -95,7 +104,7 @@
 > it learned over the plaintext bootstrap — and is suppressed outright when the advertised key contradicts
 > the client's pin. On a live tunnel session the client **never hands an unsealed reply to the caller**:
 > the only unsealed reply it acts on is a `401` to a `GET`/`HEAD`, which triggers one re-handshake + retry;
-> anything else unsealed (403, 503, 429, …) becomes an `UnsealedTunnelResponseError`, so an on-path forger
+> anything else unsealed (403, 503, 429, …) becomes an `UnsealedResponseError`, so an on-path forger
 > can't fake content such as a `GET /api/mesh/identity` card.
 >
 > **Server logs.** Tunnel re-dispatches are never request-logged (a `LogController` recognises the
