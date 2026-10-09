@@ -162,7 +162,7 @@ export type AppContext = {
 ): { message?: Message; deletedMessage?: Message; deletedMessageId?: string; error?: string; forbidden?: boolean };
   updateMessage(message: Message, nextBody: string, streaming: boolean): Message;
   loadData(): void;
-  attemptRateLimited(attempts: Map<string, { count: number; resetAt: number }>, key: string): boolean;
+  attemptRateLimited(attempts: Map<string, { count: number; resetAt: number }>, ip: string): boolean;
   pruneExpiredRateLimiters(): void;
   executeKillSwitch(): Promise<KillSwitchResult>;
   executeKillSwitchBody(): Promise<KillSwitchResult>;

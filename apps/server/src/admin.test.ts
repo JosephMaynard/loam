@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp, type LoamApp } from "./app.js";
 import { openStore } from "./db.js";
@@ -257,16 +257,36 @@ describe("host-device admin bootstrap: the claim budget and setup codes", () => 
     expect((promoted.json() as { isAdmin: boolean }).isAdmin).toBe(true);
   });
 
-  it("counts claim guesses per IPv6 /64, so a guesser cycling addresses gets no more tries", async () => {
+  it("counts claim guesses per address, so a LAN neighbour can't spend another's, with a per-/64 bound on cycling addresses", async () => {
     const app = await makeApp(undefined, { hostToken: HOST_TOKEN });
     const guesser = await newSession(app);
     const from = (remoteAddress: string, secret: string) =>
       app.server.inject({ method: "POST", url: "/api/admin/claim", headers: { cookie: guesser.cookie }, payload: { secret }, remoteAddress });
-    for (let host = 1; host <= 5; host += 1) {
-      expect((await from(`2001:db8:5:6::${host}`, `guess-${host}`)).statusCode).toBe(403);
+    // One address spends its five guesses; its neighbour on the same /64 still has its own.
+    for (let i = 0; i < 5; i += 1) {
+      expect((await from("2001:db8:5:6::1", `guess-${i}`)).statusCode).toBe(403);
     }
-    expect((await from("2001:db8:5:6::99", "guess-6")).statusCode).toBe(429);
-    expect((await from("2001:db8:5:7::1", "guess-7")).statusCode).toBe(403); // another /64 is another host
+    expect((await from("2001:db8:5:6::1", "guess-5")).statusCode).toBe(429);
+    expect((await from("2001:db8:5:6::2", "guess-6")).statusCode).toBe(403);
+    // Cycling addresses inside the /64 runs out at eight times that (one address's refused guesses don't
+    // count). The route's own limiter allows ten requests a minute per /64, so the clock moves a minute on
+    // between batches; the attempt window is five minutes.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      let counted = 6;
+      let host = 3;
+      while (counted < 40) {
+        vi.setSystemTime(Date.now() + 61_000);
+        for (let inWindow = 0; inWindow < 10 && counted < 40; inWindow += 1, host += 1, counted += 1) {
+          expect((await from(`2001:db8:5:6::${host}`, `guess-${host}`)).statusCode).toBe(403);
+        }
+      }
+      vi.setSystemTime(Date.now() + 1_000);
+      expect((await from("2001:db8:5:6::ff", "guess-x")).statusCode).toBe(429);
+      expect((await from("2001:db8:5:7::1", "guess-y")).statusCode).toBe(403); // another /64 is another network
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("hostDevice CONFIGURED on a node with no launcher token behaves like `none` and never touches the limiter", async () => {

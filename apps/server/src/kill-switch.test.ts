@@ -585,6 +585,24 @@ describe("panic endpoint", () => {
     expect(app.store.loadMessages().length).toBe(1);
   });
 
+  it("counts wrong tokens per address: a neighbour on the same IPv6 /64 can't lock the operator's real token out", async () => {
+    const app = await makeApp({
+      killSwitch: { enabled: true, panicToken: "panic-token-0123456789" },
+    });
+    const from = (remoteAddress: string, token: string) =>
+      app.server.inject({ method: "POST", url: "/api/panic", payload: { token }, remoteAddress });
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect((await from("2001:db8:9:9::66", `wrong-${attempt}`)).statusCode).toBe(404);
+    }
+    // That address is now locked out, still with the same 404 and no limiter headers...
+    const locked = await from("2001:db8:9:9::66", "panic-token-0123456789");
+    expect(locked.statusCode).toBe(404);
+    expect(Object.keys(locked.headers).filter((name) => name.startsWith("x-ratelimit") || name === "retry-after")).toEqual([]);
+    // ...but the operator's phone on the same LAN still fires the wipe.
+    expect((await from("2001:db8:9:9::5", "panic-token-0123456789")).statusCode).toBe(200);
+  });
+
   it("answers 404 (never 429) even past the route-level rate limit", async () => {
     const app = await makeApp({
       killSwitch: { enabled: true, panicToken: "panic-token-0123456789" },

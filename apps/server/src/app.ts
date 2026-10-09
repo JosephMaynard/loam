@@ -56,11 +56,12 @@ import { type ClientFiles, registerClientFiles } from "./static-files.js";
 import { createTransportServer, loamLogController, loamLoggerOptions, registerTransportHooks, registerTransportRoutes } from "./transport-server.js";
 import { createSyncEngine } from "./sync.js";
 import { resolveLanIPv4 } from "./net.js";
+import { addressKey, ipv6SubnetKey } from "./rate-limit.js";
 
 import type { AppData, AppOptions, LoamApp, PendingUpload } from "./types.js";
 
 import { IdentityLimitError, errorBody } from "./errors.js";
-import { sessionCookieName, sessionCookieMaxAge, claimAttemptLimit, claimAttemptWindowMs, defaultTombstoneHorizonMs, defaultChannels, legacyDemoUserIds } from "./defaults.js";
+import { sessionCookieName, sessionCookieMaxAge, claimAttemptLimit, claimAttemptWindowMs, subnetAttemptFactor, defaultTombstoneHorizonMs, defaultChannels, legacyDemoUserIds } from "./defaults.js";
 import { defaultLoamConfig, mergeConfig, reconcileLegacyProfile, sanitizeLegacyConfigJson, withoutLauncherOwnedKeys } from "./config.js";
 
 import { makeUser, makeSessionUserId, makeSessionToken, makeAdminSetupCode, encodeCookieValue, readCookie } from "./identity.js";
@@ -2062,10 +2063,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Track a secret-guess attempt under the given key (session user id or IP) and report whether
-   * that key is over the limit for the current window.
+   * Track a secret-guess attempt (an admin claim, a panic token) from peer address `ip` and report whether
+   * it is over the limit for the current window. Two bounds:
+   *
+   * - `claimAttemptLimit` per ADDRESS. Not per IPv6 /64 like the HTTP limiter: a SLAAC LAN is one /64, and
+   *   keying on it let any member spend the bucket and lock everyone else, the operator's real panic token
+   *   included, out for the window, renewably.
+   * - `subnetAttemptFactor` times that per /64, so cycling addresses inside a subnet still doesn't buy
+   *   unlimited guesses. Only attempts the address bound let through count here, so one address can spend
+   *   at most its own share of it; locking a /64 out takes many addresses.
    */
-  function attemptRateLimited(attempts: Map<string, { count: number; resetAt: number }>, key: string): boolean {
+  function attemptRateLimited(attempts: Map<string, { count: number; resetAt: number }>, ip: string): boolean {
     const now = Date.now();
 
     // Opportunistic pruning so a long-lived node doesn't accumulate one entry per source IP forever.
@@ -2077,6 +2085,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
+    if (countAttempt(attempts, `address:${addressKey(ip)}`, claimAttemptLimit, now)) {
+      return true;
+    }
+    const subnet = ipv6SubnetKey(ip);
+    return subnet !== undefined && countAttempt(attempts, `subnet:${subnet}`, claimAttemptLimit * subnetAttemptFactor, now);
+  }
+
+  /** Count one attempt against `key`'s window and report whether that puts it over `limit`. */
+  function countAttempt(attempts: Map<string, { count: number; resetAt: number }>, key: string, limit: number, now: number): boolean {
     const entry = attempts.get(key);
 
     if (!entry || entry.resetAt <= now) {
@@ -2085,7 +2102,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     entry.count += 1;
-    return entry.count > claimAttemptLimit;
+    return entry.count > limit;
   }
 
   /**

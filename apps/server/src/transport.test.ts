@@ -1323,7 +1323,7 @@ describe("transport encryption WebSocket frames", () => {
     expect(plainClosed).toBe(false); // admitted (not refused) — legitimate off-node plaintext socket
   });
 
-  it("counts unconfirmed sockets per IPv6 /64, like the HTTP limiter, so cycling addresses buys none", async () => {
+  it("caps unconfirmed sockets per address, with a larger cap per IPv6 /64, so a LAN shares no small bucket and cycling addresses still runs out", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
     const session = await openTransport08(app);
     await resumeIdentity(app, session, 1);
@@ -1345,13 +1345,21 @@ describe("transport encryption WebSocket frames", () => {
       return first;
     }
 
-    // Eight sockets from eight addresses in one /64 fill that host's share of the pre-auth pool.
-    for (let host = 1; host <= 8; host += 1) {
-      const frame = await firstFrameFrom(`2001:db8:1:2::${host}`);
-      expect(openTransport(session.key, frame, WS_CHALLENGE_AAD)).toBeTruthy();
+    // One address gets eight; its ninth is refused.
+    for (let i = 0; i < 8; i += 1) {
+      expect(openTransport(session.key, await firstFrameFrom("2001:db8:1:2::1"), WS_CHALLENGE_AAD)).toBeTruthy();
     }
-    // A ninth address in the same /64 is refused; one in another /64 is not.
-    expect(await firstFrameFrom("2001:db8:1:2::9")).toContain("Too many pending connections");
+    expect(await firstFrameFrom("2001:db8:1:2::1")).toContain("Too many pending connections");
+    // Its neighbours on the same /64 (a whole LAN reconnecting after a restart) are not held to that bucket...
+    for (let host = 2; host <= 8; host += 1) {
+      expect(openTransport(session.key, await firstFrameFrom(`2001:db8:1:2::${host}`), WS_CHALLENGE_AAD)).toBeTruthy();
+    }
+    // ...but the /64 as a whole has a cap of 64 (8 + 7 so far, 49 more), so cycling addresses runs out too.
+    for (let host = 9; host <= 57; host += 1) {
+      expect(openTransport(session.key, await firstFrameFrom(`2001:db8:1:2::${host.toString(16)}`), WS_CHALLENGE_AAD)).toBeTruthy();
+    }
+    expect(await firstFrameFrom("2001:db8:1:2::ffff")).toContain("Too many pending connections");
+    // Another /64 is not affected.
     expect(openTransport(session.key, await firstFrameFrom("2001:db8:1:3::1"), WS_CHALLENGE_AAD)).toBeTruthy();
   });
 });
