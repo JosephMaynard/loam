@@ -1054,7 +1054,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     changes: Partial<Pick<User, "roles" | "banned" | "shadowBanned" | "pending" | "timeoutUntil">>,
   ): User {
     const next = UserSchema.parse({ ...user, ...changes });
+    const admitted = user.pending === true && next.pending !== true;
     store.upsertUser(next);
+    if (admitted) {
+      // Let in from the approval queue (approved, redeemed an invite, or promoted): the reaper measures
+      // "never used" from here, not from when the record joined the queue.
+      store.markUserAdmitted(user.id, Date.now());
+    }
     // Clearing works without deleting keys: a change like `timeoutUntil: undefined` is kept by Zod as an
     // undefined-valued key, Object.assign copies it onto the live record (so `isTimedOut` reads false), and
     // JSON.stringify omits it from what's persisted/broadcast.
@@ -2395,7 +2401,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * (the same criteria) is therefore reaped too, after the longer `pendingIdentityMaxAgeMs`, and its queue
    * entry goes with it (the queue is the pending records themselves). A pending record that did agree to
    * the rules is a person waiting and is never reaped; nothing queues such a record today, so that guard is
-   * defensive.
+   * defensive. Once let in, a record's window starts again from the admission (`markUserAdmitted`), and a
+   * live bound transport session counts as connected like a socket does.
    *
    * A block is deliberately NOT a sign of use: the Welcome screen keeps a real member from blocking anyone
    * before agreeing, so a block-list row on an unagreed record is a probe's, and counting it would let a
@@ -2415,6 +2422,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
     for (const pending of pendingSockets) {
       connected.add(pending.userId);
+    }
+    // A pinned client between socket connections (backgrounded, reconnecting) still holds a bound session.
+    for (const session of transportSessions.values()) {
+      if (session.authMode === "bound" && session.userId !== undefined && session.expiresAt > now) {
+        connected.add(session.userId);
+      }
     }
     const referenced = new Set<string>();
     for (const message of data.messages) {
@@ -2445,7 +2458,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         user.createdAt < (user.pending ? pendingCutoff : cutoff) &&
         !connected.has(user.id) &&
         !referenced.has(user.id) &&
-        // Last, so only the few records that are otherwise ghosts cost a query (the indexed reporter column).
+        // Last, so only the few records that are otherwise ghosts cost a query each: someone let in from the
+        // approval queue gets the full window from that moment (they may have waited longer than it, and
+        // can't agree to the rules until they next open the app), and an open report keeps its reporter.
+        (store.userAdmittedAt(user.id) ?? Number.NEGATIVE_INFINITY) < cutoff &&
         store.countOpenReports(user.id) === 0,
     );
 

@@ -212,6 +212,15 @@ export interface LoamStore {
   loadSessions(): SessionRecord[];
   upsertUser(user: User): void;
   /**
+   * Record when a user waiting in an approval queue was let in. Server-only (the `users.admitted_at`
+   * column, never part of the user record, so it is neither broadcast nor synced); it goes with the row.
+   * The unused-identity reaper measures its age window from it, so an approval doesn't leave a person who
+   * waited longer than that window to be reaped before they next open the app. No-op without a row.
+   */
+  markUserAdmitted(userId: string, admittedAt: number): void;
+  /** When `markUserAdmitted` last recorded `userId` as let in, or undefined if it never did. */
+  userAdmittedAt(userId: string): number | undefined;
+  /**
    * Delete a single user row by id, with the rows that exist only for that user: their block-list rows (as
    * blocker or blocked), their pending private-channel join requests, and their own mesh address book
    * (`mesh_contacts` they own; other users' contact entries are theirs to keep). Used by the legacy
@@ -690,6 +699,17 @@ function migrateTombstonesCreatedAt(db: SqliteConnection): void {
 }
 
 /**
+ * Add the server-only `users.admitted_at` column (see `LoamStore.markUserAdmitted`). A fresh database gets
+ * it here too, right after `CREATE TABLE`. Existing rows keep NULL: nobody was recorded as let in before.
+ */
+function migrateUsersAdmittedAt(db: SqliteConnection): void {
+  const columns = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+  if (!columns.some((column) => column.name === "admitted_at")) {
+    db.exec("ALTER TABLE users ADD COLUMN admitted_at INTEGER");
+  }
+}
+
+/**
  * Add the indexed `reports.target_id` and `reports.reporter_user_id` columns to a database created before
  * they existed, filled from each row's JSON. They let the per-message queue check and the per-reporter cap
  * query one target or one reporter instead of parsing the whole table; the JSON stays the record of truth
@@ -886,10 +906,13 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   migrateMissingAttachmentsNextAttempt(db);
   migrateReportsTargetColumns(db);
   createSealedOffersSeenTable(db);
+  migrateUsersAdmittedAt(db);
 
   const upsertUserStmt = db.prepare(
     "INSERT INTO users (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
   );
+  const markUserAdmittedStmt = db.prepare("UPDATE users SET admitted_at = ? WHERE id = ?");
+  const userAdmittedAtStmt = db.prepare("SELECT admitted_at FROM users WHERE id = ?");
   const upsertChannelStmt = db.prepare(
     "INSERT INTO channels (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
   );
@@ -1172,6 +1195,13 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     upsertUser(user) {
       refuseQuarantined("users", user.id);
       upsertUserStmt.run(user.id, JSON.stringify(user));
+    },
+    markUserAdmitted(userId, admittedAt) {
+      markUserAdmittedStmt.run(admittedAt, userId);
+    },
+    userAdmittedAt(userId) {
+      const row = userAdmittedAtStmt.get(userId) as { admitted_at: number | null } | undefined;
+      return typeof row?.admitted_at === "number" ? row.admitted_at : undefined;
     },
     deleteUser(userId) {
       deleteUserStmt.run(userId);
