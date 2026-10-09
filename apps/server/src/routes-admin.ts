@@ -68,8 +68,9 @@ export function registerAdminRoutes(ctx: AppContext): void {
     "/api/admin/claim",
     // `allowList: () => false` so internal tunnel re-dispatches count too: route configs otherwise inherit
     // the global limiter's tunnel exemption, which would lift this cap for any client using the tunnel
-    // (the same reason `semanticRateLimit` exists — see transport-server.ts).
-    { config: { rateLimit: { max: 10, timeWindow: "1 minute", allowList: () => false } } },
+    // (the same reason `semanticRateLimit` exists — see transport-server.ts). Counted per address, so an
+    // IPv6 neighbour can't spend the admin's budget.
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute", allowList: () => false, perAddress: true } } },
     async (request, reply) => {
     const body = AdminClaimRequestSchema.safeParse(request.body);
 
@@ -201,8 +202,9 @@ export function registerAdminRoutes(ctx: AppContext): void {
         rateLimit: {
           max: 10,
           timeWindow: "1 minute",
-          // Count internal tunnel re-dispatches too (see the claim route above).
+          // Count internal tunnel re-dispatches too, per address (see the claim route above).
           allowList: () => false,
+          perAddress: true,
           // Answer 404 (not the default 429) when the route limit trips, so a rate-limited prober
           // sees the same "not found" as every other failure path here — no 429 to reveal the route.
           errorResponseBuilder: () => {

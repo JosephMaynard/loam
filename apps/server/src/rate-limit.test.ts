@@ -159,6 +159,17 @@ describe("registerRateLimit", () => {
     expect(await statuses("/strict", 2, { "x-exempt": "1" })).toEqual([200, 429]);
   });
 
+  it("counts a perAddress route per address, while other routes fold IPv6 to its /64", async () => {
+    await build((app) => {
+      app.get("/own", { config: { rateLimit: { max: 1, perAddress: true } } }, async () => ({ ok: true }));
+      app.get("/shared", { config: { rateLimit: { max: 1 } } }, async () => ({ ok: true }));
+    });
+    expect(await statuses("/own", 2, {}, "2001:db8::1")).toEqual([200, 429]);
+    expect(await statuses("/own", 1, {}, "2001:db8::2")).toEqual([200]);
+    expect(await statuses("/shared", 1, {}, "2001:db8::1")).toEqual([200]);
+    expect(await statuses("/shared", 1, {}, "2001:db8::2")).toEqual([429]);
+  });
+
   it("uses a route's errorResponseBuilder, with no retry-after", async () => {
     await build((app) =>
       app.post(

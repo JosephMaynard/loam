@@ -625,7 +625,8 @@ describe("panic endpoint", () => {
     const from = (remoteAddress: string, token: string) =>
       app.server.inject({ method: "POST", url: "/api/panic", payload: { token }, remoteAddress });
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    // Past both the attempt limiter (5) and the route limiter (10/min), which count per address too.
+    for (let attempt = 0; attempt < 12; attempt += 1) {
       expect((await from("2001:db8:9:9::66", `wrong-${attempt}`)).statusCode).toBe(404);
     }
     // That address is now locked out, still with the same 404 and no limiter headers...

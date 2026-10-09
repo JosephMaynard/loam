@@ -40,6 +40,12 @@ export interface RateLimitOptions {
   timeWindow: number | string;
   /** True exempts the request (it isn't counted). */
   allowList?: (request: FastifyRequest) => boolean;
+  /**
+   * Count each address on its own instead of folding IPv6 to its /64. For routes where a shared budget
+   * would let one device on an IPv6 LAN lock everyone else out (claim, panic); their attempt limiters keep a
+   * per-/64 bound, so cycling addresses still buys no unlimited guesses.
+   */
+  perAddress?: boolean;
   /** Builds the error thrown for a refused request (default: a 429 naming the wait). */
   errorResponseBuilder?: (request: FastifyRequest, context: RateLimitExceeded) => Error;
 }
@@ -202,7 +208,8 @@ function defaultErrorResponse(_request: FastifyRequest, context: RateLimitExceed
 /** The `onRequest` hook enforcing one limiter. */
 function limiterHook(options: RateLimitOptions, counter: FixedWindowCounter): onRequestAsyncHookHandler {
   const windowMs = parseTimeWindow(options.timeWindow);
-  const { max, allowList, errorResponseBuilder } = options;
+  const { max, allowList, errorResponseBuilder, perAddress } = options;
+  const keyOf = perAddress ? addressKey : rateLimitKey;
   if (!Number.isInteger(max) || max < 0) {
     throw new Error(`Invalid rate-limit max: ${max}`);
   }
@@ -210,7 +217,7 @@ function limiterHook(options: RateLimitOptions, counter: FixedWindowCounter): on
     if (allowList?.(request)) {
       return;
     }
-    const { count, ttl } = counter.hit(rateLimitKey(request.ip), windowMs);
+    const { count, ttl } = counter.hit(keyOf(request.ip), windowMs);
     if (count <= max) {
       return;
     }
