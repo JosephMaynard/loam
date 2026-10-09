@@ -1485,7 +1485,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // content injection through PATCH. Reactions check their own posting rules
         // at create; for mutation purposes they inherit the target's channel state checked here.
         // Like the type-specific flags above, the node-wide shutdown blocks edits but not deletes.
-        if (!opts.isDelete && !appConfig.features.enablePublicChannels) {
+        if (!opts.isDelete && !channelOpenUnderFlags(channel)) {
           return { code: 403, error: "Channel posting is disabled on this LOAM node" };
         }
 
@@ -1582,6 +1582,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return channel?.visibility === "private" ? channelMemberIds(channel) : undefined;
   }
 
+  /** Whether the node-wide channel flag leaves `channel` open to posts and edits: `enablePublicChannels`
+   *  covers the public channels only, never a private one. */
+  function channelOpenUnderFlags(channel: Channel): boolean {
+    return channel.visibility === "private" || appConfig.features.enablePublicChannels;
+  }
+
   /**
    * Validate input and create a new message record, or remove an existing reaction when toggled.
    *
@@ -1619,13 +1625,6 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (authorRulesError) {
       return { error: authorRulesError, forbidden: true };
-    }
-
-    if (
-      (input.type === "channelPost" || input.type === "channelReply") &&
-      !appConfig.features.enablePublicChannels
-    ) {
-      return { error: "Channel posting is disabled on this LOAM node" };
     }
 
     if (input.type === "channelReply" && !appConfig.features.enableReplies) {
@@ -1670,6 +1669,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // never leaked by probing the message endpoint.
       if (!canAccessChannel(channel, authorId)) {
         return { error: "Channel does not exist" };
+      }
+
+      // `enablePublicChannels` switches off the PUBLIC channels only: a private channel is governed by
+      // `enablePrivateChannels` (which gates creating new ones) and its own roster, and keeps working.
+      // Checked after the access check, so a non-member still can't tell a private channel exists.
+      if (!channelOpenUnderFlags(channel)) {
+        return { error: "Channel posting is disabled on this LOAM node" };
       }
 
       const policyError = channelPostingError(channel, authorId, input.type === "channelReply");
