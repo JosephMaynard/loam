@@ -177,8 +177,7 @@ directory, `.loam/` by default) via the `LoamStore` data-access layer in `apps/s
 cover users, channels, messages, sessions, config, tombstones, sync provenance, mesh identities and
 contacts, reports and blocks. `config.json` and the `avatars/` and `attachments/` directories stay as
 plain files. A stored row that no longer validates is repaired in memory where a safe repair exists,
-otherwise quarantined (left on disk, never loaded, its id reserved) rather than failing boot. Legacy flat
-JSON data is migrated by `importLegacyJsonData()` on first boot and renamed `*.json.bak`.
+otherwise quarantined (left on disk, never loaded, its id reserved) rather than failing boot.
 
 ## Encryption at rest
 
@@ -292,7 +291,7 @@ pnpm smoke:cli                 # pack and install loamnet, then drive the instal
 
 There is no lint script; type-checking happens inside `build`, plus the separate `typecheck` for
 `apps/app`. The suites: `packages/*` (schema, display-name, avatar, qr, crypto, tui); `apps/server`
-(`src/db.test.ts` for the data-access layer and importer, route suites by subject (`admin`, `channels`, `messages`,
+(`src/db.test.ts` for the data-access layer, route suites by subject (`admin`, `channels`, `messages`,
 `moderation`, `kill-switch`, `transport`, `sync`, `mesh`…) driving `buildApp()` through `server.inject()`
 with a shared harness in `src/test-support/` (its header maps the files), and focused suites for realtime, llm, mesh-bridge, sync-transport,
 tombstone, net, embedded, invites, rate-limit, member rules and blocking); `apps/client` (Vitest with

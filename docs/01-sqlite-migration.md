@@ -163,7 +163,7 @@ closed (`sanitizeLegacyConfigJson`), and a malformed transport identity is regen
 
 The first `apps/server` suite exists: `src/db.test.ts` covers the DAL against `:memory:`/temp-file DBs
 (insert/list round-trips, all discriminated-union message variants, reaction toggle delete, session
-persistence, transaction rollback, `wipeAll()`, and the JSON→SQLite importer), and the route suites
+persistence, transaction rollback, and `wipeAll()`), and the route suites
 (`admin.test.ts`, `messages.test.ts` and the rest, see `src/test-support/app-harness.ts`) cover routes via `buildApp()` + `server.inject()`. The `test` script in `apps/server/package.json` is
 picked up by CI (`pnpm test`).
 
