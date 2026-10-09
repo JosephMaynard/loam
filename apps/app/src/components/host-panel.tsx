@@ -1,5 +1,5 @@
 import { wifiPayload } from '@loam/qr';
-import { StyleSheet } from 'react-native';
+import { Platform, StyleSheet } from 'react-native';
 
 import { QRCode } from './qr-code';
 import { ThemedText } from './themed-text';
@@ -7,6 +7,7 @@ import { ThemedView } from './themed-view';
 
 import { Spacing } from '@/constants/theme';
 import type { HostMode } from '@/lib/host-mode';
+import { androidApiLevel, hotspotAsksForLocation } from '@/lib/hotspot-permissions';
 import { t, type AppCatalogKey } from '@/lib/i18n';
 import { typedAddress } from '@/lib/join-url';
 
@@ -178,14 +179,14 @@ function WifiJoin({ state }: { state: HostState }) {
   );
 }
 
-/** Hotspot mode: the location rationale, Step 1 (join the hotspot) and Step 2 (open LOAM). */
+/** Hotspot mode: why Android asks for a permission (nearby Wi-Fi devices from API 33, location before), Step 1 (join the hotspot) and Step 2 (open LOAM). */
 function HotspotJoin({ state }: { state: HostState }) {
   const wifi = state.hotspot ? wifiPayload(state.hotspot.ssid, state.hotspot.password) : undefined;
 
   return (
     <>
       <ThemedText type="small" themeColor="textSecondary" style={styles.rationale}>
-        {t('host.locationRationale')}
+        {hotspotAsksForLocation(androidApiLevel(Platform.Version)) ? t('host.locationRationale') : t('host.nearbyRationale')}
       </ThemedText>
 
       <ThemedView type="backgroundElement" style={styles.step}>

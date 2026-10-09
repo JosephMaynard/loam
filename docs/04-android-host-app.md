@@ -10,7 +10,8 @@
 > (`apps/app/modules/loam-hotspot`, Kotlin via the Expo Modules API) plus a **host menu** (Invite people, Encryption, AI assistant, rules, privacy, About, Emergency reset)
 > above the WebView that opens a modal rendering the two-step QR join flow (`HostShareOverlay` →
 > `HostPanel`). Emulator-verified (arm64 API-35): LOAM still loads, the bar's button opens the modal,
-> tapping it prompts for `ACCESS_FINE_LOCATION` then `NEARBY_WIFI_DEVICES`, and `startHotspot()` runs.
+> tapping it prompted for `ACCESS_FINE_LOCATION` then `NEARBY_WIFI_DEVICES` (today API 33+ asks for
+> `NEARBY_WIFI_DEVICES` alone, see the permission list under LocalOnlyHotspot below), and `startHotspot()` runs.
 > This emulator's virtual WiFi actually supported LocalOnlyHotspot, so the **happy path** rendered —
 > "Host running", Step 1 with a real SSID/password (`AndroidShare_1065` / a generated passphrase) +
 > WiFi QR, and Step 2's LOAM-URL QR (at the time a fixed `192.168.49.1` — wrong, see **The Step-2
@@ -188,8 +189,9 @@ showing. `connected` is true when *any* network the phone holds has `TRANSPORT_W
 one: on a router with no uplink Android keeps mobile data as the default network while Wi-Fi stays up), or
 WifiManager reports a DHCP address; `wired` is true when any network it holds has `TRANSPORT_ETHERNET` (a
 laptop's own port, a USB adapter). The network name is best effort: Android redacts it to
-`<unknown ssid>` unless location permission was already granted (say, by an earlier hotspot start), so
-the panel shows "Network: <name>" only when it can, and otherwise says "the Wi-Fi network this phone is
+`<unknown ssid>` unless location permission was already granted. Below API 33 an earlier hotspot start may
+have granted it; on API 33+ the app never holds location (the manifest caps it at API 32), so there the
+name is never known. The panel shows "Network: <name>" only when it can, and otherwise says "the Wi-Fi network this phone is
 on".
 
 **The advertised address** comes from `pickWifiAddress` (`src/lib/host-mode.ts`, unit-tested), in order:
@@ -509,37 +511,28 @@ singleton state (Android allows one hotspot per process), and never throws: deni
 `error` phase. The request list and the grant rule are the pure, unit-tested
 `src/lib/hotspot-permissions.ts`:
 
-- `ACCESS_FINE_LOCATION` and `ACCESS_COARSE_LOCATION` are requested **together on every API level**.
-  Android 12+ requires a fine request to carry coarse in the same dialog, and on some Android 12 releases
-  a fine-only request is ignored outright (no dialog, a logcat "ACCESS_FINE_LOCATION must be requested
-  with ACCESS_COARSE_LOCATION"), which left a fresh install there unable to start the hotspot at all.
-- `NEARBY_WIFI_DEVICES` is added from API 33.
-- Below API 33 the start needs **fine** location (LocalOnlyHotspot is location-gated there): a user who
-  picks "Approximate" on the dialog has denied the hotspot and sees the location message. From API 33
-  `NEARBY_WIFI_DEVICES` is what gates `startLocalOnlyHotspot` (the manifest marks it `neverForLocation`),
-  so its grant decides and the location answer is not consulted.
+- **API 33+:** only `NEARBY_WIFI_DEVICES` is requested (Android's "Nearby devices" dialog), and its grant
+  decides. It gates `startLocalOnlyHotspot` there, and the manifest marks it `neverForLocation`, so there
+  is no location dialog and no "Approximate" choice.
+- **API 31-32:** `ACCESS_FINE_LOCATION` and `ACCESS_COARSE_LOCATION` are requested together. Android 12
+  requires a fine request to carry coarse in the same dialog, and on some Android 12 releases a fine-only
+  request is ignored outright (no dialog, a logcat "ACCESS_FINE_LOCATION must be requested with
+  ACCESS_COARSE_LOCATION"). The start needs **fine** location: a user who picks "Approximate" has denied
+  the hotspot and sees the location message.
+- **Below 31:** the same fine + coarse request (one permission group there) and the same fine rule.
 
-The permissions are declared in the manifest by the config plugin (`with-loam-host.js`), coarse beside
-fine; a test checks the manifest list covers the runtime request on every API level, since a request for a
-permission the manifest does not declare auto-denies with no dialog.
-
-> **Correction (fix/device-feedback-round1):** an earlier hardening pass ("A10") capped
-> `ACCESS_FINE_LOCATION` with `android:maxSdkVersion="32"` in the plugin, reasoning that
-> `NEARBY_WIFI_DEVICES` (API 33+, `neverForLocation`) would cover `startLocalOnlyHotspot` the same
-> way it covers Wi-Fi Aware/BLE scanning. Per Android's own docs that's true *only if the runtime
-> request is updated to ask for `NEARBY_WIFI_DEVICES` instead of `ACCESS_FINE_LOCATION` on API 33+*;
-> `use-hotspot.ts` was never changed to do that split (it still requests `ACCESS_FINE_LOCATION`
-> unconditionally, in addition to `NEARBY_WIFI_DEVICES` on 33+, and needs every requested permission
-> granted). With the manifest cap in place, the `ACCESS_FINE_LOCATION` request on any API 33+ device
-> auto-denies (a request for a permission the manifest doesn't declare shows no dialog), so the
-> hotspot could never start on **any** device running API 33+ — confirmed as the cause of a "Host
-> stopped / location permission is needed" regression on a Galaxy S25 Ultra (API 35). Fixed by
-> removing the `maxSdkVersion` cap, restoring the exact configuration verified in the emulator run
-> quoted above. Since then the grant rule has moved to `src/lib/hotspot-permissions.ts` and, on API 33+,
-> keys on `NEARBY_WIFI_DEVICES` alone (see the list above), so a denied location answer there no longer
-> blocks the hotspot; the location request is still issued on every API level, which is why
-> `ACCESS_FINE_LOCATION` stays uncapped. Requesting only `NEARBY_WIFI_DEVICES` on API 33+ (and letting
-> the cap come back) remains the follow-up.
+The share screen's explanation and the "permission denied" message follow the same split, so neither
+names the wrong dialog. The config plugin (`with-loam-host.js`) declares coarse beside fine and caps
+**both** with `android:maxSdkVersion="32"`, so an API 33+ install never holds location at all. The two
+sides must move together: a runtime request for a permission the manifest doesn't declare at the running
+API level auto-denies with no dialog. (An earlier build capped fine location while the JS side still asked
+for it on API 33+, and the hotspot could not start on any API 33+ device, a "Host stopped / location
+permission is needed" regression found on a Galaxy S25 Ultra.) `src/__tests__/with-loam-host.test.ts`
+checks that every permission the runtime request asks for on each API level is declared and not capped
+below that level. The mesh radios fit inside the cap: they ask for fine location only on API 29-32
+(Wi-Fi Aware) and below 31 (BLE scanning). Checked on the API 35 emulator only (the merged manifest
+carries the cap; the hotspot asks for Nearby devices alone); not yet verified on a physical API 33+ phone
+or an Android 12 phone.
 
 **Host UI:** `src/app/index.tsx` renders a compact host bar above the LOAM WebView with a **"Share ·
 Host"** button (a top bar, not a floating overlay — an Android WebView swallows touches on any native

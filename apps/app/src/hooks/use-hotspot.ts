@@ -17,13 +17,19 @@ import {
   pickHotspotAddress,
   type HostInterface,
 } from '@/lib/hotspot-address';
-import { hotspotPermissionsToRequest, hotspotStartPermitted, type HotspotPermission } from '@/lib/hotspot-permissions';
+import {
+  androidApiLevel,
+  hotspotAsksForLocation,
+  hotspotPermissionsToRequest,
+  hotspotStartPermitted,
+  type HotspotPermission,
+} from '@/lib/hotspot-permissions';
 import { t } from '@/lib/i18n';
 
 /**
  * Lifecycle of the local-only hotspot:
  * - `idle`       — not started yet.
- * - `requesting` — asking for the runtime location/nearby-WiFi permission.
+ * - `requesting` — asking for the runtime permission (nearby Wi-Fi devices from API 33, location before).
  * - `starting`   — permission granted, waiting on `WifiManager.LocalOnlyHotspot`.
  * - `running`    — up; `credentials` holds the generated SSID + password, and the address fields below
  *                  fill in as the hotspot's (randomly assigned) address is found.
@@ -155,18 +161,17 @@ type PermissionOutcome = 'granted' | 'denied' | 'timeout';
 
 /**
  * Request the runtime permissions LocalOnlyHotspot needs, in one dialog flow. The list and the grant rule
- * are `src/lib/hotspot-permissions.ts` (pure, tested): ACCESS_FINE_LOCATION and ACCESS_COARSE_LOCATION
- * are always requested together (Android 12+ ignores a fine-only request on some releases), plus
- * NEARBY_WIFI_DEVICES from API 33. `granted` means the start can proceed: below API 33 that needs fine
- * location (a user who picks "Approximate" has denied the hotspot, and gets the location message); from
- * API 33 it needs NEARBY_WIFI_DEVICES, which the manifest marks `neverForLocation`, so the location
- * answer is not consulted there.
+ * are `src/lib/hotspot-permissions.ts` (pure, tested): NEARBY_WIFI_DEVICES alone from API 33 (the manifest
+ * marks it `neverForLocation` and caps location at API 32), ACCESS_FINE_LOCATION and
+ * ACCESS_COARSE_LOCATION together below it (Android 12 ignores a fine-only request on some releases).
+ * `granted` means the start can proceed: below API 33 that needs fine location, so a user who picks
+ * "Approximate" has denied the hotspot and gets the location message.
  */
 async function requestHotspotPermissions(): Promise<PermissionOutcome> {
   if (Platform.OS !== 'android') {
     return 'denied';
   }
-  const apiLevel = typeof Platform.Version === 'number' ? Platform.Version : 0;
+  const apiLevel = androidApiLevel(Platform.Version);
   const wanted = hotspotPermissionsToRequest(apiLevel);
   const permissionId = (name: HotspotPermission) => PermissionsAndroid.PERMISSIONS[name];
   const answer = await awaitWithin(PermissionsAndroid.requestMultiple(wanted.map(permissionId)), PERMISSION_TIMEOUT_MS);
@@ -208,7 +213,12 @@ export async function ensureHotspot(): Promise<void> {
       // screen calls `ensureHotspot` again, which asks again, and an answer given meanwhile is just granted.
       publish({
         phase: 'error',
-        error: permission === 'timeout' ? t('hotspot.permissionTimeout') : t('hotspot.permissionDenied'),
+        error:
+          permission === 'timeout'
+            ? t('hotspot.permissionTimeout')
+            : hotspotAsksForLocation(androidApiLevel(Platform.Version))
+              ? t('hotspot.permissionDenied')
+              : t('hotspot.permissionDeniedNearby'),
       });
       return;
     }

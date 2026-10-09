@@ -37,6 +37,7 @@ export const en = {
   "host.wiredScan": "Connect to the same network as this phone, then scan this to open LOAM (or type the address).",
   "host.wifiGuestWarning": "Guest, hotel, café and campus Wi-Fi often keep devices from reaching each other. If nobody can connect, switch to Hotspot.",
   "host.locationRationale": "Android requires location permission to create a Wi-Fi hotspot. LOAM never uses, requests, or stores your location: it only turns the hotspot on.",
+  "host.nearbyRationale": "Android asks for the Nearby devices permission to create a Wi-Fi hotspot. LOAM never uses it to find you or anyone around you: it only turns the hotspot on.",
   "host.step1Title": "Step 1 · Join the Wi-Fi",
   "host.step1Body": "Scan with the phone camera to connect to this host's hotspot. Keep LOAM open, and don't switch on your phone's own Wi-Fi hotspot: it replaces this one.",
   "host.hotspotWaiting": "Waiting for the hotspot… (starts with the host)",
@@ -223,6 +224,7 @@ export const en = {
   "hotspot.startTimeout": "The hotspot didn't start in time. This device may not support one.",
   "hotspot.permissionTimeout": "Android gave no answer to the permission request. Close and reopen this screen to try again. LOAM is still reachable to anyone already on this network.",
   "hotspot.permissionDenied": "Location permission is needed to start the hotspot. LOAM is still reachable to anyone already on this network.",
+  "hotspot.permissionDeniedNearby": "The Nearby devices permission is needed to start the hotspot. LOAM is still reachable to anyone already on this network.",
   "hotspot.systemStopped": "The system stopped the hotspot (turning on the phone's own hotspot/tethering or toggling Wi-Fi does this). Close and reopen this screen to start it again. LOAM is still reachable on any network the phone is on.",
   // Why a new network couldn't be prepared (src/lib/new-network.ts; shown through setup.failed).
   "newNetwork.readSettingsFailed": "Couldn't read this phone's storage settings.",

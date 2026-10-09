@@ -41,7 +41,8 @@ Install the APK and open LOAM. Setup asks four things:
 3. **Name.** What people see when they join (blank means "LOAM").
 4. **How people connect:**
    - **Hotspot:** the phone makes its own Wi-Fi. Works with no router and no internet. Android asks for
-     Nearby devices and location permission to start it (LOAM never reads your location).
+     the Nearby devices permission to start it (location on Android 12 and older; LOAM never reads
+     your location).
    - **Wi-Fi:** everyone on the Wi-Fi the phone is already on. No hotspot, no extra permission. Guest,
      hotel and campus Wi-Fi often stop devices reaching each other; if nobody can connect, use Hotspot.
    - **Join another LOAM network:** this phone becomes a second node of a network that's already
