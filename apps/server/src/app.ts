@@ -57,7 +57,7 @@ import { createTransportServer, loamLogController, loamLoggerOptions, registerTr
 import { createSyncEngine } from "./sync.js";
 import { resolveLanIPv4 } from "./net.js";
 
-import type { AppData, AppOptions, LoamApp } from "./types.js";
+import type { AppData, AppOptions, LoamApp, PendingUpload } from "./types.js";
 
 import { IdentityLimitError, errorBody } from "./errors.js";
 import { sessionCookieName, sessionCookieMaxAge, claimAttemptLimit, claimAttemptWindowMs, defaultTombstoneHorizonMs, defaultChannels, legacyDemoUserIds } from "./defaults.js";
@@ -182,11 +182,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // a real newcomer there, but not for ever.
   const pendingIdentityMaxAgeMs = options.pendingIdentityMaxAgeMs ?? 7 * 24 * 3_600_000;
   const tombstoneHorizonMs = options.tombstoneHorizonMs ?? defaultTombstoneHorizonMs;
-  // Uploaded-but-unattached attachment ids → uploader + upload time. A message may only reference
-  // the uploader's own pending uploads; each id is consumed on first use. RAM-only: entries a
-  // restart loses (and uploads abandoned past the grace period) are swept by
-  // reapOrphanedAttachments, so unclaimed files never accumulate on disk.
-  const attachmentOwners = new Map<string, { userId: string; uploadedAt: number }>();
+  // Uploaded-but-unattached attachment ids → uploader, upload time and the upload's own record. A message
+  // may only reference the uploader's own pending uploads; each id is consumed on first use, and the
+  // message stores the upload's record. RAM-only: entries a restart loses (and uploads abandoned past the
+  // grace period) are swept by reapOrphanedAttachments, so unclaimed files never accumulate on disk.
+  const attachmentOwners = new Map<string, PendingUpload>();
   const attachmentPendingGraceMs = 15 * 60_000;
   // Message ids deliberately deleted on this node — node-to-node sync never re-imports these.
   const tombstones = new Set<string>();
@@ -1811,7 +1811,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           ? undefined
           : { markdown: appConfig.features.enableMarkdown, source: "human" as const },
     };
-    const message = MessageSchema.parse({ ...input, ...base });
+    // Each attachment is the upload's own record (checked above to be the author's pending upload), never
+    // the client's copy: a message that claimed another type, name or size for a file would point readers
+    // at a file that isn't there, and its deletion would remove the wrong path and leave the real one.
+    const pinnedAttachments =
+      input.type !== "reaction" && input.attachments?.length
+        ? { attachments: input.attachments.map((attachment) => attachmentOwners.get(attachment.id)?.attachment ?? attachment) }
+        : {};
+    const message = MessageSchema.parse({ ...input, ...pinnedAttachments, ...base });
     store.insertMessage(message);
     data.messages.push(message);
 

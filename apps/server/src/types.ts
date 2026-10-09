@@ -1,9 +1,16 @@
 // Shared server types: the socket/session shapes, the in-memory data mirror, the client event union,
 // and the public `buildApp` option/handle types.
 import type { FastifyInstance } from "fastify";
-import type { Channel, DbEncryptionMode, HostApi, Message, NetworkConfig, User } from "@loam/schema";
+import type { Channel, DbEncryptionMode, HostApi, Message, MessageAttachment, NetworkConfig, User } from "@loam/schema";
 
 import type { LoamStore, StoreDriver } from "./db.js";
+
+/**
+ * An uploaded attachment no message has claimed yet (RAM-only, keyed by attachment id): who uploaded it,
+ * when, and the record `POST /api/attachments` answered with. A message that names the id gets THIS record,
+ * not the one the client sent, so its kind, name and size always match the stored file.
+ */
+export type PendingUpload = { userId: string; uploadedAt: number; attachment: MessageAttachment };
 
 export type SocketClient = {
   OPEN: number;

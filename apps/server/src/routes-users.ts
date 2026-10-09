@@ -912,7 +912,7 @@ export function registerUserRoutes(ctx: AppContext): void {
         return reply.code(409).send(errorBody("This LOAM node was reset"));
       }
 
-      ctx.attachmentOwners.set(attachment.id, { userId: currentUser.id, uploadedAt: Date.now() });
+      ctx.attachmentOwners.set(attachment.id, { userId: currentUser.id, uploadedAt: Date.now(), attachment });
       return reply.code(201).send(attachment);
     },
   );

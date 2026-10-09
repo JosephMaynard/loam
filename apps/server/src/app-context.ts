@@ -16,7 +16,7 @@ import type { LinkCodes } from "./sync-links.js";
 import { type DbKeyState, createStoreLifecycle } from "./store-lifecycle.js";
 import { createSyncEngine } from "./sync.js";
 import type { TransportSession } from "./transport-server.js";
-import type { AppData, AppOptions, ClientEvent, SocketSession } from "./types.js";
+import type { AppData, AppOptions, ClientEvent, PendingUpload, SocketSession } from "./types.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 export type AppContext = {
@@ -58,7 +58,7 @@ export type AppContext = {
   maxNewIdentitiesPerWindow: number;
   identityWindowMs: number;
   tombstoneHorizonMs: number;
-  attachmentOwners: Map<string, { userId: string; uploadedAt: number }>;
+  attachmentOwners: Map<string, PendingUpload>;
   attachmentPendingGraceMs: number;
   tombstones: Set<string>;
   syncedChannelIds: Set<string>;
