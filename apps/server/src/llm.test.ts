@@ -8,12 +8,12 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { buildApp, type LoamApp } from "./app.js";
 
-// The Ollama/LLM streaming path (docs/15 #15). These tests exercise `createAssistantResponse` end
+// The Ollama/LLM streaming path. These tests exercise `createAssistantResponse` end
 // to end: a user DMs the configured bot, the server streams Ollama's `/api/chat` reply out as
 // StreamEvent deltas over the WebSocket, and converges to a single persisted `messageUpdated`. They
 // mock Ollama with a tiny local `node:http` server (pointed at via `llm.ollama.baseUrl`) so nothing
 // real is contacted, and drive a genuine WebSocket to observe the privacy-scoped stream events.
-// This file is intentionally standalone (its own helpers) so it never collides with app.test.ts.
+// This file has its own small helpers rather than the shared app harness.
 
 const cleanups: (() => Promise<void> | void)[] = [];
 
@@ -189,7 +189,7 @@ function dmBot(app: LoamApp, cookie: string, body: string) {
   });
 }
 
-describe("LLM streaming — convergence (docs/15 #15)", () => {
+describe("LLM streaming — convergence", () => {
   it("streams deltas then converges to exactly one final messageUpdated with streaming:false", async () => {
     const ollama = startMockOllama(["Hello", " from", " Ollama"]);
     cleanups.push(ollama.close);
@@ -234,7 +234,7 @@ describe("LLM streaming — convergence (docs/15 #15)", () => {
   });
 });
 
-describe("LLM streaming — delta privacy (docs/15 #15)", () => {
+describe("LLM streaming — delta privacy", () => {
   it("delivers stream events (and the bot DM) only to the DM participant, never a bystander", async () => {
     const ollama = startMockOllama(["secret", " reply"]);
     cleanups.push(ollama.close);
@@ -269,7 +269,7 @@ describe("LLM streaming — delta privacy (docs/15 #15)", () => {
   });
 });
 
-describe("LLM streaming — Ollama-unreachable handling (docs/15 #15)", () => {
+describe("LLM streaming — Ollama-unreachable handling", () => {
   it("emits a StreamEvent error and unsticks the message when Ollama is down (connection refused)", async () => {
     const app = await makeLlmApp({ enabled: true, baseUrl: await unusedLocalUrl() });
     const user = await newSession(app);
@@ -340,7 +340,7 @@ describe("LLM streaming — Ollama-unreachable handling (docs/15 #15)", () => {
   });
 });
 
-describe("LLM streaming — feature-flag gating (docs/15 #15)", () => {
+describe("LLM streaming — feature-flag gating", () => {
   it("does not stream, expose the bot, or advertise LLM when the backend is disabled (default)", async () => {
     // Default config: llm.ollama.enabled = false and llm.onDevice.enabled = false.
     const app = await makeApp();
@@ -374,7 +374,7 @@ describe("LLM streaming — feature-flag gating (docs/15 #15)", () => {
   });
 });
 
-describe("LLM context bounding (docs/25 P2)", () => {
+describe("LLM context bounding", () => {
   it("caps the DM history sent to the model at the most-recent turns, not the whole conversation", async () => {
     const ollama = startMockOllama(["ok"], { delayMs: 0 });
     cleanups.push(ollama.close);

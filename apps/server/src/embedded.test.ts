@@ -5,8 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 // Importing this module must not boot a server (the auto-start lives in embedded-main.ts) — if it
-// did, this test file would try to listen on load. That it imports cleanly is itself the assertion
-// behind CodeRabbit's "unsafe to load" finding.
+// did, this test file would try to listen on load. That it imports cleanly is itself an assertion.
 import {
   firstLanIPv4,
   parseDbDriver,
@@ -74,18 +73,17 @@ describe("parseDbEncryptionMode", () => {
   });
 });
 
-describe("resolveEphemeralDbKey (P1-3, Sol round 3)", () => {
+describe("resolveEphemeralDbKey", () => {
   it("is true for the LOAM_DB_KEY=\"ephemeral\" literal — the only contract this checks", () => {
     expect(resolveEphemeralDbKey("ephemeral")).toBe(true);
   });
 
-  it("P1-3: is false when LOAM_DB_KEY is unset, even though a caller might still declare " +
-    "LOAM_DB_ENCRYPTION_MODE=\"ephemeral\" separately — the mode no longer feeds this decision at all. " +
-    "This is exactly main.js's encrypted-driver-unavailable downgrade path: it now also resets the " +
-    "mode to \"off\", but even if it didn't, this function alone must not resolve to ephemeral without " +
-    "the literal — the P1-3 bug was resolving true from the mode alone with no key and nothing to " +
-    "generate a key against, so the caller (embedded.ts) would set ephemeralDbKey=true and openStore " +
-    "would then try to require the very encrypted native module main.js just proved was missing.", () => {
+  it("is false when LOAM_DB_KEY is unset, even if LOAM_DB_ENCRYPTION_MODE separately declares \"ephemeral\"", () => {
+    // The mode no longer feeds this decision at all. This is main.js's encrypted-driver-unavailable
+    // downgrade path: it now also resets the mode to "off", but even if it didn't, this function must not
+    // resolve to ephemeral without the literal. It used to resolve true from the mode alone, with no key
+    // and nothing to generate one against, so embedded.ts set ephemeralDbKey=true and openStore then tried
+    // to require the very encrypted native module main.js had just proved was missing.
     expect(resolveEphemeralDbKey(undefined)).toBe(false);
   });
 
@@ -150,10 +148,10 @@ describe("startEmbeddedServer env validation", () => {
   });
 });
 
-describe("P1-3 regression (Sol round 3): main.js's encrypted-driver-unavailable downgrade must not crash-loop boot", () => {
+describe("regression: main.js's encrypted-driver-unavailable downgrade must not crash-loop boot", () => {
   it("mode=ephemeral downgraded to 'off' with no LOAM_DB_KEY (main.js's fixed downgrade branch) boots UNENCRYPTED, no crash, posture reported as 'off'", async () => {
     // Reproduces exactly what apps/app/nodejs-project-template/main.js's encrypted-driver-unavailable
-    // branch leaves behind AFTER the P1-3 fix: LOAM_DB_ENCRYPTION_MODE downgraded to 'off' (not left at
+    // branch leaves behind now: LOAM_DB_ENCRYPTION_MODE downgraded to 'off' (not left at
     // 'ephemeral') and LOAM_DB_KEY never set for this boot. Before the fix, LOAM_DB_ENCRYPTION_MODE
     // stayed 'ephemeral' and `resolveEphemeralDbKey(undefined, 'ephemeral')` returned true from the
     // mode alone (with no real key involved) — `embedded.ts` would then set `ephemeralDbKey: true`,
@@ -161,7 +159,7 @@ describe("P1-3 regression (Sol round 3): main.js's encrypted-driver-unavailable 
     // ("better-sqlite3-multiple-ciphers")` — the exact native module main.js had just determined was
     // MISSING — crash-looping boot instead of degrading to plaintext.
     const dbKeyEnv: string | undefined = undefined; // main.js never sets LOAM_DB_KEY on this path
-    const mode = parseDbEncryptionMode("off"); // main.js's fixed downgrade (was "ephemeral" before P1-3)
+    const mode = parseDbEncryptionMode("off"); // main.js's fixed downgrade (it used to stay "ephemeral")
     const ephemeralDbKey = resolveEphemeralDbKey(dbKeyEnv);
     expect(ephemeralDbKey).toBe(false);
 

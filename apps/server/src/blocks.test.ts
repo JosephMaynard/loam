@@ -9,7 +9,7 @@ import { openStore } from "./db.js";
 import type { AppOptions } from "./types.js";
 
 /**
- * Per-user blocking (docs/30 B3 — Play's user-generated-content policy). The DM, invite and transfer
+ * Per-user blocking (docs/30, for Play's user-generated-content policy). The DM, invite and transfer
  * refusal tests were mutation-checked: with the `dmBlockError` checks in `createMessage` /
  * `messageMutationError`, or the `blockedEitherWay` checks in routes-channels.ts, reverted, they fail.
  */
@@ -89,7 +89,7 @@ function codeOf(response: InjectResponse): string | undefined {
   return (response.json() as { code?: string }).code;
 }
 
-describe("user blocking (docs/30 B3)", () => {
+describe("user blocking", () => {
   it("blocks, lists and unblocks — idempotently, and only on the caller's own list", async () => {
     const app = await makeApp();
     await newSession(app); // the firstUser admin

@@ -11,8 +11,10 @@ import { defaultLoamConfig } from "./config.js";
 import type { AppOptions } from "./types.js";
 
 /**
- * Follow-ups to the 2026-09-25 pre-release review. Each security test was mutation-checked: with its fix
- * reverted, it fails.
+ * Boot paths that meet state an older build (or a failed open) left behind, with the session-id minter and
+ * the keyed store open fault-injected: a colliding minted id, an older wipe journal, a keyed open that fails
+ * or writes plaintext, a leftover mesh identity row, a persisted config row that needs repair. Each
+ * security test was mutation-checked: with its fix reverted, it fails.
  */
 
 // Candidate ids the session-id minter must try first (each is still checked against the caller's

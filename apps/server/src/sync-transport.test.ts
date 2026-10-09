@@ -363,7 +363,7 @@ describe("sync transport encryption — REQUIRED peer", () => {
 
     // A second request advances to sequence 2, but the peer "replays" the sequence-1 response. It was
     // sealed under `POST /api/sync/digest#1`, so opening it under `#2` fails and `sealedFetch` rejects it
-    // rather than accepting a stale/cross-fed response (docs/08 / Sol round-2 #1).
+    // rather than accepting a stale/cross-fed response (docs/08).
     const replayFetch: typeof fetch = async () =>
       new Response(captured, { status: 200, headers: { "content-type": "application/json", "x-loam-enc": "1" } });
     await expect(
@@ -388,7 +388,7 @@ describe("sync transport encryption — REQUIRED peer", () => {
     // The digest route is limited to 60/min. Fire past it; the request that trips the limiter gets a 429
     // sealed under the BASE aad (the limiter runs in `onRequest`, before the sequence is assigned). It must
     // surface as a clean 429 — not a decryption failure that reports "session expired" and churns a
-    // re-handshake (docs/08 / Sol round-3 P2).
+    // re-handshake (docs/08).
     let sawRateLimit = false;
     for (let i = 0; i < 65; i += 1) {
       const res = await sealedFetch(session, peerUrl, "/api/sync/digest", { reHandshake });

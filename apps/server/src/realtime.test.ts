@@ -10,7 +10,7 @@ import { TransportHandshakeResponseSchema } from "@loam/schema";
 import { buildApp, type LoamApp } from "./app.js";
 import { WS_HEARTBEAT_INTERVAL_MS } from "./realtime.js";
 
-// WebSocket heartbeat (pre-release review 2026-09-25): every ADMITTED socket gets a content-free
+// WebSocket heartbeat: every ADMITTED socket gets a content-free
 // `{ type: "ping" }` immediately and then every WS_HEARTBEAT_INTERVAL_MS — sealed + sequenced on an
 // encrypted socket, never before its key confirmation — so the client's watchdog can detect a dead
 // connection. Only setInterval is faked; sockets, timeouts and I/O stay real.
