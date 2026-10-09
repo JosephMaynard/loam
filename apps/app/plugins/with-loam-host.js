@@ -35,7 +35,9 @@
 //      from Android laptops with only a keyboard and trackpad. With it, `android:resizeableActivity="true"`
 //      on the main activity: the host runs in any orientation and any window size (tablets, foldables,
 //      laptops), which is what app.json `orientation: "default"` means and what Play's large-screen
-//      guidelines ask for (docs/04 "Large screens", docs/30).
+//      guidelines ask for (docs/04 "Large screens", docs/30). Both screen orientations are declared optional
+//      as well: Google's code scanner, merged in through expo-camera, brings a portrait-locked activity, and
+//      Play would otherwise read the built APK as requiring a portrait screen.
 //
 //   6. Stamp the generated android/ project with a fingerprint of app.json + these plugins, and make the
 //      Gradle build fail when they no longer match — so a direct `./gradlew` on a STALE prebuild (old
@@ -303,10 +305,20 @@ function withArmOnlyReactNativeArchitectures(config) {
 // which hides the listing from Android laptops and desktops that have only a keyboard and trackpad; declared
 // optional (with `faketouch`, the pointer-only form) because every native control here is a Pressable or a
 // TextInput, which take mouse clicks and keyboard focus, and the WebView handles both itself.
-// No screen-orientation feature any more: app.json `orientation: "default"` implies none.
+// Both screen orientations, because a library activity locks one even though app.json locks none
+// (`orientation: "default"`, MainActivity `screenOrientation="unspecified"`): Google's code scanner
+// (play-services-code-scanner, a dependency of expo-camera's barcode scanner) merges in
+// `com.google.mlkit.vision.codescanner.internal.GmsBarcodeScanningDelegateActivity` with
+// `android:screenOrientation="portrait"` (an invisible delegate that starts Google's scanner UI). One
+// portrait-locked activity makes the APK imply `android.hardware.screen.portrait` as REQUIRED, which lets
+// Play exclude devices with a landscape-only screen, Android laptops among them. The host runs in either
+// orientation, so both are declared optional (landscape too, so a library locking that one can't do the
+// same).
 const OPTIONAL_FEATURES = [
   "android.hardware.touchscreen",
   "android.hardware.faketouch",
+  "android.hardware.screen.portrait",
+  "android.hardware.screen.landscape",
   "android.hardware.bluetooth",
   "android.hardware.bluetooth_le",
   "android.hardware.wifi",

@@ -112,8 +112,9 @@ device checks below, and size headroom before a production track.
 - **Device filtering — fixed.** Wi-Fi, Wi-Fi Aware, location (+ GPS/network), Bluetooth/BLE, the camera
   and the touchscreen (`touchscreen` + `faketouch`) are declared `uses-feature … required="false"`, so
   tablets, Chromebooks and Android laptops without them see the listing (no hotspot / no mesh / no scanner
-  there). No orientation is locked, so no screen-orientation feature is implied (see "Large screens and
-  Android laptops" below).
+  there). Both screen orientations are declared optional as well: LOAM locks none, but Google's code
+  scanner (through expo-camera) merges in a portrait-locked activity, which on its own would make the APK
+  require a portrait screen (see "Large screens and Android laptops" below).
 - **`versionCode` — checked in CI.** Still hand-edited in `app.json`, but `scripts/check-versions.mjs
   --release-tag` fails a tag build unless the tag's `X.Y.Z` equals the manifest version and `versionCode`
   is greater than that of **every** earlier release tag (read from each tag's `app.json`); `ci.yml` checks
@@ -146,8 +147,14 @@ after a prebuild):
   Chromebook/laptop guidance asks: every app implies a required touchscreen otherwise, which hides it from
   devices with only a keyboard and trackpad. Every native control is a `Pressable`/`TextInput` with a role
   (mouse clicks, keyboard focus, Enter on the text fields); the WebView handles both itself.
+- **`android.hardware.screen.portrait` and `screen.landscape` `required="false"`.** The main activity
+  locks no orientation, but Google's code scanner, merged in through expo-camera, ships
+  `GmsBarcodeScanningDelegateActivity` with `android:screenOrientation="portrait"`, which makes the built
+  APK imply a required portrait screen. Read the merged manifest
+  (`apps/app/android/app/build/intermediates/merged_manifests/release/`) to see it; the generated source
+  manifest doesn't contain library activities.
 - **Nothing else that would exclude a laptop or tablet**: no `supports-screens`, no `telephony`, no
-  required radio or camera (all optional, above), no screen-orientation feature.
+  required radio or camera (all optional, above).
 - A LocalOnlyHotspot on a laptop depends on its Wi-Fi hardware, so **Wi-Fi mode is the expected path
   there**; with no Wi-Fi it hosts on the laptop's wired network (docs/04 "Hosting modes").
 

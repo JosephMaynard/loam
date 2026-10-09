@@ -120,6 +120,7 @@ export const tr: Partial<AppCatalog> = {
   "reset.open": "Acil sıfırlama",
   "menu.privacy": "Gizlilik politikası",
   "reset.incomplete": "Henüz her şey silinemedi. Ağ kilitlendi: silmeyi bitirmek için LOAM'u kapatıp yeniden açın.",
+  "reset.notRecorded": "Sıfırlama kaydedilemedi ve tamamlanmadı, bu yüzden bu telefonda hâlâ veri kalmış olabilir. Ağ kilitlendi: LOAM'u kapatıp yeniden açın, ardından acil sıfırlamayı tekrar çalıştırın.",
   "reset.closeApp": "LOAM'u kapat",
   "reset.keyClearFailed": "Her şey silindi ancak bu telefonun şifreleme anahtarı temizlenemedi: {error}",
   "reset.retry": "Tekrar dene",

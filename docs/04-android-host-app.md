@@ -347,8 +347,14 @@ vendored tarball before installing it. Each JS-wrapper npm version and its
   touchscreen (`android.hardware.touchscreen` + `faketouch`, which every app otherwise implies as required)
   are declared `uses-feature required="false"`, so Play doesn't hide the listing from devices without
   them: tablets and Chromebooks without a radio, Android laptops with only a keyboard and trackpad. The app
-  degrades (no hotspot, no mesh, no scanner). No screen-orientation feature is declared or implied any
-  more: `orientation: "default"` (see "Large screens" below).
+  degrades (no hotspot, no mesh, no scanner). Both screen orientations (`android.hardware.screen.portrait` +
+  `screen.landscape`) are declared optional too. `app.json` locks none (see "Large screens" below), but
+  Google's code scanner, merged in through expo-camera, brings
+  `com.google.mlkit.vision.codescanner.internal.GmsBarcodeScanningDelegateActivity` with
+  `android:screenOrientation="portrait"`, and that alone makes the built APK imply a required portrait
+  screen, which lets Play exclude landscape-only devices such as Android laptops. Check it in the merged
+  manifest (`apps/app/android/app/build/intermediates/merged_manifests/release/`), not the generated
+  source one.
 - **Unused template permissions blocked** (`SYSTEM_ALERT_WINDOW`, `READ/WRITE_EXTERNAL_STORAGE`, via
   `android.blockedPermissions`), and `CHANGE_NETWORK_STATE` declared for the Wi-Fi Aware data path.
 - **Deep links ignored.** `app.json` keeps the `loam://` scheme (Expo Router resolves its root URL
@@ -364,7 +370,9 @@ natively, with a keyboard, a trackpad, windowed apps and often no touchscreen) a
 declared: `app.json` `orientation: "default"` (no portrait lock; Expo writes
 `android:screenOrientation="unspecified"`), `android:resizeableActivity="true"` on the main activity
 (`plugins/with-loam-host.js`, `applyMainActivityAttributes`, tested) with Expo's `configChanges` kept so a
-rotation or a resize never recreates the activity, and the touchscreen as optional (above). Android 16
+rotation or a resize never recreates the activity, and the touchscreen and both screen orientations as
+optional (above; the code scanner's portrait-locked delegate activity would otherwise make portrait
+required). Android 16
 already ignores an orientation lock and a non-resizable flag on displays of 600dp and up for apps targeting
 API 36, so this makes explicit what those devices do anyway and is what Play's large-screen checks read.
 Every native screen is a scrolling column centred at `MaxContentWidth` (800dp), the boot/recovery screen
@@ -591,10 +599,13 @@ support it); avoid Android-only Easy Connect for v1.
   launcher stuck ("Couldn't finish starting LOAM"), so the next launch is a fresh process that opens on the
   setup screens. Setup never mentions the erased network, and doesn't highlight the last choice. Only then,
   though (`resetOutcome`, `src/lib/emergency-reset.ts`): an erase the server couldn't verify complete
-  (`complete: false`, the node stays 503-locked) stays on screen saying so, with a Close button (reopening
-  retries the erase); and on a fixed-key node the screen waits for the device-key clear the server handed
-  off (`keyClearRequested`), which `attemptWipeKeyClear` closes the app after, or shows the failure of
-  with a retry.
+  (`complete: false`, the node stays 503-locked) stays on screen saying so, with a Close button. What it
+  says follows the kill switch's `journaled` (forwarded by main.js through `reset-reply.js`; an answer
+  without it counts as journaled): with the wipe journal on disk, reopening LOAM finishes the erase; without
+  it a restart doesn't, so the screen says the reset couldn't be recorded and didn't finish, and asks for
+  it to be run again after reopening. On a fixed-key node the screen waits for the device-key clear the
+  server handed off (`keyClearRequested`), which `attemptWipeKeyClear` closes the app after, or shows the
+  failure of with a retry.
 - **The host token and key reach the WebView only by injection** (`injectedJavaScriptBeforeContentLoaded`),
   never in the start URL: the client trusts those globals over a pin, and a URL is something anyone can
   craft (review 2026-10-03 #1).

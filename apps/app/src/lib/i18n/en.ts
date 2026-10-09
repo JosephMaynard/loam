@@ -125,6 +125,7 @@ export const en = {
   "reset.open": "Emergency reset",
   "menu.privacy": "Privacy policy",
   "reset.incomplete": "Not everything could be erased yet. The network is locked: close LOAM and open it again to finish erasing.",
+  "reset.notRecorded": "The reset couldn't be recorded and didn't finish, so some data may still be on this phone. The network is locked: close LOAM, reopen it, then run Emergency reset again.",
   "reset.closeApp": "Close LOAM",
   "reset.keyClearFailed": "Everything was erased, but this phone's encryption key couldn't be cleared: {error}",
   "reset.retry": "Try again",

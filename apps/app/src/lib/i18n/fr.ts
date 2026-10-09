@@ -120,6 +120,7 @@ export const fr: Partial<AppCatalog> = {
   "reset.open": "Réinitialisation d'urgence",
   "menu.privacy": "Politique de confidentialité",
   "reset.incomplete": "Tout n'a pas encore pu être effacé. Le réseau est verrouillé : fermez LOAM et rouvrez-le pour terminer l'effacement.",
+  "reset.notRecorded": "La réinitialisation n'a pas pu être enregistrée et ne s'est pas terminée, des données peuvent donc rester sur ce téléphone. Le réseau est verrouillé : fermez LOAM, rouvrez-le, puis relancez la Réinitialisation d'urgence.",
   "reset.closeApp": "Fermer LOAM",
   "reset.keyClearFailed": "Tout a été effacé, mais la clé de chiffrement de ce téléphone n'a pas pu être supprimée : {error}",
   "reset.retry": "Réessayer",

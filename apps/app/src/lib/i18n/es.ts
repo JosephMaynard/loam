@@ -120,6 +120,7 @@ export const es: Partial<AppCatalog> = {
   "reset.open": "Restablecimiento de emergencia",
   "menu.privacy": "Política de privacidad",
   "reset.incomplete": "Todavía no se ha podido borrar todo. La red está bloqueada: cierra LOAM y vuelve a abrirlo para terminar de borrar.",
+  "reset.notRecorded": "No se pudo registrar el restablecimiento y no terminó, así que puede que aún queden datos en este teléfono. La red está bloqueada: cierra LOAM, vuelve a abrirlo y haz de nuevo el Restablecimiento de emergencia.",
   "reset.closeApp": "Cerrar LOAM",
   "reset.keyClearFailed": "Se borró todo, pero no se pudo eliminar la clave de cifrado de este teléfono: {error}",
   "reset.retry": "Reintentar",

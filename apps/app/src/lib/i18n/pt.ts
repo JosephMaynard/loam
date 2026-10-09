@@ -120,6 +120,7 @@ export const pt: Partial<AppCatalog> = {
   "reset.open": "Reposição de emergência",
   "menu.privacy": "Política de privacidade",
   "reset.incomplete": "Ainda não foi possível apagar tudo. A rede está bloqueada: feche o LOAM e abra-o de novo para terminar de apagar.",
+  "reset.notRecorded": "Não foi possível registar a reposição e ela não terminou, por isso ainda podem restar dados neste telemóvel. A rede está bloqueada: feche o LOAM, abra-o de novo e faça outra vez a Reposição de emergência.",
   "reset.closeApp": "Fechar o LOAM",
   "reset.keyClearFailed": "Tudo foi apagado, mas não foi possível eliminar a chave de cifra deste telemóvel: {error}",
   "reset.retry": "Tentar de novo",

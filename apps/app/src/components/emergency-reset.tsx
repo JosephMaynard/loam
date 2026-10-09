@@ -18,7 +18,9 @@ type Phase =
   | { kind: 'idle' }
   | { kind: 'working' }
   | { kind: 'key-clear' }
-  | { kind: 'incomplete' }
+  /** Locked and partly erased. `recorded`: the wipe journal is on disk, so reopening LOAM finishes the erase;
+   *  without it, reopening doesn't, and the reset has to be run again. */
+  | { kind: 'incomplete'; recorded: boolean }
   | { kind: 'failed'; error: string };
 
 /**
@@ -30,7 +32,9 @@ type Phase =
  * launch is a clean start on the setup screens. Only then, though (`resetOutcome`): an encrypted
  * fixed-key node still has its device key to clear, which index.tsx does and then closes LOAM itself (this
  * screen shows that clear's failure, with a retry); and an erase that couldn't be verified complete stays
- * on screen, saying so, rather than closing as if it had worked.
+ * on screen, saying so, rather than closing as if it had worked. What it says depends on whether the server
+ * recorded the wipe first: if so, reopening LOAM finishes the erase; if not, it doesn't, and the screen asks
+ * for the reset to be run again after reopening.
  */
 export function EmergencyResetOverlay({
   channel,
@@ -63,7 +67,10 @@ export function EmergencyResetOverlay({
         setPhase({ kind: 'key-clear' });
         return;
       case 'incomplete':
-        setPhase({ kind: 'incomplete' });
+        setPhase({ kind: 'incomplete', recorded: true });
+        return;
+      case 'unrecorded':
+        setPhase({ kind: 'incomplete', recorded: false });
         return;
       case 'failed':
         setPhase({ kind: 'failed', error: result.ok ? '' : result.error });
@@ -105,7 +112,9 @@ export function EmergencyResetOverlay({
               ) : null}
               {phase.kind === 'incomplete' ? (
                 <>
-                  <ThemedText style={{ color: theme.danger }}>{t('reset.incomplete')}</ThemedText>
+                  <ThemedText style={{ color: theme.danger }}>
+                    {t(phase.recorded ? 'reset.incomplete' : 'reset.notRecorded')}
+                  </ThemedText>
                   <ActionButton label={t('reset.closeApp')} onPress={() => void closeAfterReset(clearSharedFiles, closeApp)} />
                 </>
               ) : phase.kind === 'key-clear' ? (

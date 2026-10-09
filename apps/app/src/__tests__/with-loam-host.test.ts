@@ -145,13 +145,28 @@ describe("with-loam-host: optional hardware features", () => {
     expect(features).toHaveLength(OPTIONAL_FEATURES.length);
   });
 
-  it("declares no screen-orientation feature, since app.json locks no orientation", () => {
-    // A fixed orientation implies `android.hardware.screen.<orientation>`; `default` implies none, and the
-    // host must run in both (tablets, foldables, laptops; Play's large-screen checks).
+  it("declares both screen orientations optional, since a merged library activity locks portrait", () => {
+    // app.json locks no orientation, but Google's code scanner (via expo-camera) merges in a portrait-locked
+    // GmsBarcodeScanningDelegateActivity, which makes the built APK imply `android.hardware.screen.portrait`
+    // as required. Declared optional, the host stays listed for landscape-only screens (laptops), and it
+    // runs in both orientations (tablets, foldables; Play's large-screen checks).
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const appJson = require("../../app.json");
     expect(appJson.expo.orientation).toBe("default");
-    expect(OPTIONAL_FEATURES.filter((name: string) => name.startsWith("android.hardware.screen."))).toEqual([]);
+    expect(OPTIONAL_FEATURES.filter((name: string) => name.startsWith("android.hardware.screen.")).sort()).toEqual([
+      "android.hardware.screen.landscape",
+      "android.hardware.screen.portrait",
+    ]);
+    const manifest = {
+      "uses-feature": [{ $: { "android:name": "android.hardware.screen.portrait", "android:required": "true" } }],
+    };
+    addOptionalFeatures(manifest);
+    const features = manifest["uses-feature"] as { $: Record<string, string> }[];
+    for (const name of ["android.hardware.screen.portrait", "android.hardware.screen.landscape"]) {
+      const matches = features.filter((feature) => feature.$["android:name"] === name);
+      expect(matches).toHaveLength(1);
+      expect(matches[0].$["android:required"]).toBe("false");
+    }
   });
 });
 

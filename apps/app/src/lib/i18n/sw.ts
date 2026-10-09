@@ -120,6 +120,7 @@ export const sw: Partial<AppCatalog> = {
   "reset.open": "Uwekaji upya wa dharura",
   "menu.privacy": "Sera ya faragha",
   "reset.incomplete": "Bado haikuwezekana kufuta kila kitu. Mtandao umefungwa: funga LOAM kisha uifungue tena ili kumaliza kufuta.",
+  "reset.notRecorded": "Uwekaji upya haukuweza kurekodiwa na haukukamilika, kwa hivyo huenda bado kuna data kwenye simu hii. Mtandao umefungwa: funga LOAM, uifungue tena, kisha uendeshe uwekaji upya wa dharura tena.",
   "reset.closeApp": "Funga LOAM",
   "reset.keyClearFailed": "Kila kitu kimefutwa, lakini ufunguo wa usimbaji wa simu hii haukuweza kufutwa: {error}",
   "reset.retry": "Jaribu tena",
