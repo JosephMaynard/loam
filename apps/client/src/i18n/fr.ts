@@ -652,6 +652,7 @@ export const fr: Translation = {
   "error.node_resetting": "Ce réseau est en cours de réinitialisation. Réessayez dans un instant.",
   "error.node_reset": "Ce réseau a été réinitialisé. Rechargez pour le rejoindre à nouveau.",
   "error.wipe_incomplete": "La réinitialisation d'urgence n'a pas pu aboutir, le réseau est donc verrouillé. Redémarrez-le pour réessayer.",
+  "error.wipe_unrecorded": "La réinitialisation d'urgence n'a pas pu être enregistrée et ne s'est pas terminée. Redémarrez le réseau et relancez la réinitialisation d'urgence.",
   "error.mesh_identity_missing": "Vous n'avez pas encore d'identité mesh sur ce réseau",
   "error.mesh_card_invalid": "Cette carte d'identité mesh n'est pas valide",
   "error.encrypted_session_required": "Ce réseau n'accepte que les connexions chiffrées. Scannez son code QR pour vous connecter.",

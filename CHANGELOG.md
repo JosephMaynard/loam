@@ -107,6 +107,9 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   an older reaction stored before this can still be removed.
 
 ### Security
+- **Emergency Reset on an unencrypted network writes the deletion into the database file itself** before
+  the reset is marked finished, so a power cut straight afterwards can no longer bring the old messages
+  back out of the write-ahead log.
 - **A failed Emergency Reset on a plaintext or ephemeral-key node is finished by the next boot.** The wipe
   journal is written before anything is touched, so a reset that fails partway (full disk, I/O error) no
   longer leaves a restart serving the old messages; the next boot deletes the database and media and
@@ -158,6 +161,12 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   server's own limiter sends no `x-ratelimit-*` headers.
 
 ### Fixed
+- **An Emergency Reset that could not even be recorded now says so everywhere**: the web app, the Android
+  host's reset screen and the terminal UI tell you to restart and run the reset again, instead of promising
+  that a restart finishes it. The response carries a `journaled` flag the hosts read.
+- **Android host: both screen orientations are declared optional again.** Google's code scanner, included
+  through expo-camera, adds a portrait-locked activity that made the built app require a portrait screen,
+  so Play could have hidden LOAM from landscape-only devices such as Android laptops.
 - **Android host: the hotspot requests coarse location together with fine** on every Android version
   (Android 12 ignored the fine-only request, so a fresh install there could never start the hotspot), and
   from Android 13 a hotspot start is gated on Nearby Wi-Fi devices alone, so choosing "Approximate" no

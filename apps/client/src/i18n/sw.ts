@@ -652,6 +652,7 @@ export const sw: Translation = {
   "error.node_resetting": "Mtandao huu unawekwa upya. Jaribu tena baada ya muda mfupi.",
   "error.node_reset": "Mtandao huu umewekwa upya. Pakia upya ili kujiunga tena.",
   "error.wipe_incomplete": "Uwekaji upya wa dharura haukuweza kukamilika, kwa hivyo mtandao umefungwa. Uanzishe upya ili kujaribu tena.",
+  "error.wipe_unrecorded": "Uwekaji upya wa dharura haukuweza kurekodiwa na haukukamilika. Uanzishe upya mtandao kisha uendeshe tena uwekaji upya wa dharura.",
   "error.mesh_identity_missing": "Bado huna utambulisho wa mesh kwenye mtandao huu",
   "error.mesh_card_invalid": "Kadi hiyo ya utambulisho wa mesh si halali",
   "error.encrypted_session_required": "Mtandao huu unakubali miunganisho iliyosimbwa tu. Changanua msimbo wake wa QR ili kuunganisha.",

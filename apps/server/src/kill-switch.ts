@@ -15,11 +15,15 @@ import type { WipePhase } from "./store-lifecycle.js";
  * The result of a kill-switch run (P1-1, Sol round 8) — so the `/api/admin/kill-switch` and `/api/panic`
  * endpoints never report success on an INCOMPLETE wipe. `complete` is false when the wipe could not be
  * finished this run (deletion incomplete/unverifiable → 503-locked, finished by the next boot); `phase`
- * carries the durable wipe phase whenever the wipe journal is on disk. `keyClearRequested` is true when the launcher
+ * carries the durable wipe phase whenever the wipe journal is on disk. `journaled` says whether the wipe
+ * journal is on disk as the run returns: on an incomplete wipe, true means a restart finishes it and false
+ * means the journal could not be written, so a restart serves whatever survived and the reset must be fired
+ * again; an in-process wipe that completed has already cleared it (false), while a launcher handoff leaves it
+ * for the launcher. `keyClearRequested` is true when the launcher
  * was asked to clear the device key and restart (`loam-wipe-restart`): the wipe isn't over until it has, so
  * the host app must not close itself before that clear is verified.
  */
-export type KillSwitchResult = { complete: boolean; phase?: WipePhase; keyClearRequested?: boolean };
+export type KillSwitchResult = { complete: boolean; journaled: boolean; phase?: WipePhase; keyClearRequested?: boolean };
 
 /** Build the kill-switch layer over the app context: `executeKillSwitch` (single-flight) and its body. */
 export function createKillSwitch(ctx: AppContext) {
@@ -88,7 +92,7 @@ export function createKillSwitch(ctx: AppContext) {
 
     /** An incomplete result that reports the durable phase only when the journal really is on disk. */
     function incompleteResult(): KillSwitchResult {
-      return journaled ? { complete: false, phase: "delete-pending" } : { complete: false };
+      return journaled ? { complete: false, journaled, phase: "delete-pending" } : { complete: false, journaled };
     }
 
     /** Synchronous in-memory lockdown for an INCOMPLETE wipe: 503-gate on, drop every in-memory mirror,
@@ -250,7 +254,7 @@ export function createKillSwitch(ctx: AppContext) {
                 "persisted; a device-key-clear-and-restart was REQUESTED from the launcher (durable `key-clear-ready` " +
                 "journal written) — the key rotation is only confirmed once the launcher acknowledges it cleared the key.",
             );
-            return { complete: true, phase: "key-clear-ready", keyClearRequested: true };
+            return { complete: true, journaled: true, phase: "key-clear-ready", keyClearRequested: true };
           }
 
           // Data is unrecoverable, config.json is current, and the launcher was signaled, but the `key-clear-ready`
@@ -262,7 +266,7 @@ export function createKillSwitch(ctx: AppContext) {
             "key-clear is interrupted, reopen the node to finish clearing the (now-unused) device key.";
           ctx.server.log.warn(noMarkerMessage);
           reportBootNotice(noMarkerMessage, "kill_switch_wipe_no_marker");
-          return { complete: true, phase: "delete-pending", keyClearRequested: true };
+          return { complete: true, journaled, phase: "delete-pending", keyClearRequested: true };
         }
 
         // No launcher hook available (desktop/Pi/CI — not the Android host): there is nowhere to get a NEW key
@@ -402,6 +406,13 @@ export function createKillSwitch(ctx: AppContext) {
           );
         }
         ctx.store.wipeAll();
+        // Make the deletion durable before anything can clear the journal. The store runs WAL with
+        // `synchronous = NORMAL`, so `wipeAll()` committed into the write-ahead log without an fsync, while
+        // `clearWipePhase()` below removes the journal durably: a power cut in between could roll the deletion
+        // back after its only recovery record was gone, and the next boot would serve the old rows from
+        // `loam.db`. The checkpoint folds the WAL into `loam.db` and syncs it; one that comes back busy or
+        // partial throws, and the guard below then reports an incomplete wipe with the journal still on disk.
+        ctx.store.checkpoint();
         // P1-2 (Sol round 7): wipeAll keeps the live plaintext DB open (and its config), but stale
         // migration/recovery artifacts from a PRIOR encrypted era — the legacy-key `.premigration` snapshot
         // (still-readable ciphertext!), its sidecars, a leftover `-journal`, and `*.unreadable-<ts>`
@@ -478,6 +489,8 @@ export function createKillSwitch(ctx: AppContext) {
       // is still up, so nothing has been written to the fresh store on anyone's behalf). If the clear can't be
       // made durable, stay locked: a resurrected `delete-pending` would otherwise re-wipe a database that has
       // taken new messages by then, and a restart's resume re-runs the (idempotent) deletion and re-clears.
+      // The deletion itself is durable by now: the plaintext branch checkpointed it into `loam.db`, and the
+      // ephemeral branch unlinked files in the data directory whose fsync is what makes this clear durable.
       if (journalToClear && !ctx.lifecycle.clearWipePhase()) {
         return lockDownAndReportIncomplete(
           "KILL SWITCH NOTICE: the wipe completed, but the wipe journal could not be durably cleared, so the node " +
@@ -503,7 +516,8 @@ export function createKillSwitch(ctx: AppContext) {
       // in-memory mirror is now the fresh empty DB (loadData above), so LIFT the 503 gate raised at the top:
       // the node serves again, and no request between here and now saw stale pre-wipe data (Sol round-10 review).
       ctx.awaitingWipeRestart = false;
-      return { complete: true };
+      // Every in-process branch has cleared its journal by now (or never had one on disk).
+      return { complete: true, journaled: false };
     } catch (error) {
       ctx.server.log.error(error, "Kill switch: the wipe threw partway");
       const detail = error instanceof Error ? error.message : String(error);

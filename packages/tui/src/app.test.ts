@@ -78,7 +78,7 @@ function fakeHost(overrides: Partial<{ users: HostUser[]; profile: LoamConfig["s
     }),
     setLogLevel: vi.fn(),
     transportPublicKey: vi.fn(() => KEY),
-    emergencyReset: vi.fn(async () => ({ complete: true })),
+    emergencyReset: vi.fn(async (): Promise<{ complete: boolean; journaled: boolean }> => ({ complete: true, journaled: false })),
   } satisfies HostApi;
   return host;
 }
@@ -396,6 +396,34 @@ describe("the Settings screen", () => {
     await tui.input("\x7f\x7f\x7f\x7fwipe\r");
     expect(host.emergencyReset).toHaveBeenCalledTimes(1);
     expect(screenText()).toContain("Emergency Reset done");
+  });
+
+  /** Fire the Emergency Reset from Settings against a host whose reset ends with `result`. */
+  async function fireReset(result: { complete: boolean; journaled: boolean }): Promise<string> {
+    const host = fakeHost();
+    host.emergencyReset.mockResolvedValueOnce(result);
+    const { tui, screenText } = setup({ host, terminal: fakeTerminal(160, 40) });
+    await tui.input("4");
+    for (let index = 0; index < 9; index += 1) {
+      await tui.input("\x1b[B");
+    }
+    await tui.input("\rwipe\r");
+    expect(host.emergencyReset).toHaveBeenCalledTimes(1);
+    return screenText();
+  }
+
+  it("says a restart finishes a reset the node recorded before it stopped", async () => {
+    const screen = await fireReset({ complete: false, journaled: true });
+    expect(screen).toContain("The reset didn't finish. Restart loam to complete it.");
+    expect(screen).not.toContain("run the Emergency Reset again");
+  });
+
+  it("asks for the reset to be run again after a restart when the node could not record it", async () => {
+    const screen = await fireReset({ complete: false, journaled: false });
+    expect(screen).toContain(
+      "The reset could not be recorded and did not finish. Restart loam and run the Emergency Reset again.",
+    );
+    expect(screen).not.toContain("Restart loam to complete it");
   });
 });
 

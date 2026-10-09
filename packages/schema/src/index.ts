@@ -1522,6 +1522,7 @@ export const SERVER_ERROR_CODES = [
   "node_resetting",
   "node_reset",
   "wipe_incomplete",
+  "wipe_unrecorded",
   "mesh_identity_missing",
   "mesh_card_invalid",
   "encrypted_session_required",
@@ -1629,6 +1630,10 @@ export type HostApi = {
   setLogLevel(level: HostLogLevel): void;
   /** The node's transport public key for the join QR's `#k=`, or undefined in Developer Mode. */
   transportPublicKey(): string | undefined;
-  /** Emergency Reset, from the host itself: no admin session needed, whatever `killSwitch.enabled` says. */
-  emergencyReset(): Promise<{ complete: boolean }>;
+  /**
+   * Emergency Reset, from the host itself: no admin session needed, whatever `killSwitch.enabled` says.
+   * When `complete` is false, `journaled` says whether a restart finishes the wipe (the wipe journal is on
+   * disk) or the reset has to be run again after the restart (the journal could not be written).
+   */
+  emergencyReset(): Promise<{ complete: boolean; journaled: boolean }>;
 };

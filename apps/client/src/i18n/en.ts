@@ -726,6 +726,7 @@ export const en = {
   "error.node_resetting": "This network is resetting. Try again in a moment.",
   "error.node_reset": "This network was reset. Reload to join it again.",
   "error.wipe_incomplete": "The Emergency Reset could not finish, so the network is locked. Restart it to try again.",
+  "error.wipe_unrecorded": "The Emergency Reset could not be recorded and did not finish. Restart the network and run the Emergency Reset again.",
   "error.mesh_identity_missing": "You have no mesh identity on this network yet",
   "error.mesh_card_invalid": "That mesh identity card is not valid",
   "error.encrypted_session_required": "This network only accepts encrypted connections. Scan its join QR code to connect.",

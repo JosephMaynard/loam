@@ -20,7 +20,7 @@ import { promoteUser } from "./routes-users.js";
 /** What `createHostApi` needs from `buildApp` beyond the context. */
 export type HostApiHooks = {
   setJoinHost(host: string | undefined): void;
-  emergencyReset(): Promise<{ complete: boolean }>;
+  emergencyReset(): Promise<{ complete: boolean; journaled: boolean }>;
 };
 
 /** The People screen's view of a user. */

@@ -652,6 +652,7 @@ export const pt: Translation = {
   "error.node_resetting": "Esta rede está a ser reposta. Tente novamente daqui a pouco.",
   "error.node_reset": "Esta rede foi reposta. Recarregue para voltar a entrar.",
   "error.wipe_incomplete": "A reposição de emergência não pôde terminar, por isso a rede está bloqueada. Reinicie-a para tentar de novo.",
+  "error.wipe_unrecorded": "A reposição de emergência não pôde ser registada e não terminou. Reinicie a rede e execute de novo a reposição de emergência.",
   "error.mesh_identity_missing": "Ainda não tem uma identidade mesh nesta rede",
   "error.mesh_card_invalid": "Esse cartão de identidade mesh não é válido",
   "error.encrypted_session_required": "Esta rede só aceita ligações cifradas. Leia o seu código QR para se ligar.",

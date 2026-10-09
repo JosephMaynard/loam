@@ -279,9 +279,10 @@ export type LoamApp = {
    * Emergency Reset from the host device itself (the Android host's menu, through the launcher bridge):
    * the same wipe as `POST /api/admin/kill-switch`, but with no admin session, and regardless of
    * `killSwitch.enabled`, which gates the remote triggers. The phone's owner, holding the phone, can
-   * always wipe it. Never reachable from the network. `keyClearRequested`: see `KillSwitchResult`.
+   * always wipe it. Never reachable from the network. `keyClearRequested` and `journaled` (whether a restart
+   * finishes an incomplete wipe): see `KillSwitchResult`.
    */
-  emergencyReset(): Promise<{ complete: boolean; keyClearRequested: boolean }>;
+  emergencyReset(): Promise<{ complete: boolean; keyClearRequested: boolean; journaled: boolean }>;
   /** The in-process host API (host-api.ts) for a launcher on the host machine: the `loamnet` terminal UI. */
   host: HostApi;
   close(): Promise<void>;

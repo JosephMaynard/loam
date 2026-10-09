@@ -381,14 +381,20 @@ export interface LoamStore {
    * Fold the write-ahead log back into the main `loam.db` file via `PRAGMA wal_checkpoint(TRUNCATE)`,
    * so that single file is a complete, standalone snapshot with nothing left to lose in `-wal`/`-shm`
    * (TRUNCATE also shrinks the WAL to zero, so a later file-level copy can't pick up stale frames).
-   * Used by the passphrase key-migration in `openInitialStore` (P1-a, Sol round 6): the crash-atomic
-   * pre-migration backup is a raw copy of `loam.db` alone, which would otherwise MISS committed
-   * transactions still resident in the WAL — this makes the snapshot single-file-consistent first.
-   * Only meaningful on a SQLCipher (encrypted) connection, the only path that migrates; throws on a
-   * plaintext store (no `pragma` handle), mirroring {@link rekey}. Also throws if the checkpoint comes
-   * back `busy` (RF6-e, Sol round 6) — a non-zero `busy` means the WAL wasn't fully truncated (the
-   * sole-connection invariant is broken), so the file is NOT a complete snapshot and must not be copied
-   * as a backup. Never logs any key material.
+   * SQLite syncs the main file once a checkpoint completes, so this is also how a caller makes a commit
+   * DURABLE: under `synchronous = NORMAL` a WAL commit is never fsynced and a power cut can roll it back.
+   *
+   * Two callers, on every driver (`node:sqlite`, plain `better-sqlite3`, SQLCipher):
+   * - the passphrase key-migration in `openInitialStore` (P1-a, Sol round 6): the crash-atomic
+   *   pre-migration backup is a raw copy of `loam.db` alone, which would otherwise MISS committed
+   *   transactions still resident in the WAL; this makes the snapshot single-file-consistent first;
+   * - the plaintext Emergency Reset, right after `wipeAll()`: the deletion must be in the main file before
+   *   the wipe journal (its only recovery record) is durably removed.
+   *
+   * Throws if the checkpoint comes back `busy` or with fewer frames folded than the WAL holds (RF6-e, Sol
+   * round 6): another connection held a lock, so the WAL wasn't fully folded and truncated, the file is NOT
+   * a complete snapshot, and it must neither be copied as a backup nor be trusted to hold a commit. Never
+   * logs any key material.
    */
   checkpoint(): void;
   /**
@@ -1389,28 +1395,32 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       quarantinedMessages.clear();
     },
     checkpoint() {
-      if (!pragma) {
-        throw new Error(
-          "checkpoint() requires a store opened with encryptionKey (SQLCipher) — this store is plaintext.",
-        );
-      }
-      // TRUNCATE folds all committed WAL frames back into the main DB file and resets the WAL to zero
-      // bytes. This store is the sole open connection when the migration calls it (nothing else can
-      // hold a read lock), so the checkpoint can't be blocked/partial — the single `loam.db` is a
-      // complete snapshot afterward.
+      // TRUNCATE folds all committed WAL frames back into the main DB file, syncs it, and resets the WAL to
+      // zero bytes. This store is the sole open connection when its callers run it (nothing else can hold a
+      // read lock), so the checkpoint can't be blocked/partial — the single `loam.db` is a complete snapshot
+      // afterward. SQLCipher goes through its own `pragma()` as it always has; the plaintext drivers read the
+      // same single result row through a prepared statement (`exec` would discard it).
       //
       // RF6-e (Sol round 6): DON'T trust that silently. `wal_checkpoint(TRUNCATE)` returns a single
       // `(busy, log, checkpointed)` row; `busy !== 0` means another connection held a lock and the WAL
-      // was NOT fully folded/truncated — i.e. the sole-connection invariant this migration relies on is
-      // broken and the raw file copy that follows would MISS WAL-resident committed rows. Fail loudly
-      // instead of committing an incomplete pre-migration backup: the caller (`openInitialStore`) then
-      // skips the unbackable in-place rekey rather than risk an unrecoverable interrupted migration.
-      const rows = pragma("wal_checkpoint(TRUNCATE)") as Array<{ busy?: number }> | undefined;
-      const busy = Array.isArray(rows) && rows.length > 0 ? rows[0]?.busy : undefined;
-      if (busy !== 0) {
+      // was NOT fully folded/truncated, and `checkpointed < log` means frames were left behind. Either way
+      // the sole-connection invariant is broken: the migration's raw file copy would MISS WAL-resident rows
+      // and the plaintext wipe's deletion may still be only in the WAL. Fail loudly: `openInitialStore` then
+      // skips the unbackable in-place rekey, and the kill switch stays locked with its journal on disk.
+      // (A store that is not in WAL mode, e.g. `:memory:`, reports `log = checkpointed = -1`: nothing to fold.)
+      const row = (
+        pragma
+          ? (pragma("wal_checkpoint(TRUNCATE)") as SqliteRow[] | undefined)?.[0]
+          : db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()
+      ) as { busy?: unknown; log?: unknown; checkpointed?: unknown } | undefined;
+      const busy = row?.busy;
+      const log = row?.log;
+      const checkpointed = row?.checkpointed;
+      if (busy !== 0 || typeof log !== "number" || log !== checkpointed) {
         throw new Error(
-          `wal_checkpoint(TRUNCATE) did not fully truncate the WAL (busy=${String(busy)}) — the ` +
-            "sole-connection invariant is broken, so this DB file is NOT a complete standalone snapshot.",
+          `wal_checkpoint(TRUNCATE) did not fully fold and truncate the WAL (busy=${String(busy)}, ` +
+            `log=${String(log)}, checkpointed=${String(checkpointed)}); the sole-connection invariant is ` +
+            "broken, so this DB file is NOT a complete standalone snapshot.",
         );
       }
     },

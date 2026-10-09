@@ -2631,7 +2631,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     getAdminSetupCode: () => adminSetupCode,
     emergencyReset: async () => {
       const result = await killSwitch.executeKillSwitch();
-      return { complete: result.complete, keyClearRequested: result.keyClearRequested === true };
+      return {
+        complete: result.complete,
+        keyClearRequested: result.keyClearRequested === true,
+        journaled: result.journaled,
+      };
     },
     reapExpiredMessages,
     reapUnusedIdentities,
@@ -2653,7 +2657,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       },
       async emergencyReset() {
         const result = await killSwitch.executeKillSwitch();
-        return { complete: result.complete };
+        return { complete: result.complete, journaled: result.journaled };
       },
     }),
     async close() {

@@ -34,8 +34,14 @@
 > intent plus the sanitized config snapshot) before its first destructive step, so the next boot finishes an
 > interrupted wipe (deletes the database files and media, restores the config, re-seeds) before anything is
 > served and stays locked if that fails; only when the journal itself could not be written does a restart
-> not finish the wipe, and the notice and the 503 body then say so. The route answers 503, never a 500 that
-> would leave the gate raised with nothing told to purge.
+> not finish the wipe, and the notice and the 503 body then say so: the body's `code` is `wipe_incomplete`
+> (a restart finishes it) or `wipe_unrecorded` (restart, then run the reset again), and its `journaled`
+> field carries the same fact for the launcher, which also gets it from the in-process host reset. The route
+> answers 503, never a 500 that would leave the gate raised with nothing told to purge. The plaintext logical
+> wipe checkpoints the write-ahead log into `loam.db` (`checkpoint()`, which syncs the file) right after
+> `wipeAll()`: the store commits under `synchronous = NORMAL`, so without it a power cut after the journal is
+> cleared could roll the deletion back with nothing left to finish it. A checkpoint that comes back busy or
+> partial counts as a failed wipe, so the node stays locked with its journal on disk.
 >
 > **Which branch a keyed node takes.** `persistent`/`passphrase` nodes take the journaled fixed-key wipe
 > (delete, prove gone, journal, hand off or recreate); `ephemeral` nodes rotate their RAM key. A real key

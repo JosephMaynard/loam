@@ -1142,6 +1142,8 @@ describe("kill switch", () => {
     const wipe = await postKillSwitch(app, admin.cookie);
     expect(wipe.statusCode).toBe(503);
     expect((wipe.json() as { error: string }).error).toMatch(/restart it to finish the wipe/i);
+    // A client that translates by code tells the admin a restart finishes it; the launcher reads `journaled`.
+    expect(wipe.json()).toMatchObject({ code: "wipe_incomplete", journaled: true });
 
     // The intent and the config snapshot are on disk; the surviving rows are not served in the meantime.
     expect(readJournalPhase(dataDir)).toBe("delete-pending");
@@ -1199,6 +1201,93 @@ describe("kill switch", () => {
     expect(config.killSwitch.enabled).toBe(true);
   });
 
+  it("puts a plaintext wipe's deletion into loam.db itself before it clears the journal, so a power cut cannot roll it back", async () => {
+    const { app, dataDir } = await makeApp({ killSwitch: { enabled: true } });
+    const admin = await newSession(app);
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: admin.cookie },
+          payload: { type: "channelPost", channelId: "general", body: "ROLLED_BACK_BY_A_POWER_CUT" },
+        })
+      ).statusCode,
+    ).toBe(201);
+    // SQLite folds the WAL into loam.db on its own (every 1000 pages, and on a clean close), so on a node that
+    // has run for a while the message is in the main file. Fold it now to stand in for that.
+    app.store.checkpoint();
+
+    const copyDir = mkdtempSync(join(tmpdir(), "loam-wipe-copy-"));
+    cleanups.push(() => rmSync(copyDir, { recursive: true, force: true }));
+    /** What a power cut leaves behind: `loam.db` alone, everything only in the unsynced `-wal` lost. */
+    function bodiesInMainFileAlone(name: string): string[] {
+      const copy = join(copyDir, name);
+      copyFileSync(join(dataDir, "loam.db"), copy);
+      const store = openStore(copy);
+      try {
+        return store.loadMessages().map((message) => ("body" in message ? message.body : ""));
+      } finally {
+        store.close();
+      }
+    }
+    expect(bodiesInMainFileAlone("before.db")).toContain("ROLLED_BACK_BY_A_POWER_CUT");
+
+    const wipe = await postKillSwitch(app, admin.cookie);
+    expect(wipe.statusCode).toBe(200);
+    // The journal, the deletion's only recovery record, is gone; the main file alone must not hold the old row.
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+    expect(bodiesInMainFileAlone("after.db")).not.toContain("ROLLED_BACK_BY_A_POWER_CUT");
+  });
+
+  it("stays locked with its journal on disk when the plaintext wipe cannot be made durable", async () => {
+    const { app, dataDir } = await makeApp({ killSwitch: { enabled: true } });
+    const admin = await newSession(app);
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: admin.cookie },
+          payload: { type: "channelPost", channelId: "general", body: "kept until the restart" },
+        })
+      ).statusCode,
+    ).toBe(201);
+
+    // Another connection pins the WAL, so the checkpoint after `wipeAll()` comes back busy.
+    app.store.checkpoint = () => {
+      throw new Error("wal_checkpoint(TRUNCATE) did not fully fold and truncate the WAL (busy=1)");
+    };
+    const wipe = await postKillSwitch(app, admin.cookie);
+    expect(wipe.statusCode).toBe(503);
+    expect(wipe.json()).toMatchObject({ code: "wipe_incomplete", journaled: true });
+    // The journal is not cleared, so the next boot deletes the database files before it serves anything.
+    expect(readJournalPhase(dataDir)).toBe("delete-pending");
+    expect((await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })).statusCode).toBe(503);
+
+    const restarted = await reopenApp(app, dataDir);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+    expect(restarted.store.loadMessages()).toEqual([]);
+  });
+
+  it("answers wipe_unrecorded with journaled false when the wipe journal could not be written, so no client promises a restart will finish it", async () => {
+    const { app, dataDir } = await makeApp({ killSwitch: { enabled: true } });
+    const admin = await newSession(app);
+
+    wipeMarkerWriteFailure.armed = true;
+    app.store.wipeAll = () => {
+      throw new Error("disk full");
+    };
+    const wipe = await postKillSwitch(app, admin.cookie);
+    expect(wipe.statusCode).toBe(503);
+    expect(wipe.json()).toMatchObject({
+      error: expect.stringMatching(/fire the Emergency Reset again/),
+      code: "wipe_unrecorded",
+      journaled: false,
+    });
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+  });
+
   it("keeps the kill switch enabled after a wipe so it can fire again", async () => {
     const app = await makeApp({ killSwitch: { enabled: true } });
     const admin = await newSession(app);
@@ -1233,8 +1322,25 @@ describe("emergency reset from the host device", () => {
     expect(app.store.loadMessages().length).toBe(1);
 
     // ...but the phone's owner can always wipe it from the host menu.
-    expect(await app.emergencyReset()).toEqual({ complete: true, keyClearRequested: false });
+    expect(await app.emergencyReset()).toEqual({ complete: true, keyClearRequested: false, journaled: false });
     expect(app.store.loadMessages()).toEqual([]);
+  });
+
+  it("tells the launcher, and the terminal UI, whether a restart finishes an incomplete wipe", async () => {
+    const app = await makeApp({ killSwitch: { enabled: false } });
+    app.store.wipeAll = () => {
+      throw new Error("disk full");
+    };
+
+    // The journal could not be written, so the reset has to be run again after the restart.
+    wipeMarkerWriteFailure.armed = true;
+    expect(await app.emergencyReset()).toEqual({ complete: false, keyClearRequested: false, journaled: false });
+    expect(await app.host.emergencyReset()).toEqual({ complete: false, journaled: false });
+
+    // The journal was written, so a restart finishes it.
+    wipeMarkerWriteFailure.armed = false;
+    expect(await app.emergencyReset()).toEqual({ complete: false, keyClearRequested: false, journaled: true });
+    expect(await app.host.emergencyReset()).toEqual({ complete: false, journaled: true });
   });
 });
 
@@ -1271,6 +1377,25 @@ describe("panic endpoint", () => {
 
     expect((await panic(app, "panic-token-0123456789")).statusCode).toBe(200);
     expect(app.store.loadMessages()).toEqual([]);
+  });
+
+  it("tells the token holder whether a restart finishes an incomplete wipe (code and journaled)", async () => {
+    // One node per case: the first incomplete wipe leaves its node locked, so a second panic would meet the gate.
+    for (const [journalWrites, expected] of [
+      [false, { code: "wipe_unrecorded", journaled: false }],
+      [true, { code: "wipe_incomplete", journaled: true }],
+    ] as const) {
+      const { app } = await makeApp({
+        killSwitch: { enabled: true, panicToken: "panic-token-0123456789" },
+      });
+      app.store.wipeAll = () => {
+        throw new Error("disk full");
+      };
+      wipeMarkerWriteFailure.armed = !journalWrites;
+      const wipe = await panic(app, "panic-token-0123456789");
+      expect(wipe.statusCode).toBe(503);
+      expect(wipe.json()).toMatchObject(expected);
+    }
   });
 
   it("rate-limits repeated attempts (indistinguishably) and blocks the wipe once tripped", async () => {
@@ -2304,7 +2429,8 @@ describe("encryption at rest + key-discard kill switch", () => {
   it("the host menu's Emergency reset reports a handed-off device-key clear, so the app waits for it before closing", async () => {
     const hook = installFakeWipeRestartHook();
     const { app } = await makeEncryptedApp({ dbEncryptionKey: "a fixed persistent key", dbEncryptionMode: "persistent" });
-    expect(await app.emergencyReset()).toEqual({ complete: true, keyClearRequested: true });
+    // The journal stays on disk for the launcher, which clears it once the device key is gone.
+    expect(await app.emergencyReset()).toEqual({ complete: true, keyClearRequested: true, journaled: true });
     expect(hook.calls).toBe(1);
   });
 

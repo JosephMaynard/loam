@@ -254,7 +254,7 @@ export const ERROR_CODES: Record<string, ServerErrorCode> = {
   "This LOAM node was reset": "node_reset",
   "The emergency wipe could not be completed; the node is locked down. Restart it to finish the wipe.": "wipe_incomplete",
   "The emergency wipe could not be completed and could not be recorded; the node is locked down. Restart it and fire the Emergency Reset again.":
-    "wipe_incomplete",
+    "wipe_unrecorded",
   "This user has no mesh identity": "mesh_identity_missing",
   "Invalid mesh card": "mesh_card_invalid",
   "This node requires an encrypted session": "encrypted_session_required",

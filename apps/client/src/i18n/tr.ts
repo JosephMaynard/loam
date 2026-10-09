@@ -652,6 +652,7 @@ export const tr: Translation = {
   "error.node_resetting": "Bu ağ sıfırlanıyor. Birazdan tekrar deneyin.",
   "error.node_reset": "Bu ağ sıfırlandı. Yeniden katılmak için sayfayı yenileyin.",
   "error.wipe_incomplete": "Acil sıfırlama tamamlanamadı, bu yüzden ağ kilitli. Yeniden denemek için ağı yeniden başlatın.",
+  "error.wipe_unrecorded": "Acil sıfırlama kaydedilemedi ve tamamlanmadı. Ağı yeniden başlatın ve acil sıfırlamayı tekrar çalıştırın.",
   "error.mesh_identity_missing": "Bu ağda henüz bir mesh kimliğiniz yok",
   "error.mesh_card_invalid": "Bu mesh kimlik kartı geçerli değil",
   "error.encrypted_session_required": "Bu ağ yalnızca şifreli bağlantıları kabul eder. Bağlanmak için katılma QR kodunu tarayın.",

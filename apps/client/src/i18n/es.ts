@@ -652,6 +652,7 @@ export const es: Translation = {
   "error.node_resetting": "Esta red se está reiniciando. Inténtalo de nuevo en un momento.",
   "error.node_reset": "Esta red se ha reiniciado. Recarga para unirte de nuevo.",
   "error.wipe_incomplete": "El reinicio de emergencia no pudo completarse, así que la red está bloqueada. Reiníciala para intentarlo de nuevo.",
+  "error.wipe_unrecorded": "El reinicio de emergencia no pudo registrarse y no terminó. Reinicia la red y vuelve a ejecutar el reinicio de emergencia.",
   "error.mesh_identity_missing": "Todavía no tienes una identidad de malla en esta red",
   "error.mesh_card_invalid": "Esa tarjeta de identidad de malla no es válida",
   "error.encrypted_session_required": "Esta red solo acepta conexiones cifradas. Escanea su código QR para conectarte.",
