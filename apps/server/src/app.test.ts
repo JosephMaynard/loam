@@ -1106,6 +1106,99 @@ describe("kill switch", () => {
     expect((await app.server.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
   });
 
+  it("journals a plaintext wipe before it starts, so a wipe the store refuses is finished by the next boot instead of the old messages being served", async () => {
+    const { app, dataDir } = await makeApp({ killSwitch: { enabled: true } });
+    const admin = await newSession(app);
+    // An admin edit that lives only in the database's config row: the journal's snapshot must carry it across.
+    expect(
+      (
+        await app.server.inject({
+          method: "PATCH",
+          url: "/api/admin/config",
+          headers: { cookie: admin.cookie },
+          payload: { retention: { messageTtlMs: 3_600_000 } },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: admin.cookie },
+          payload: { type: "channelPost", channelId: "general", body: "MUST_NOT_OUTLIVE_THE_RESET" },
+        })
+      ).statusCode,
+    ).toBe(201);
+    const avatarsDir = join(dataDir, "avatars");
+    mkdirSync(avatarsDir, { recursive: true });
+    const avatar = join(avatarsDir, "avt_deadbeefdeadbeef.webp");
+    writeFileSync(avatar, "fake");
+
+    // The plaintext wipe's one store call fails, so this run deletes nothing.
+    app.store.wipeAll = () => {
+      throw new Error("disk full");
+    };
+    const wipe = await postKillSwitch(app, admin.cookie);
+    expect(wipe.statusCode).toBe(503);
+    expect((wipe.json() as { error: string }).error).toMatch(/restart it to finish the wipe/i);
+
+    // The intent and the config snapshot are on disk; the surviving rows are not served in the meantime.
+    expect(readJournalPhase(dataDir)).toBe("delete-pending");
+    expect(readJournalConfig(dataDir)?.retention).toMatchObject({ messageTtlMs: 3_600_000 });
+    expect(app.store.loadMessages()).toHaveLength(1);
+    expect(
+      (await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: admin.cookie } })).statusCode,
+    ).toBe(503);
+
+    // The restart finishes the wipe before it serves: database and media gone, journal cleared, config kept.
+    const restarted = await reopenApp(app, dataDir);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+    expect(existsSync(avatar)).toBe(false);
+    expect(restarted.store.loadMessages()).toEqual([]);
+    const fresh = await newSession(restarted);
+    expect(fresh.isAdmin).toBe(true);
+    const served = (
+      await restarted.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: fresh.cookie } })
+    ).json() as { body?: string }[];
+    expect(served.map((message) => message.body)).not.toContain("MUST_NOT_OUTLIVE_THE_RESET");
+    const config = (
+      await restarted.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: fresh.cookie } })
+    ).json() as { killSwitch: { enabled: boolean }; retention: { messageTtlMs?: number } };
+    expect(config.killSwitch.enabled).toBe(true);
+    expect(config.retention.messageTtlMs).toBe(3_600_000);
+  });
+
+  it("clears the wipe journal once an in-process wipe completes, and a restart serves the fresh node", async () => {
+    const { app, dataDir } = await makeApp({ killSwitch: { enabled: true } });
+    const admin = await newSession(app);
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: admin.cookie },
+          payload: { type: "channelPost", channelId: "general", body: "gone after the reset" },
+        })
+      ).statusCode,
+    ).toBe(201);
+
+    expect((await postKillSwitch(app, admin.cookie)).statusCode).toBe(200);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+
+    const restarted = await reopenApp(app, dataDir);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+    const fresh = await newSession(restarted);
+    expect(fresh.isAdmin).toBe(true);
+    expect(
+      (await restarted.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: fresh.cookie } })).json(),
+    ).toEqual([]);
+    const config = (
+      await restarted.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: fresh.cookie } })
+    ).json() as { killSwitch: { enabled: boolean } };
+    expect(config.killSwitch.enabled).toBe(true);
+  });
+
   it("keeps the kill switch enabled after a wipe so it can fire again", async () => {
     const app = await makeApp({ killSwitch: { enabled: true } });
     const admin = await newSession(app);
@@ -1892,6 +1985,8 @@ describe("encryption at rest + key-discard kill switch", () => {
       payload: { confirm: "wipe" },
     });
     expect(wipe.statusCode).toBe(200);
+    // The journal written ahead of the rotation is cleared once the fresh store is loaded.
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
 
     // Live getter → the reopened store. Old message gone; node re-seeded and usable.
     expect(app.store.loadMessages()).toEqual([]);
@@ -1903,6 +1998,64 @@ describe("encryption at rest + key-discard kill switch", () => {
     const returning = await session(app);
     expect(returning.user.isAdmin).toBe(true); // firstUser bootstrap re-applies on the fresh node
     expect((await post(app, returning.cookie, "after wipe")).statusCode).toBe(201);
+  });
+
+  it("journals an ephemeral-key wipe before it starts, so a wipe that fails after the journal is finished by the next boot", async () => {
+    const { app, dataDir } = await makeEncryptedApp({ ephemeralDbKey: true }, { killSwitch: { enabled: true } });
+    const admin = await session(app);
+    expect(
+      (
+        await app.server.inject({
+          method: "PATCH",
+          url: "/api/admin/config",
+          headers: { cookie: admin.cookie },
+          payload: { retention: { messageTtlMs: 3_600_000 } },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect((await post(app, admin.cookie, "EPHEMERAL_MUST_NOT_OUTLIVE_THE_RESET")).statusCode).toBe(201);
+
+    // The store refuses to close (the branch's first step after the journal), so this run deletes nothing.
+    const store = app.store;
+    const realClose = store.close.bind(store);
+    store.close = () => {
+      store.close = realClose;
+      throw new Error("I/O error");
+    };
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(503);
+    expect((wipe.json() as { error: string }).error).toMatch(/restart it to finish the wipe/i);
+    expect(readJournalPhase(dataDir)).toBe("delete-pending");
+    expect(readJournalConfig(dataDir)?.retention).toMatchObject({ messageTtlMs: 3_600_000 });
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(true);
+    expect(
+      (await app.server.inject({ method: "GET", url: "/api/channels", headers: { cookie: admin.cookie } })).statusCode,
+    ).toBe(503);
+    await app.close();
+
+    // The restart (a new random key, as on every ephemeral boot) finishes the wipe before it serves.
+    const restarted = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false, ephemeralDbKey: true });
+    cleanups.push(() => restarted.close());
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
+    expect(restarted.store.loadMessages()).toEqual([]);
+    const fresh = await session(restarted);
+    expect(fresh.user.isAdmin).toBe(true);
+    const search = await restarted.server.inject({
+      method: "GET",
+      url: "/api/search?q=EPHEMERAL_MUST_NOT_OUTLIVE_THE_RESET",
+      headers: { cookie: fresh.cookie },
+    });
+    expect((search.json() as { results: unknown[] }).results).toEqual([]);
+    const config = (
+      await restarted.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: fresh.cookie } })
+    ).json() as { killSwitch: { enabled: boolean }; retention: { messageTtlMs?: number } };
+    expect(config.killSwitch.enabled).toBe(true);
+    expect(config.retention.messageTtlMs).toBe(3_600_000);
   });
 
   it("SF1/P1-1+P2-1: an Android-style ephemeral boot (ephemeralDbKey + dbEncryptionMode, as embedded.ts " +

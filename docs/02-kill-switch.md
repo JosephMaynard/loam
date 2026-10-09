@@ -29,8 +29,13 @@
 > (`wipeAll()`, the reopen after the files are deleted, the reload) or the filesystem throws partway, the
 > wipe is reported as **incomplete** exactly like a deletion that could not be verified: the `wipe` event is
 > still broadcast so clients purge, sockets are closed, in-memory state is dropped, and the node stays
-> locked (every route but `/api/health` answers 503) until it is reopened and the wipe retried. The route
-> answers 503, never a 500 that would leave the gate raised with nothing told to purge.
+> locked (every route but `/api/health` answers 503) until it is restarted. Every branch, the plaintext
+> logical wipe and the ephemeral key rotation included, writes the wipe journal (`.loam-wipe-phase`: the
+> intent plus the sanitized config snapshot) before its first destructive step, so the next boot finishes an
+> interrupted wipe (deletes the database files and media, restores the config, re-seeds) before anything is
+> served and stays locked if that fails; only when the journal itself could not be written does a restart
+> not finish the wipe, and the notice and the 503 body then say so. The route answers 503, never a 500 that
+> would leave the gate raised with nothing told to purge.
 >
 > **Which branch a keyed node takes.** `persistent`/`passphrase` nodes take the journaled fixed-key wipe
 > (delete, prove gone, journal, hand off or recreate); `ephemeral` nodes rotate their RAM key. A real key

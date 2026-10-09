@@ -42,7 +42,8 @@ export type StoreLifecycleDeps = {
 
 /** Outcome of an artifact deletion pass: `ok` only when every path is PROVEN gone. */
 export type DeletionResult = { ok: boolean; survivors: string[]; errors: string[] };
-/** The two durable phases of a fixed-key emergency wipe (see `writeWipeJournal`). */
+/** The two durable phases of an emergency wipe (see `writeWipeJournal`): every branch journals `delete-pending`
+ *  before its first destructive step; only a fixed-key wipe handed to the launcher reaches `key-clear-ready`. */
 export type WipePhase = "delete-pending" | "key-clear-ready";
 /** The on-disk wipe journal: the phase plus the effective config snapshot committed with it. */
 export type WipeJournal = { phase: WipePhase; config?: LoamConfig; configInvalid?: boolean; corrupt?: boolean };
@@ -1331,16 +1332,20 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   /**
    * Boot-time wipe-phase resume (P1-1, Sol round 8) — runs BEFORE the real store is opened for serving.
    * Routes on the durable PHASE, not mere marker presence:
-   *   - `delete-pending`  → an earlier fixed-key wipe never PROVED its artifacts gone (or was killed mid-
-   *                         deletion). RE-RUN the full artifact+media deletion under the still-available OLD
-   *                         key. On success, advance to `key-clear-ready` and hand off to the launcher to
-   *                         clear the device key + restart; on failure, stay `delete-pending` (a later reopen
-   *                         retries). Either way, do NOT open/serve the real DB — throw {@link WipeResumeInProgressError}.
+   *   - `delete-pending`  → an earlier wipe never PROVED its artifacts gone (or was killed mid-deletion): a
+   *                         fixed-key wipe, or an ephemeral/plaintext one whose in-process steps threw. RE-RUN
+   *                         the full artifact+media deletion. A fixed-key node with a launcher then advances to
+   *                         `key-clear-ready` and hands off to the launcher to clear the device key + restart,
+   *                         throwing {@link WipeResumeInProgressError} rather than opening the real DB; every
+   *                         other node has no device key to clear, so it clears the journal durably and opens
+   *                         a fresh store right here, exactly as its live wipe would have. On failure, stay
+   *                         `delete-pending` and throw (a later reopen retries); pre-wipe data is never served.
    *   - `key-clear-ready` → artifacts already proven gone; the ONLY step left is the launcher's device-key
    *                         clear. In the normal flow main.js does that dance and deletes the phase file
    *                         BEFORE booting the server, so the server never sees this; if it does (defensive),
    *                         re-signal the launcher rather than serve under the un-cleared key.
-   * Returns the store to serve from when there is NOTHING to resume (`undefined` phase); otherwise throws.
+   * Returns the store to serve from when there is NOTHING to resume (`undefined` phase) or the wipe was
+   * finished in-process; otherwise throws.
    */
   function resumeWipePhaseThenOpenStore(): LoamStore {
     const journal = readWipeJournal();
@@ -1385,6 +1390,12 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     }
 
     const hook = wipeRestartHook();
+    // Only a `persistent`/`passphrase` node holds a device key for the launcher to clear (the live wipe's
+    // `fixedKeyMode` test). A plaintext, ephemeral or legacy-keyed node, and any node with no launcher hook,
+    // finishes the wipe in-process below instead of being sent through a key-clear it has no key for.
+    const fixedKeyMode =
+      state.dbKey !== undefined && (options.dbEncryptionMode === "persistent" || options.dbEncryptionMode === "passphrase");
+    const finishInProcess = !hook || !fixedKeyMode;
 
     // Both phases need the artifacts PROVEN gone (and the deletion made DURABLE — dir fsync) before any
     // device-key clear. For `delete-pending` this is the retry the whole redesign hinges on; for
@@ -1413,32 +1424,38 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       throw new WipeResumeInProgressError(message);
     }
 
-    // Every artifact + media path is PROVEN gone. Advance to `key-clear-ready` durably (carrying the config
-    // snapshot forward), THEN hand off. A failed write here self-heals: the phase stays `delete-pending`, so a
-    // next boot re-enters this resume, re-verifies deletion (idempotent), and re-advances.
-    const phaseReady = writeWipeJournal("key-clear-ready", config);
-
-    if (!hook) {
-      // Desktop/CI (no launcher): the device key can't be rotated in-process. The wipe already deleted the
-      // ciphertext; clear the phase and boot a fresh (same-key) DB — the documented desktop limitation. If the
-      // phase file can't be removed, do NOT open a fresh store: the next boot would re-read `key-clear-ready`
-      // and re-wipe the fresh DB on every launch. Stay locked (fail-closed) so a persistent FS fault surfaces
-      // as a stuck node rather than a silent perpetual-wipe loop (CodeRabbit MAJOR).
+    if (finishInProcess) {
+      // Nothing is left for a launcher to do: either there is no launcher (desktop/Pi/CI, where a fixed key
+      // can't be rotated in-process, the documented limitation in docs/02) or the node has no fixed device key
+      // (plaintext, ephemeral, legacy-keyed). Every artifact is deleted; config.json carries the snapshot. Clear
+      // the journal durably and boot a fresh database (a fresh random key under an ephemeral mode, the same
+      // key under a fixed one, none under plaintext). If the journal can't be removed, do NOT open a fresh
+      // store: the next boot would re-read `delete-pending` and re-wipe the fresh DB on every launch. Stay
+      // locked (fail-closed) so a persistent FS fault surfaces as a stuck node rather than a silent
+      // perpetual-wipe loop (CodeRabbit MAJOR).
       if (!clearWipePhase()) {
         const message =
           "Resuming an interrupted emergency wipe: artifacts are deleted, but the durable wipe-phase file could " +
-          "NOT be removed on a node with no launcher hook — refusing to open a fresh database (it would be " +
-          "re-wiped on the next boot). The node is locked; resolve the filesystem fault and reopen.";
+          "NOT be removed; refusing to open a fresh database (it would be re-wiped on the next boot). The node " +
+          "is locked; resolve the filesystem fault and reopen.";
         log.error(message);
         reportBootNotice(message, "kill_switch_wipe_incomplete");
         throw new WipeResumeInProgressError(message);
       }
       log.warn(
-        "Resuming an interrupted emergency wipe: artifacts are deleted, but no launcher hook is installed to " +
-          "clear the device key — booting a fresh database under the existing key (documented limitation, docs/02).",
+        hook
+          ? "Resuming an interrupted emergency wipe: artifacts are deleted and this node has no fixed device key " +
+              "to clear; booting a fresh database."
+          : "Resuming an interrupted emergency wipe: artifacts are deleted, but no launcher hook is installed to " +
+              "clear the device key; booting a fresh database under the existing key (documented limitation, docs/02).",
       );
       return openInitialStore();
     }
+
+    // Every artifact + media path is PROVEN gone. Advance to `key-clear-ready` durably (carrying the config
+    // snapshot forward), THEN hand off. A failed write here self-heals: the phase stays `delete-pending`, so a
+    // next boot re-enters this resume, re-verifies deletion (idempotent), and re-advances.
+    const phaseReady = writeWipeJournal("key-clear-ready", config);
 
     deps.markAwaitingWipeRestart();
     let signaled = true;

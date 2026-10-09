@@ -14,8 +14,8 @@ import type { WipePhase } from "./store-lifecycle.js";
 /**
  * The result of a kill-switch run (P1-1, Sol round 8) — so the `/api/admin/kill-switch` and `/api/panic`
  * endpoints never report success on an INCOMPLETE wipe. `complete` is false when the wipe could not be
- * finished this run (deletion incomplete/unverifiable → 503-locked, retried on the next boot); `phase`
- * carries the durable wipe phase for a fixed-key launcher handoff. `keyClearRequested` is true when the launcher
+ * finished this run (deletion incomplete/unverifiable → 503-locked, finished by the next boot); `phase`
+ * carries the durable wipe phase whenever the wipe journal is on disk. `keyClearRequested` is true when the launcher
  * was asked to clear the device key and restart (`loam-wipe-restart`): the wipe isn't over until it has, so
  * the host app must not close itself before that clear is verified.
  */
@@ -65,6 +65,32 @@ export function createKillSwitch(ctx: AppContext) {
     // And every "Link a node" code shown: a photo of one must not link a node to the fresh network.
     ctx.linkCodes.clear();
     ctx.adminClaimCodes.clear();
+    // Whether this run committed the `{ phase: "delete-pending", config }` wipe journal to disk. EVERY branch
+    // writes it before its first destructive step (the fixed-key ones always did; the ephemeral and plaintext
+    // ones used to run unjournaled, so a `wipeAll()` or reopen that threw left the node 503-locked in memory
+    // only, and the next boot served the original messages). It decides what an incomplete-wipe notice may
+    // promise about a restart, and whether the result carries the durable phase.
+    let journaled = false;
+    // Whether the journal is still on disk and this function's to clear once the in-process wipe is done:
+    // true for the ephemeral and plaintext branches (cleared in the shared tail, after the fresh store is
+    // loaded); the hooked fixed-key branch leaves it for the launcher, the no-hook one clears it itself.
+    let journalToClear = false;
+
+    /** The closing sentence of every incomplete-wipe notice: what a restart does, which depends on whether
+     *  the wipe journal reached disk. With it, the boot-time resume deletes everything before serving. */
+    function restartAdvice(): string {
+      return journaled
+        ? "The node is locked down (503); restart it to finish the wipe (the wipe journal makes the next boot " +
+            "delete everything before it serves)."
+        : "The node is locked down (503); the wipe journal could not be written beforehand, so a restart will NOT " +
+            "finish the wipe: restart the node and fire the Emergency Reset again.";
+    }
+
+    /** An incomplete result that reports the durable phase only when the journal really is on disk. */
+    function incompleteResult(): KillSwitchResult {
+      return journaled ? { complete: false, phase: "delete-pending" } : { complete: false };
+    }
+
     /** Synchronous in-memory lockdown for an INCOMPLETE wipe: 503-gate on, drop every in-memory mirror,
      *  tell clients to purge, close sockets, then report the distinct incomplete notice. Used by the
      *  no-hook fail-closed paths (a phase-write failure and a deletion failure) so nothing stale is served
@@ -90,7 +116,7 @@ export function createKillSwitch(ctx: AppContext) {
       }
       ctx.server.log.error(message);
       reportBootNotice(message, "kill_switch_wipe_incomplete");
-      return { complete: false };
+      return incompleteResult();
     }
 
     // RF-a, extended (Sol round-10 review): raise the 503 lockdown gate SYNCHRONOUSLY, before ANY branch or
@@ -160,8 +186,8 @@ export function createKillSwitch(ctx: AppContext) {
           // a separate later write. A `false` does NOT abort the wipe (confidentiality-first, Sol round-8 P1-d /
           // round-9 decision): deletion still runs; the only residual is the degraded-FS compound case.
           const sanitized = ctx.lifecycle.sanitizeConfigForRestart(ctx.appConfig);
-          const journalWritten = ctx.lifecycle.writeWipeJournal("delete-pending", sanitized);
-          if (!journalWritten) {
+          journaled = ctx.lifecycle.writeWipeJournal("delete-pending", sanitized);
+          if (!journaled) {
             ctx.server.log.error(
               "KILL SWITCH NOTICE: could NOT durably write the wipe journal (intent + config) before this fixed-key " +
                 "wipe — proceeding with deletion regardless (confidentiality-first), but a crash mid-deletion could " +
@@ -180,10 +206,10 @@ export function createKillSwitch(ctx: AppContext) {
             const message =
               `KILL SWITCH NOTICE: some persisted data could not be deleted and VERIFIED gone (${remaining}). ` +
               "The launcher was NOT signaled, to avoid clearing the device key while recoverable ciphertext " +
-              "survives. The node is locked down (503); reopen it to retry the wipe.";
+              `survives. ${restartAdvice()}`;
             ctx.server.log.error(message);
             reportBootNotice(message, "kill_switch_wipe_incomplete");
-            return { complete: false, phase: "delete-pending" };
+            return incompleteResult();
           }
 
           // Persist config.json from the snapshot NOW, and gate the launcher handoff on it (P1-4, Sol round-10):
@@ -200,7 +226,7 @@ export function createKillSwitch(ctx: AppContext) {
               "from the wipe journal and completes the handoff.";
             ctx.server.log.error(message);
             reportBootNotice(message, "kill_switch_wipe_incomplete");
-            return { complete: false, phase: "delete-pending" };
+            return incompleteResult();
           }
 
           // The snapshot could not carry a configured sync token, so it turned sync off: leave the next boot a
@@ -262,10 +288,11 @@ export function createKillSwitch(ctx: AppContext) {
         // P1-4 (Sol round-10): journal `{ delete-pending, config }` atomically FIRST (intent + config together).
         // Confidentiality-first: a failed write does NOT abort the wipe.
         const sanitized = ctx.lifecycle.sanitizeConfigForRestart(ctx.appConfig);
-        if (!ctx.lifecycle.writeWipeJournal("delete-pending", sanitized)) {
+        journaled = ctx.lifecycle.writeWipeJournal("delete-pending", sanitized);
+        if (!journaled) {
           ctx.server.log.error(
             "Kill switch (no-hook fixed key): could NOT durably write the wipe journal (intent + config) before " +
-              "deletion — if deletion also fails, a restart cannot auto-resume; reopen promptly.",
+              "deletion; if deletion also fails, a restart cannot finish the wipe. Reopen promptly.",
           );
         }
         ctx.store.close();
@@ -275,8 +302,7 @@ export function createKillSwitch(ctx: AppContext) {
           const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
           return lockDownAndReportIncomplete(
             `KILL SWITCH NOTICE (no-hook fixed key): could not delete and VERIFY every artifact + media gone durably ` +
-              `(${remaining}) — refusing to reopen while recoverable data may remain. The node is locked down (503); ` +
-              "restart it to retry the wipe.",
+              `(${remaining}); refusing to reopen while recoverable data may remain. ${restartAdvice()}`,
           );
         }
         // Persist config.json from the snapshot BEFORE clearing the journal (P1-4): the journal carries the only
@@ -296,8 +322,7 @@ export function createKillSwitch(ctx: AppContext) {
         if (!ctx.lifecycle.clearWipePhase()) {
           return lockDownAndReportIncomplete(
             "KILL SWITCH NOTICE (no-hook fixed key): the full wipe completed but the durable phase clear could not be " +
-              "confirmed — refusing to open a fresh database (a resurrected phase would re-wipe it). The node is locked " +
-              "down (503); restart it to retry the wipe.",
+              `confirmed; refusing to open a fresh database (a resurrected phase would re-wipe it). ${restartAdvice()}`,
           );
         }
         ctx.store = ctx.lifecycle.openLoamStore();
@@ -308,30 +333,45 @@ export function createKillSwitch(ctx: AppContext) {
         // plaintext config.json above (the crash-recovery copy) has the bearer secret blanked.
         ctx.store.setConfigValue("config", JSON.stringify(ctx.appConfig));
       } else if (ctx.dbState.encryptionEnabled) {
-        // Ephemeral (RAM-only key): rotate the key and recreate. No durable phase: an ephemeral key is
-        // regenerated on restart, so any surviving file is unreadable regardless. Media is deleted in the shared
-        // tail below. A cryptographic wipe destroys the ciphertext, stronger than a logical DELETE (docs/02).
-        // Both entry points (server.ts, embedded.ts) report a real key with no declared mode as `passphrase`,
-        // so only an embedder calling `buildApp` directly with a key and no mode lands here with a fixed key;
-        // that key is never rotated (`ephemeralDbKey` guards it) and the database is recreated under it.
+        // Ephemeral (RAM-only key): rotate the key and recreate. A cryptographic wipe destroys the ciphertext,
+        // stronger than a logical DELETE (docs/02). Media is deleted in the shared tail below. Both entry points
+        // (server.ts, embedded.ts) report a real key with no declared mode as `passphrase`, so only an embedder
+        // calling `buildApp` directly with a key and no mode lands here with a fixed key; that key is never
+        // rotated (`ephemeralDbKey` guards it) and the database is recreated under it.
+        //
+        // Journal the wipe INTENT (with the sanitized config snapshot) durably FIRST, as the fixed-key branches
+        // do. An ephemeral key is regenerated on restart, so a surviving file is unreadable regardless, but a
+        // throw partway (the close, the reopen, the reload) used to leave this branch 503-locked in memory only:
+        // under a legacy fixed key the next boot then served the original messages, and under any key the media
+        // and the admin's config edits (the DB row) could be lost. With the journal on disk the boot-time resume
+        // deletes every artifact and restores config.json before anything is served. Confidentiality-first: a
+        // failed write does NOT abort the wipe (the notices then say a restart will not finish it).
+        journaled = ctx.lifecycle.writeWipeJournal("delete-pending", ctx.lifecycle.sanitizeConfigForRestart(ctx.appConfig));
+        journalToClear = journaled;
+        if (!journaled) {
+          ctx.server.log.error(
+            "Kill switch (ephemeral key): could NOT durably write the wipe journal (intent + config) before the " +
+              "cryptographic wipe; proceeding regardless (confidentiality-first), but if the wipe fails partway a " +
+              "restart will not finish it.",
+          );
+        }
         ctx.store.close();
         const deletion = ctx.lifecycle.deleteAndVerifyDbArtifacts();
         if (!deletion.ok) {
           const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
           return lockDownAndReportIncomplete(
-            `KILL SWITCH NOTICE: the cryptographic wipe could not delete and VERIFY every DB artifact (${remaining}) — ` +
-              "refusing to rotate the key / reopen while recoverable ciphertext may remain. The node is locked " +
-              "down (503); restart it to retry the wipe.",
+            `KILL SWITCH NOTICE: the cryptographic wipe could not delete and VERIFY every DB artifact (${remaining}); ` +
+              `refusing to rotate the key / reopen while recoverable ciphertext may remain. ${restartAdvice()}`,
           );
         }
         // A preserve-recovery snapshot (`.loam-recovery-*`) holds an older DB set + plaintext media moved aside
-        // by a start-fresh — outside the live DB, so the delete above never touches it. Same fail-closed rule.
+        // by a start-fresh, outside the live DB, so the delete above never touches it. Same fail-closed rule.
         const snapshots = ctx.lifecycle.deleteAndVerifyRecoverySnapshots();
         if (!snapshots.ok) {
           const remaining = [...snapshots.survivors, ...snapshots.errors].join(", ");
           return lockDownAndReportIncomplete(
-            `KILL SWITCH NOTICE: could not delete and VERIFY every recovery snapshot gone (${remaining}) — refusing ` +
-              "to reopen while recoverable data may remain. The node is locked down (503); restart it to retry the wipe.",
+            `KILL SWITCH NOTICE: could not delete and VERIFY every recovery snapshot gone (${remaining}); refusing ` +
+              `to reopen while recoverable data may remain. ${restartAdvice()}`,
           );
         }
         if (ctx.lifecycle.ephemeralDbKey) {
@@ -343,6 +383,24 @@ export function createKillSwitch(ctx: AppContext) {
         ctx.store.setConfigValue("config", JSON.stringify(ctx.appConfig));
       } else {
         // Best-effort logical wipe (no encryption): DELETE leaves recoverable pages on flash. See docs.
+        //
+        // Journal the wipe INTENT (with the sanitized config snapshot) durably FIRST, as the fixed-key branches
+        // do. This branch has no launcher handoff and used to run unjournaled, so a `wipeAll()` that threw (a
+        // full disk, an I/O error) left the node 503-locked in memory only, and the next boot served the original
+        // messages with a 200. With the journal on disk the boot-time resume deletes the database files and the
+        // media (an equivalent, simpler wipe for a plaintext node), restores config.json from the snapshot and
+        // re-seeds before anything is served; the journal is cleared in the shared tail once the in-process wipe
+        // is done. Confidentiality-first: a failed write does NOT abort the wipe (the notices then say a restart
+        // will not finish it).
+        journaled = ctx.lifecycle.writeWipeJournal("delete-pending", ctx.lifecycle.sanitizeConfigForRestart(ctx.appConfig));
+        journalToClear = journaled;
+        if (!journaled) {
+          ctx.server.log.error(
+            "Kill switch (plaintext): could NOT durably write the wipe journal (intent + config) before the logical " +
+              "wipe; proceeding regardless (confidentiality-first), but if the wipe fails partway a restart will not " +
+              "finish it.",
+          );
+        }
         ctx.store.wipeAll();
         // P1-2 (Sol round 7): wipeAll keeps the live plaintext DB open (and its config), but stale
         // migration/recovery artifacts from a PRIOR encrypted era — the legacy-key `.premigration` snapshot
@@ -415,6 +473,17 @@ export function createKillSwitch(ctx: AppContext) {
 
       ctx.data = { users: [], channels: [], messages: [] };
       ctx.loadData();
+      // The ephemeral and plaintext branches journaled their intent above; every destructive step is done and the
+      // fresh store is loaded, so record the wipe as finished DURABLY before the node serves again (the 503 gate
+      // is still up, so nothing has been written to the fresh store on anyone's behalf). If the clear can't be
+      // made durable, stay locked: a resurrected `delete-pending` would otherwise re-wipe a database that has
+      // taken new messages by then, and a restart's resume re-runs the (idempotent) deletion and re-clears.
+      if (journalToClear && !ctx.lifecycle.clearWipePhase()) {
+        return lockDownAndReportIncomplete(
+          "KILL SWITCH NOTICE: the wipe completed, but the wipe journal could not be durably cleared, so the node " +
+            `cannot record it as finished. ${restartAdvice()}`,
+        );
+      }
       // Rotate the transport keypair + drop all live sessions: the old join QR stops working and no
       // captured session key survives the wipe (docs/08). loadData reloaded whatever was persisted
       // (the old key on an unencrypted wipe), so rotate explicitly to guarantee a fresh one on both paths.
@@ -439,8 +508,7 @@ export function createKillSwitch(ctx: AppContext) {
       ctx.server.log.error(error, "Kill switch: the wipe threw partway");
       const detail = error instanceof Error ? error.message : String(error);
       return lockDownAndReportIncomplete(
-        `KILL SWITCH NOTICE: the wipe failed partway (${detail}). Some data may remain. The node is locked down ` +
-          "(503); reopen it to retry the wipe.",
+        `KILL SWITCH NOTICE: the wipe failed partway (${detail}). Some data may remain. ${restartAdvice()}`,
       );
     }
   }

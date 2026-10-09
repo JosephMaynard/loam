@@ -296,7 +296,11 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   Optional unauthenticated panic token (`killSwitch.panicToken`) fires it via `POST /api/panic`. Everything
   after the synchronous 503 gate runs in one try/catch: a throw (`wipeAll`, the reopen, `loadData`) goes through
   `lockDownAndReportIncomplete` and answers `{ complete: false }` (503, `wipe` broadcast, node locked), never a
-  500. A hooked fixed-key reset that had to strip `sync.token` from the restart config also sets
+  500. Every branch (plaintext and ephemeral too) writes the wipe journal (`.loam-wipe-phase`: intent + sanitized
+  config) before its first destructive step, the in-process branches clear it after `loadData()`, and the boot-time
+  resume (`resumeWipePhaseThenOpenStore`) finishes an interrupted wipe (delete DB files + media, restore
+  config.json, fresh store) before serving, in-process on any node without a fixed device key, so a restart
+  never serves pre-wipe data. A hooked fixed-key reset that had to strip `sync.token` from the restart config also sets
   `sync.enabled: false` and leaves a `.loam-sync-off-after-reset` note the next boot logs and consumes. Both
   entry points treat an undeclared real `LOAM_DB_KEY` as `passphrase` (`resolveDbEncryptionMode`), so
   `loamnet --encrypt` takes the journaled fixed-key branch; only a direct `buildApp` embedder with a key and no
