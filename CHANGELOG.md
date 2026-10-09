@@ -99,6 +99,10 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   an older reaction stored before this can still be removed.
 
 ### Security
+- **A failed Emergency Reset on a plaintext or ephemeral-key node is finished by the next boot.** The wipe
+  journal is written before anything is touched, so a reset that fails partway (full disk, I/O error) no
+  longer leaves a restart serving the old messages; the next boot deletes the database and media and
+  restores the admin config before serving, and the 503 says exactly what a restart will do.
 - **Sync hardening against a hostile peer.** One record too large to download is remembered as refused
   once isolated, so it can no longer make every round repeat the same downloads and stall everything
   after it. A peer may introduce at most 200 new channels a round and 2 000 in all. A peer may author new
@@ -146,6 +150,14 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   server's own limiter sends no `x-ratelimit-*` headers.
 
 ### Fixed
+- **Android host: the hotspot requests coarse location together with fine** on every Android version
+  (Android 12 ignored the fine-only request, so a fresh install there could never start the hotspot), and
+  from Android 13 a hotspot start is gated on Nearby Wi-Fi devices alone, so choosing "Approximate" no
+  longer blocks it.
+- **Sync: a message in a channel the per-round channel cap put off is fetched again** by the round that
+  imports its channel, instead of being remembered as refused for an hour.
+- **Threads survive the offline cache cap.** The root of a cached reply is kept with it however old it is
+  (and goes once all its replies have), so a cached thread always opens offline.
 - **Every error the node answers with now has a code**, so the web app shows it in the chosen language
   instead of English: timeouts, join requests, channel deletion, reports, mesh contacts, attachment size,
   "this network is resetting" and the encrypted-connection refusals. A test keeps it that way.
