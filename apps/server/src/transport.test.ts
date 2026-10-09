@@ -1121,6 +1121,38 @@ describe("transport encryption WebSocket frames", () => {
     }
     expect(plainClosed).toBe(false); // admitted (not refused) — legitimate off-node plaintext socket
   });
+
+  it("counts unconfirmed sockets per IPv6 /64, like the HTTP limiter, so cycling addresses buys none", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const session = await openTransport08(app);
+    await resumeIdentity(app, session, 1);
+
+    /** Open an encrypted socket from `address` (never answering its challenge) and return its first frame. */
+    async function firstFrameFrom(address: string): Promise<string> {
+      let first!: Promise<string>;
+      const socket = await app.server.injectWS(
+        `/ws?enc=${session.sessionId}`,
+        { headers: { host: "127.0.0.1" }, socket: { remoteAddress: address } } as never,
+        {
+          // Listen before the upgrade completes: the server speaks first.
+          onInit: (ws) => {
+            first = new Promise<string>((resolve) => ws.once("message", (data: Buffer) => resolve(data.toString())));
+          },
+        },
+      );
+      cleanups.push(() => socket.terminate());
+      return first;
+    }
+
+    // Eight sockets from eight addresses in one /64 fill that host's share of the pre-auth pool.
+    for (let host = 1; host <= 8; host += 1) {
+      const frame = await firstFrameFrom(`2001:db8:1:2::${host}`);
+      expect(openTransport(session.key, frame, WS_CHALLENGE_AAD)).toBeTruthy();
+    }
+    // A ninth address in the same /64 is refused; one in another /64 is not.
+    expect(await firstFrameFrom("2001:db8:1:2::9")).toContain("Too many pending connections");
+    expect(openTransport(session.key, await firstFrameFrom("2001:db8:1:3::1"), WS_CHALLENGE_AAD)).toBeTruthy();
+  });
 });
 
 describe("transport auth-binding", () => {

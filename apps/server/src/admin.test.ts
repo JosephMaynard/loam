@@ -267,6 +267,18 @@ describe("host-device admin bootstrap: the claim budget and setup codes", () => 
     expect((promoted.json() as { isAdmin: boolean }).isAdmin).toBe(true);
   });
 
+  it("counts claim guesses per IPv6 /64, so a guesser cycling addresses gets no more tries", async () => {
+    const app = await makeApp(undefined, { hostToken: HOST_TOKEN });
+    const guesser = await newSession(app);
+    const from = (remoteAddress: string, secret: string) =>
+      app.server.inject({ method: "POST", url: "/api/admin/claim", headers: { cookie: guesser.cookie }, payload: { secret }, remoteAddress });
+    for (let host = 1; host <= 5; host += 1) {
+      expect((await from(`2001:db8:5:6::${host}`, `guess-${host}`)).statusCode).toBe(403);
+    }
+    expect((await from("2001:db8:5:6::99", "guess-6")).statusCode).toBe(429);
+    expect((await from("2001:db8:5:7::1", "guess-7")).statusCode).toBe(403); // another /64 is another host
+  });
+
   it("hostDevice CONFIGURED on a node with no launcher token behaves like `none` and never touches the limiter", async () => {
     const app = await makeApp({ admin: { bootstrap: "hostDevice" } });
     const user = await newSession(app);

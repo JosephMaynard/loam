@@ -8,6 +8,7 @@ import { mergeConfig } from "./config.js";
 import { errorBody } from "./errors.js";
 import { makeAdminSetupCode } from "./identity.js";
 import type { KillSwitchResult } from "./kill-switch.js";
+import { rateLimitKey } from "./rate-limit.js";
 import { timingSafeEqualStrings, verifySecret } from "./secrets.js";
 
 /**
@@ -127,8 +128,9 @@ export function registerAdminRoutes(ctx: AppContext): void {
       return promote();
     }
 
-    // Key on the caller's IP: a session-id key could be reset by simply omitting the cookie.
-    if (ctx.attemptRateLimited(ctx.claimAttempts, request.ip)) {
+    // Key on the caller's IP: a session-id key could be reset by simply omitting the cookie. Folded like the
+    // HTTP limiter (an IPv6 /64 is one host), so cycling addresses buys no extra guesses.
+    if (ctx.attemptRateLimited(ctx.claimAttempts, rateLimitKey(request.ip))) {
       return reply.code(429).send(errorBody("Too many claim attempts; try again later"));
     }
 
@@ -224,7 +226,7 @@ export function registerAdminRoutes(ctx: AppContext): void {
       return reply.code(404).send(errorBody("Not found"));
     }
 
-    if (ctx.attemptRateLimited(ctx.panicAttempts, request.ip)) {
+    if (ctx.attemptRateLimited(ctx.panicAttempts, rateLimitKey(request.ip))) {
       return reply.code(404).send(errorBody("Not found"));
     }
 
