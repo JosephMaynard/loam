@@ -169,6 +169,30 @@ describe("admin bootstrap", () => {
     const notClaimable = await makeApp();
     expect(await readClaimFlag(notClaimable)).toBe(false);
   });
+
+  it("answers a claim with the claimer's own record as other routes show it, never the stored row", async () => {
+    const app = await makeApp({ admin: { bootstrap: "passphrase", passphrase: "correct horse battery" } });
+    const first = await newSession(app);
+    expect((await claim(app, first.cookie, "correct horse battery")).statusCode).toBe(200);
+    const quiet = await newSession(app);
+    const shadowed = await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${quiet.userId}`,
+      headers: { cookie: first.cookie },
+      payload: { shadowBanned: true },
+    });
+    expect(shadowed.statusCode).toBe(200);
+
+    // A shadow-banned member who knows the passphrase must not learn of the shadow-ban from the reply.
+    const claimed = await claim(app, quiet.cookie, "correct horse battery");
+    expect(claimed.statusCode).toBe(200);
+    expect(claimed.json()).toMatchObject({ id: quiet.userId, isAdmin: true });
+    expect(claimed.json()).not.toHaveProperty("shadowBanned");
+    // Nor from the already-admin answer to a repeat.
+    const again = await claim(app, quiet.cookie, "anything");
+    expect(again.statusCode).toBe(200);
+    expect(again.json()).not.toHaveProperty("shadowBanned");
+  });
 });
 
 describe("admin claim under access.joinPolicy approval", () => {
