@@ -7,6 +7,7 @@
  *
  * The copy handed to the share sheet sits in a cache folder of its own, emptied before each new file, at
  * launch, and on an Emergency Reset, so a file never outlives the network on this phone by more than that.
+ * Shares run one at a time (two quick taps would otherwise empty the folder under each other).
  */
 import { AttachmentMimeTypeSchema } from '@loam/schema';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -73,9 +74,23 @@ export async function clearSharedFiles(): Promise<void> {
   await removeSharedDir();
 }
 
-/** Write the file to the share folder (emptied first) and open Android's share sheet for it. */
-export async function shareReceivedFile(request: SaveFileRequest): Promise<void> {
+/** The share in progress, if any: the next one starts after it. */
+let shareQueue: Promise<void> = Promise.resolve();
+
+/**
+ * Write the file to the share folder (emptied first) and open Android's share sheet for it, after any share
+ * still in progress. A clear (launch, Emergency Reset) after the request arrived cancels it, even while it
+ * waits its turn.
+ */
+export function shareReceivedFile(request: SaveFileRequest): Promise<void> {
   const epoch = clearEpoch;
+  const run = shareQueue.then(() => shareOne(request, epoch));
+  shareQueue = run.catch(() => undefined);
+  return run;
+}
+
+/** One share, for a request that arrived at clear `epoch`. */
+async function shareOne(request: SaveFileRequest, epoch: number): Promise<void> {
   const cleared = () => clearEpoch !== epoch;
   const dir = sharedDir();
   if (!dir || !(await Sharing.isAvailableAsync()) || cleared()) {

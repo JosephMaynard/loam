@@ -6,7 +6,12 @@ export type Distribution = 'play' | 'github';
 
 /** The store this build is for. A missing module (iOS, web, tests) counts as `github`: nothing to ask. */
 export function distribution(): Distribution {
-  return LoamUpdatesModule?.distribution() === 'play' ? 'play' : 'github';
+  try {
+    return LoamUpdatesModule?.distribution() === 'play' ? 'play' : 'github';
+  } catch {
+    // A native call that throws must not take the setup screen down with it.
+    return 'github';
+  }
 }
 
 /**

@@ -28,7 +28,12 @@ export async function saveThroughHost(url: string, name: string, mimeType: strin
     return;
   }
   try {
-    const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+    const response = await fetch(url);
+    if (!response.ok) {
+      // An error page under the file's name is worse than nothing.
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
     bridge.postMessage(JSON.stringify({ type: "loam-save-file", name, mimeType, data: toBase64(bytes) }));
   } catch (error) {
     console.warn("LOAM: couldn't read the file to save it", error);

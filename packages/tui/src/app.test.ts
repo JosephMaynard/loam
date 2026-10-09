@@ -171,6 +171,19 @@ describe("the host note", () => {
     expect(saved.at(-1)).toMatchObject({ hostAck: HOST_ACK_VERSION });
   });
 
+  it("shows after unlocking a first start that opened locked", async () => {
+    const passwordHash = hashKioskPassword("abcd");
+    const { tui, screenText } = setup({
+      settings: { hostAck: undefined, kiosk: { passwordHash, startLocked: true } },
+      startLocked: true,
+    });
+    expect(screenText()).not.toContain("You run this network");
+    await tui.input("\r");
+    await tui.input("abcd\r");
+    expect(tui.locked).toBe(false);
+    expect(screenText()).toContain("You run this network");
+  });
+
   it("stays away once acknowledged", () => {
     const { screenText } = setup();
     expect(screenText()).not.toContain("You run this network");

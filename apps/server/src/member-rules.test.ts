@@ -79,6 +79,18 @@ describe("member rules", () => {
     expect((await post(app, cookie, "hello")).statusCode).toBe(201);
   });
 
+  it("refuses a typed name through the admin route from an admin who hasn't agreed", async () => {
+    const app = await makeApp();
+    const { cookie, userId } = await newSession(app); // the first session is the admin
+
+    const refused = await request(app, cookie, "PATCH", `/api/users/${userId}`, { displayName: "Typed name" });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ code: "rules_not_accepted" });
+
+    await agree(app, cookie);
+    expect((await request(app, cookie, "PATCH", `/api/users/${userId}`, { displayName: "Typed name" })).statusCode).toBe(200);
+  });
+
   it("refuses edits and channel renames from someone who posted before the rules existed", async () => {
     // A network upgraded to 0.6.0: their post and channel are from before the rules, then the gate is on.
     const dataDir = mkdtempSync(join(tmpdir(), "loam-rules-upgrade-"));

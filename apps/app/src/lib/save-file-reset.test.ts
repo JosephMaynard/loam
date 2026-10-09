@@ -59,4 +59,45 @@ describe('sharing a file across an Emergency Reset', () => {
     expect(files.size).toBe(0);
     expect(shareAsync).not.toHaveBeenCalled();
   });
+
+  it('shares two quick taps one after the other, each its own file', async () => {
+    let releaseShare: (() => void) | undefined;
+    shareAsync.mockImplementationOnce(() => new Promise<undefined>((resolve) => (releaseShare = () => resolve(undefined))));
+    const first = shareReceivedFile({ name: 'a.txt', mimeType: 'text/plain', data: 'aGVsbG8=' });
+    await flush();
+    releaseWrite?.();
+    await flush();
+    expect(shareAsync).toHaveBeenLastCalledWith('file:///cache/loam-shared/a.txt', expect.anything());
+
+    // The second tap waits for the first share sheet, so it can't empty the folder under it.
+    releaseWrite = undefined;
+    const second = shareReceivedFile({ name: 'b.txt', mimeType: 'text/plain', data: 'aGVsbG8=' });
+    await flush();
+    expect(releaseWrite).toBeUndefined();
+    expect([...files]).toEqual(['file:///cache/loam-shared/a.txt']);
+
+    releaseShare?.();
+    await first;
+    await flush();
+    releaseWrite?.();
+    await second;
+    expect(shareAsync).toHaveBeenCalledTimes(2);
+    expect(shareAsync).toHaveBeenLastCalledWith('file:///cache/loam-shared/b.txt', expect.anything());
+  });
+
+  it('drops a share still waiting its turn when a reset lands', async () => {
+    let releaseShare: (() => void) | undefined;
+    shareAsync.mockImplementationOnce(() => new Promise<undefined>((resolve) => (releaseShare = () => resolve(undefined))));
+    const first = shareReceivedFile({ name: 'a.txt', mimeType: 'text/plain', data: 'aGVsbG8=' });
+    await flush();
+    releaseWrite?.();
+    await flush();
+    const waiting = shareReceivedFile({ name: 'b.txt', mimeType: 'text/plain', data: 'aGVsbG8=' });
+    await clearSharedFiles();
+    releaseShare?.();
+    await first;
+    await waiting;
+    expect(shareAsync).toHaveBeenCalledTimes(1);
+    expect(files.size).toBe(0);
+  });
 });

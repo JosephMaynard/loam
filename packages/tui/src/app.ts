@@ -407,6 +407,10 @@ export function createTui(options: TuiOptions): Tui {
         }
         guard.succeeded();
         locked = false;
+        // A first start that opened locked hasn't shown the host notice yet. Opening it replaces this dialog.
+        if ((settings.hostAck ?? 0) < HOST_ACK_VERSION) {
+          view.open(hostNotice());
+        }
         return undefined;
       },
     });

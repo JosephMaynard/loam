@@ -1,5 +1,5 @@
 import Constants from 'expo-constants';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Linking, Pressable, StyleSheet, View } from 'react-native';
 
 import { checkStoreUpdate, distribution, releaseTag } from '../../modules/loam-updates';
@@ -74,11 +74,23 @@ function GitHubCheck() {
   const current = installedVersionText(releaseTag(), Constants.expoConfig?.version ?? '');
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState<GitHubCheckResult>();
+  // The check can take up to 10 s; someone may tap Continue in that time and this screen goes away.
+  const mounted = useRef(true);
+  useEffect(
+    () => () => {
+      mounted.current = false;
+    },
+    [],
+  );
 
   async function check(): Promise<void> {
     setChecking(true);
     setResult(undefined);
-    setResult(await checkGitHubRelease(current));
+    const next = await checkGitHubRelease(current);
+    if (!mounted.current) {
+      return;
+    }
+    setResult(next);
     setChecking(false);
   }
 

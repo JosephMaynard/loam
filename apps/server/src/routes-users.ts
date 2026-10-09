@@ -224,6 +224,13 @@ export function registerUserRoutes(ctx: AppContext): void {
       return reply.code(403).send(errorBody("Admin user editing is disabled on this LOAM node"));
     }
 
+    // A typed name is published content, written here by the admin: same rule as the self-edit.
+    const adminRulesError = body.data.displayName !== undefined ? ctx.rulesError(currentUser) : undefined;
+
+    if (adminRulesError) {
+      return reply.code(403).send(errorBody(adminRulesError));
+    }
+
     const user = ctx.data.users.find((candidate) => candidate.id === request.params.userId);
 
     if (!user) {

@@ -29,4 +29,13 @@ describe("host file saving", () => {
       data: "aGVsbG8=",
     });
   });
+
+  it("never hands the host an error page in place of the file", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("Not found", { status: 404 })));
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const postMessage = vi.fn();
+    (window as unknown as { ReactNativeWebView: unknown }).ReactNativeWebView = { postMessage };
+    await saveThroughHost("blob:x", "notes.txt", "text/plain");
+    expect(postMessage).not.toHaveBeenCalled();
+  });
 });
