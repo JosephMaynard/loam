@@ -7,6 +7,10 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **ARCHITECTURE.md, CONTRIBUTING.md and a code of conduct.** A human-facing map of the codebase with a
+  classified index of the design docs, a contributor guide (setup, the three gotchas, the deliberate
+  no-linter policy, how AI is used), the Contributor Covenant 2.1, and GitHub issue and pull-request
+  templates.
 - **Welcome screen and network rules.** Someone joining a network sees their random name and picture (with
   "Try another name" until they first agree), the rules in one sentence, and one button: "I'm 18 or over,
   and I agree". The full rules are at `/rules`, served by the network itself, offline, in all 15 languages.
@@ -95,12 +99,54 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   an older reaction stored before this can still be removed.
 
 ### Security
+- **Dependency bumps:** `shell-quote` to 1.12.0 (clears the one critical advisory `pnpm audit` reported; it
+  only ever ran in development tooling) and `@fastify/websocket` to 11.3.4 (socket errors during the
+  upgrade hooks are handled). The three advisories left are build-time tools with no patched release.
+- **The node serves only requests addressed to it**: by IP address, `localhost`, a `.local` name, or the
+  join address it advertises. Anything else is refused with 421, which shuts out DNS-rebinding pages on
+  internet-connected networks. A node reached by some other DNS name (a sync peer URL, a reverse proxy)
+  needs that name advertised with `LOAM_JOIN_HOST` or the terminal screen's join address.
+- **The live-updates WebSocket refuses a page from another origin**, even one presenting a valid session
+  cookie.
+- **A channel owner could set their channel's retention above the network-wide limit.** Only an admin can
+  set a channel's retention now, and a channel setting can only make messages expire sooner than the
+  network setting, never later.
+- **Creating a private channel no longer reveals that another private channel of the same name exists.**
+  Private channel ids always carry a random suffix; public channels keep their clean names.
+- **The data directory is private to the node's user.** It is created 0700, the database files are kept
+  0600, and config and wipe-journal writes keep an existing file's mode or default to 0600, so other
+  accounts on a shared computer can no longer read messages or raw session tokens.
 - **The panic route no longer gives itself away through rate-limit headers.** `/api/panic` answers every
   failure with a 404 so a prober can't tell it exists, but the old rate limiter added
   `x-ratelimit-limit` (and `retry-after` once tripped) to its responses and to no unknown path. The
   server's own limiter sends no `x-ratelimit-*` headers.
 
 ### Fixed
+- **A device wiped from Settings can rejoin by scanning the join QR again.** The "Device wiped" screen
+  used to stay until site data was cleared by hand, because the app read the join key after it had
+  already been stripped from the address. The Android host's own screen recovers the same way.
+- **The admin channel editor encodes the channel id in its request URL**, and the admin Mesh panel no
+  longer shows an internal document reference.
+- **An ephemeral-key node could not start a second time.** A desktop node run with
+  `LOAM_DB_KEY=ephemeral`, or a `loamnet --encrypt` service with no passphrase and no terminal, minted a
+  fresh key every boot but kept the previous boot's database, so the second start failed with "wrong or
+  lost key". The server now removes the dead network's database and uploaded media itself, as the
+  Android host already did, and refuses to start over a persistent database it would otherwise destroy,
+  with a message that names the data directory and the way out.
+- **`loamnet` on Node.js 18 or 20 said "wrong or lost database key".** It now says which Node.js it
+  needs, before anything else runs.
+- **The bare server advertised port 3000 in the join QR** whatever `PORT` was. The join address now
+  follows `PORT` unless `CLIENT_PORT` is set.
+- **On Android 13 and newer, the first launch no longer asks for the hosting notification and the
+  hotspot's location permission at the same time**, which could cancel one of them and leave the hotspot
+  unstarted. A permission request Android never answers now times out after a minute with a message to
+  reopen the share screen, instead of blocking every later hotspot start.
+- **Emergency Reset from the host menu removes the last file handed to the share sheet** before LOAM
+  closes, instead of leaving it in the cache until the next launch.
+- **The privacy page on loamnet.com lists the Camera permission** the app asks for on the link-code step,
+  as the policy inside the app already did.
+- **`config.example.json`** ships with the assistant off and no longer suggests a prompt "for a younger
+  user" on an 18+ product.
 - **Messages crashed the app on older Android WebViews.** Checking whether a message is only emoji (to
   show it large) relied on `Intl.Segmenter`, which arrived in Chrome 87 and Safari 14.1, but LOAM supports
   WebViews back to about Chrome 80. Without it, any message with text threw and the app fell to its error
@@ -135,6 +181,21 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   needs a `node-gyp` build (the error says how). An unencrypted node never loads the driver.
 
 ### Changed
+- **One place for everything a message offers.** The three-dot button beside a message opens the same
+  actions sheet as tapping its time (the full reaction grid, then reply, copy, edit, delete and report)
+  instead of a shorter menu; the separate smiley button is gone.
+- **One licence: AGPL-3.0-only everywhere.** The MIT file in the Android app directory is gone (the
+  About screen already said AGPL), every workspace manifest names the licence, and the notice at the end
+  of LICENSE no longer offers "any later version".
+- **SECURITY.md** speaks with one voice, says that the reviews it lists are run with AI models and
+  re-verified against the source, and no longer calls the unfinished on-device verification "the current
+  release gate".
+- **Asking for a feature.** The README, website, privacy policy, Settings and the host app's About screen
+  invite feature requests as well as problem reports.
+- **Docs refreshed.** docs/04 describes Display mode instead of the two switches it replaced; docs/05 and
+  docs/29 say they are not the shipped design; docs/14 has the real package size, the Node floor and the
+  terminal screen; the `loamnet` README no longer promises an installable offline PWA on a plain-HTTP
+  address.
 - **`loamnet` no longer makes the first person to open a new network its admin.** As on the Android
   host, admin comes from the host's own screen: `o` in the terminal view, the People screen, or (without a
   terminal) a one-time admin link kept in `admin-link.txt` in the data folder while nobody is admin. The `admin.bootstrap` setting no longer

@@ -8,7 +8,7 @@ import { buildApp, type LoamApp } from "./app.js";
 import { hostHeaderName, hostNameAllowed, loggedRequest, originMatchesHost } from "./transport-server.js";
 import type { AppOptions } from "./types.js";
 
-// Host allowlist + WebSocket Origin check.  Any `Host` used to be accepted, so on an
+// Host allowlist + WebSocket Origin check. Any `Host` used to be accepted, so on an
 // internet-connected LAN a DNS-rebinding page could point its own hostname at the node and read public
 // channels as a fresh identity; and a cross-site page could open `/ws` with the browser's cookie. Now a
 // request is served only when its Host is an IP literal, `localhost`/`*.localhost`, an mDNS `*.local` name or

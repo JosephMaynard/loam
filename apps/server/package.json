@@ -11,7 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@fastify/websocket": "^11.3.1",
+    "@fastify/websocket": "^11.3.4",
     "@loam/crypto": "workspace:*",
     "@loam/display-name": "workspace:*",
     "@loam/schema": "workspace:*",
