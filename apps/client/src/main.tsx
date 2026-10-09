@@ -3,6 +3,7 @@ import "./global.css";
 import { App } from "./app.tsx";
 import { captureAdminClaimCode } from "./lib/admin-link.ts";
 import { captureInviteCode } from "./lib/invite.ts";
+import { captureLinkCodeFragment } from "./lib/link-code-fragment.ts";
 import { captureJoinKey } from "./lib/transport.ts";
 import { recoverPendingWipe } from "./lib/local-store.ts";
 import { installTheme } from "./lib/theme.ts";
@@ -14,10 +15,12 @@ import { installViewportSync } from "./lib/viewport.ts";
 void recoverPendingWipe();
 
 // Read the join link before anything rewrites the URL: the host terminal's one-time admin code, an invite
-// code, then the `#k=` key (the router's first redirect drops the fragment). A key from the URL only ever establishes or offers a pin; the Android
+// code, a node-link code (a "link another node" QR opened in a browser: useless here, but its key still
+// joins), then the `#k=` key (the router's first redirect drops the fragment). A key from the URL only ever establishes or offers a pin; the Android
 // host's own key override comes solely from its native injection (`__loamHostTransportKey`), never a URL.
 captureAdminClaimCode();
 captureInviteCode();
+captureLinkCodeFragment();
 captureJoinKey();
 
 // Pin the saved colour theme (System / Light / Dark, set in Settings) before anything renders.

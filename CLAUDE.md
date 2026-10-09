@@ -564,9 +564,15 @@ kill switch. See `docs/09-security-profiles.md`.
 - **Markdown**: `src/lib/markdown.ts` renders with `snarkdown`, escapes first, sanitises with
   `DOMPurify`, hardens links (safe protocols only, `rel=noreferrer target=_blank`) and strips `#k=`
   fragments. Any new rendered-HTML path must go through this — never inject raw message HTML.
-- **PWA**: `public/service-worker.js` (cache `loam-poc-v2`) caches the app shell — **network-first for
-  navigations** (so a deploy isn't masked by a stale `index.html`), cache-first for immutable hashed
-  assets; never touches `/api` or `/ws`. Registered only in PROD (`main.tsx`).
+- **PWA**: `src/service-worker.ts` is bundled by the `loam:service-worker` Vite plugin into
+  `dist/service-worker.js` AFTER the app, with the build's file list and a content hash defined in (cache
+  `loam-shell-<hash>`; every other cache is dropped on activate, so a deploy refreshes the unhashed icons and
+  manifest and evicts old bundles). Every navigation is answered from ONE request for `/` (network-first,
+  cached under `/` only, so a conversation id or search term in the address never reaches the wire or the
+  cache); build files are precached on install and served cache-first; `/api` and `/ws` are never touched.
+  The pure decisions live in `src/lib/service-worker-routing.ts` (tested). Registered only in PROD
+  (`main.tsx`). `SearchView` keeps the search term out of the address (a `/search?q=` deep link is read once,
+  then replaced).
 - **Avatar upload editor**: `components/AvatarImageEditor.tsx` — canvas crop/zoom/rotate with pointer
   gestures, re-encodes to webp/png under 128KB before upload.
 
