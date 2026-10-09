@@ -110,7 +110,11 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    app on Android and by every LAN client behind a same-host reverse proxy or the Vite dev proxy — so a
    desktop/Pi node, which has no host token, has no bridge and 404s; docs/17) that let the in-process launcher shuttle sealed
    blobs between the radio and the existing relay — a radio-fed mirror of the `/api/sync/*` sealed path,
-   reusing `acceptSealedFromPeer` verbatim so no new crypto/relay trust is introduced. The bridge
+   reusing `acceptSealedFromPeer` verbatim so no new crypto/relay trust is introduced. `outbound` answers
+   with at most 200 blobs and rotates through a longer queue across calls (the blobs handed out longest
+   ago first, never-handed-out ones before all others, soonest expiry breaking ties; the record is RAM-only
+   and the Emergency Reset clears it), so the courier, which replaces its list on every 30 s poll, gets
+   the whole queue onto the radio in turn instead of the same oldest 200 forever. The bridge
    endpoints are covered by desktop tests (A→B, A→C→B carrier-can't-read, idempotent re-delivery,
    404-when-off). The **Kotlin is native-unverified** (no radios in CI/emulator — the same principled
    call as the on-device-LLM inference stub); a real-device build is expected to need adjustments to the
@@ -132,8 +136,8 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    with no hops left, and lets a better-provisioned copy of CARRIED mail raise the held hop budget — so a
    carrier can't park a dead copy that shadows the genuine one. Mail a local user sealed here is never
    raised (carried rows are marked in `synced_messages`, which is how the two are told apart): it already
-   holds the budget the operator configured, and a peer must not be able to make this node spread its own
-   users' mail further than they asked. This supersedes the
+   holds the budget it was sealed with (drawn within what the operator configured, §9), and a peer must
+   not be able to make this node spread its own users' mail further than they asked. This supersedes the
    "dedup by id" wording in §2 below. **Not covered:** an Emergency Reset clears tombstones, so replay
    records don't survive a wipe (tied to the open mesh-key-wipe policy, docs/29 §4).
 7. **Attachments** on sealed messages are rejected (text-only v1, as §2 specifies).
@@ -231,14 +235,73 @@ the remaining hardening); group/broadcast sealed fan-out; and the hardware trans
    missing-attachment retry runs on its own 30 s timer and can be delayed by a delivery that runs at the
    same moment, and the inbound call itself takes longer when it delivers. The courier's refresh doesn't
    wait for that call, and the difference is milliseconds against a 2 s delay and radio latency.
-   **What the first hop learns about origin:** mail a local user seals here is stored and advertised at the
-   configured `mesh.hopLimit`, while a carried copy is advertised one lower, so a peer that pulls this
-   node's digest and sees a blob at the configured maximum (most nodes keep the default, so the value is
-   widely known) can tell that the blob most likely originated here rather than passing through, and
-   `ttlExpiresAt` minus the configured `mesh.ttlMs` dates the send to the second. Neither says who sent it
-   or to whom, but together they place the sender on this node for its first-hop carrier. Randomising the
-   initial hop budget and jittering the TTL would blunt this at some cost in reach; the wire behaviour is
-   unchanged for now and the residual is recorded here.
+   **What the first hop learns about origin.** Mail a local user sealed here used to be stored and
+   advertised at exactly the configured `mesh.hopLimit` (a carried copy is one lower), with `createdAt` set
+   to the send time to the millisecond and `ttlExpiresAt` = send time + `mesh.ttlMs`. A peer pulling this
+   node's digest could tell mail sealed here from mail passing through and date the send. Origination now
+   blurs both fields (`originHopBudget` and `originBackdateMs` in `mesh.ts`, drawn with Node's CSPRNG):
+   - The starting hop budget is drawn uniformly from [`hopLimit` − 2, `hopLimit`], and never below 2 unless
+     the operator configured less: two hops are what one carrier between sender and recipient needs, and a
+     configured 1 or 2 is kept as it is.
+   - The stated send time behind `createdAt` and `ttlExpiresAt` moves back by a uniform 0 … min(`ttlMs`/5,
+     12 h, retention TTL/5) ms. The retention bound is there because retention ages sealed rows by
+     `createdAt`, so a larger step could let the reaper take fresh mail before anyone carried it.
+     `ttlExpiresAt − createdAt` is still exactly `ttlMs`, so mail lives up to a fifth less. The routing tag
+     is still derived for the real send day.
+
+   Relays are unchanged: they take one hop off and copy the other fields. Both fields are fixed once at
+   origination, so the AAD, the replay key (`sealed.<sha256(sealed | toTag | ttlExpiresAt)>`) and
+   carried-mail dedupe see one value per message, exactly as before, and older builds carry and open this
+   mail unchanged (no wire change). What this hides, and what it doesn't:
+   - *A single blob no longer dates its send.* The fields place it only within a window of up to 12 h (with
+     the default 72 h TTL), so mail first seen freshly sealed looks like mail carried in from a neighbour
+     within that window, and no carrier further down the path can date the send to the second either.
+   - *The hop budget mostly stops marking origin.* With the default 6, a blob at 4 or 5 could have started
+     on the node advertising it or one hop away. A blob at the configured maximum still did start there
+     (when every node keeps the same maximum, no relay produces that value), and that is a third of the
+     mail sealed here. A wider spread would shrink that share at a cost in reach; drawing alone can't hide
+     the top of the range.
+   - *Where a blob first appears is still the strongest signal.* A first-hop carrier that polls a node sees
+     a sealed id appear in that node's digest (or, over the radio, in what its courier pushes) before
+     anywhere else. If the carrier hasn't seen the id elsewhere and the node had no other peer or radio
+     contact around then, the node sealed it, and the polling interval dates it, whatever the fields say.
+     In a sparse mesh that is most of the time.
+   - *A relay-off node (the default) gains nothing.* Its digest holds only mail its own users sealed, so
+     everything it advertises started there.
+   - *Configuration still fingerprints.* `ttlExpiresAt − createdAt` is the origin node's `mesh.ttlMs`,
+     visible to every carrier, so a non-default value points to the nodes configured with it (as before).
+   - None of this says who on the node sent the mail or to whom; that stays sealed.
+
+   Hiding the rest would need relaying on by default, so that a node's digest mixes its own mail with
+   carried mail, plus a random hold before mail sealed here is first advertised, or cover traffic. None of
+   these is built.
+10. **Inner signature encoding.** The sender signs `"loam.mesh.inner.v1" ‖ from ‖ fromKx ‖ pt ‖ aad`, a
+   bare UTF-8 concatenation with no length prefixes, rather than the structured encoding §2 sketches, and
+   every build since 0.3.0 signs and verifies exactly these bytes. It is unambiguous over everything a
+   recipient accepts, so the wire stays as it is:
+   - The label is fixed. It isn't a prefix of `loam.mesh.kxbind.v1`, the label of the only other message a
+     mesh signing key signs, nor is that one a prefix of it.
+   - `from` must equal the id derived from the enclosed signing key, which is always 31 characters.
+   - `fromKx` must be the canonical base64url of a 32-byte key, always 43 characters. `openMailbox` checks
+     this now (and `sealMailbox` refuses to emit anything else). Before, a longer string let a signature be
+     re-read with characters moved from the start of the plaintext into `fromKx`. The check is
+     receive-side only and every sender has always written a 43-character key, so mail from released
+     builds still opens.
+   - That leaves `pt ‖ aad`, and the recipient never takes `aad` from the blob: it rebuilds
+     `<toTag>|<ttlExpiresAt>` from the outer fields and tries to open only when `toTag` is one of its own
+     22-character tags. Neither base64url nor a decimal timestamp contains `|`, so of two such strings
+     where one ends the other, both have their single `|` in the same place, hence the same timestamp and
+     the same 22 characters before it: they are equal. The signed bytes therefore fix every field.
+
+   The exposure before the check was small. Only the recipient (and the sender) ever sees the signature,
+   inside the AEAD, so the most a re-split allowed was for a recipient to show itself, or a third party, a
+   plaintext with its first characters cut that still verified as the sender's. The `aad` carries the
+   recipient's own tag, so it couldn't be passed on to another recipient as mail. A length-prefixed v2 was
+   considered and not adopted: every released build (0.3.0 onward) verifies only the v1 bytes, so mail signed
+   only under v2 would silently fail to open there, and signing both would keep v1, and its acceptance, for
+   as long as those nodes exist, which buys nothing over the check. A future change to the inner payload
+   must go under a new label with length-prefixed fields, signed beside v1 for a stated compatibility
+   window (released builds ignore inner JSON keys they don't know), never appended to the v1 bytes.
 
 ---
 

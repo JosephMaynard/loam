@@ -44,7 +44,8 @@ crypto/relay rule stays server-side in the existing sealed relay (docs/16 §2–
 1. Both hosts **advertise** a tiny BLE beacon under a fixed LOAM service UUID (a version byte, a
    have-mail flag, an optional short group hint) and **scan** for the same.
 2. On a sighting the RN courier posts `loam-mesh-peer` to `main.js`. The launcher (the "courier brain")
-   `GET`s its own `/api/mesh/outbound` (loopback) — the live sealed blobs it holds — and posts each back
+   `GET`s its own `/api/mesh/outbound` (loopback) — the live sealed blobs it holds, at most 200 per answer,
+   rotated across polls so a longer queue goes out in turn — and posts each back
    as `loam-mesh-send`. The native layer moves the bytes over a **Wi-Fi Aware data path** (a TCP socket
    on the NAN link; BLE throughput is too low for the tens-of-KB blobs).
 3. The receiver's native layer emits `onTransferReceived`; the RN courier posts `loam-mesh-received`;

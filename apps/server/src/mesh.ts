@@ -1,6 +1,6 @@
 // The opportunistic-mesh sealed-mail layer (docs/16): per-user mesh identities and contacts, sealing,
 // deliver-or-relay, and the expiry reaper, behind the shared `Runtime` view.
-import { createHash } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 
 import { type MeshIdentity, createMeshIdentity, currentEpoch, isCanonicalSealedBlob, mailboxTag, meshIdFromSignPublic, openMailbox, sealMailbox, verifyKxBinding } from "@loam/crypto";
 import { MESH_TTL_MAX_MS, type MeshIdentityCard, MeshIdentityCardSchema, MessageSchema, type SealedMessage, UserSchema } from "@loam/schema";
@@ -552,11 +552,48 @@ export function createMeshLayer(rt: Runtime) {
     );
   }
 
-  /** Drop every in-memory secret-derived cache: identities, contacts and the tag memo (Emergency Reset lockdown). */
+  /** Drop every in-memory secret-derived cache: identities, contacts and the tag memo (Emergency Reset
+   *  lockdown), plus the courier's rotation record of which held blobs it was handed when. */
   function forget(): void {
     meshIdentities.clear();
     meshContacts.clear();
     localTagCache.clear();
+    outboundHandedOut.clear();
+  }
+
+  // Which round of `GET /api/mesh/outbound` last handed each held sealed blob to the radio courier (RAM only;
+  // ids no longer held are pruned on every call). See nextOutboundBatch.
+  const outboundHandedOut = new Map<string, number>();
+  let outboundRound = 0;
+
+  /**
+   * The next batch of held sealed mail for the radio courier (`GET /api/mesh/outbound`): at most `limit` of
+   * `held`, the blobs handed out longest ago first (never-handed-out ones before all others), soonest expiry
+   * breaking ties, then id. The courier replaces its whole list with each answer and polls on a timer, so
+   * successive calls walk the full queue in turn rather than handing out the same oldest `limit` blobs
+   * forever. The order depends only on what this node holds and on earlier calls, never on whether any mail
+   * was delivered here.
+   */
+  function nextOutboundBatch(held: readonly SealedMessage[], limit: number): SealedMessage[] {
+    const live = new Set(held.map((message) => message.id));
+    for (const id of outboundHandedOut.keys()) {
+      if (!live.has(id)) {
+        outboundHandedOut.delete(id);
+      }
+    }
+    const batch = [...held]
+      .sort(
+        (a, b) =>
+          (outboundHandedOut.get(a.id) ?? 0) - (outboundHandedOut.get(b.id) ?? 0) ||
+          a.ttlExpiresAt - b.ttlExpiresAt ||
+          (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+      )
+      .slice(0, limit);
+    outboundRound += 1;
+    for (const message of batch) {
+      outboundHandedOut.set(message.id, outboundRound);
+    }
+    return batch;
   }
 
   /** Whether this node would CARRY an admissible offer that isn't for a local user: relaying is on and a hop
@@ -631,8 +668,9 @@ export function createMeshLayer(rt: Runtime) {
       // budget to park a copy here that goes nowhere. Let a better-provisioned copy of the SAME mail
       // raise the held budget instead of being shadowed by it (monotonic: never lowered). Only for mail
       // this node CARRIES (provenance: the carry path below marks its row synced): mail a local user sealed
-      // here already holds the budget the operator configured, and a peer re-offering it with a larger one
-      // must not be able to make this node spread its own users' mail further than they asked.
+      // here already holds the budget it was sealed with (drawn within the configured maximum), and a peer
+      // re-offering it with a larger one must not be able to make this node spread its own users' mail
+      // further than they asked.
       if (
         held.type === "sealed" &&
         sealedReplayKey(held) === replayKey &&
@@ -756,6 +794,45 @@ export function createMeshLayer(rt: Runtime) {
     };
   }
 
+  // How origination blurs the two outer fields that used to mark mail as sealed HERE (docs/16 §9, "What the
+  // first hop learns about origin"). Relays are unchanged: they still take one hop off and copy the rest.
+  /** Up to how many hops below the configured `mesh.hopLimit` a fresh message may start. */
+  const ORIGIN_HOP_SPREAD = 2;
+  /** The lowest starting hop budget the spread may pick (when the operator allows that many): two hops are
+   *  what one carrier between sender and recipient needs. */
+  const ORIGIN_HOP_FLOOR = 2;
+  /** The send time behind `ttlExpiresAt` / `createdAt` moves back by up to this share of the lifetime… */
+  const ORIGIN_BACKDATE_FRACTION = 5;
+  /** …and never by more than this. */
+  const ORIGIN_BACKDATE_MAX_MS = 12 * 3_600_000;
+
+  /**
+   * The hop budget a message sealed here starts with: uniform (CSPRNG) over [max − ORIGIN_HOP_SPREAD, max],
+   * never below ORIGIN_HOP_FLOOR unless `max` itself is lower. A copy one relay on is one lower, so with the
+   * default 6 a blob at 4 or 5 could have started here or one hop away; only 6 still marks origin.
+   */
+  function originHopBudget(max: number): number {
+    const floor = Math.min(max, Math.max(ORIGIN_HOP_FLOOR, max - ORIGIN_HOP_SPREAD));
+    return randomInt(floor, max + 1);
+  }
+
+  /**
+   * How far back (ms, uniform via CSPRNG) a fresh message's stated send time goes: up to a fifth of its
+   * lifetime, at most 12 hours, and at most a fifth of the node's retention TTL when one is set, since
+   * retention ages sealed rows by `createdAt` and a larger step would let the reaper take mail before anyone
+   * carried it. `ttlExpiresAt` = stated send time + `ttlMs`, so the message lives up to that much less, and
+   * since `ttlMs` ≥ 60 s it always leaves at least four fifths of it.
+   */
+  function originBackdateMs(ttlMs: number): number {
+    const retentionMs = rt.appConfig.retention.messageTtlMs || undefined;
+    const bound = Math.min(
+      Math.floor(ttlMs / ORIGIN_BACKDATE_FRACTION),
+      ORIGIN_BACKDATE_MAX_MS,
+      retentionMs === undefined ? Number.POSITIVE_INFINITY : Math.floor(retentionMs / ORIGIN_BACKDATE_FRACTION),
+    );
+    return bound > 0 ? randomInt(0, bound + 1) : 0;
+  }
+
   /** Seal a message to a contact (a card the sender previously added) and inject it into the mesh:
    * delivered immediately if the recipient is local, else stored for sync to carry. Returns an error
    * string on failure. */
@@ -772,7 +849,11 @@ export function createMeshLayer(rt: Runtime) {
       return keyError;
     }
     const now = Date.now();
-    const ttlExpiresAt = now + rt.appConfig.mesh.ttlMs;
+    // The outer fields describe a send time up to originBackdateMs earlier than the real one, and the hop
+    // budget is drawn at or below the configured maximum, so neither field on its own dates the send or (short
+    // of the top value) shows the blob was made here. What they can't hide is in docs/16 §9.
+    const sentAt = now - originBackdateMs(rt.appConfig.mesh.ttlMs);
+    const ttlExpiresAt = sentAt + rt.appConfig.mesh.ttlMs;
     const toTag = mailboxTag(contact.mailboxToken, currentEpoch(now, MESH_EPOCH_WINDOW_MS));
     const aad = sealedAad(toTag, ttlExpiresAt);
     let blob: string;
@@ -793,8 +874,8 @@ export function createMeshLayer(rt: Runtime) {
       toTag,
       sealed: blob,
       ttlExpiresAt,
-      hopLimit: rt.appConfig.mesh.hopLimit,
-      createdAt: now,
+      hopLimit: originHopBudget(rt.appConfig.mesh.hopLimit),
+      createdAt: sentAt,
     }) as SealedMessage;
 
     // If the recipient is local, deliver now; otherwise store it so the sync layer carries it.
@@ -822,6 +903,7 @@ export function createMeshLayer(rt: Runtime) {
     sealedSeenAtCapacity,
     forget,
     sealedHeldCount,
+    nextOutboundBatch,
     acceptSealedFromPeer,
     isReservedReplayId,
     isSealedOfferId,

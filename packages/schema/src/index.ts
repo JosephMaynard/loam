@@ -1311,8 +1311,9 @@ export type MeshBroadcastRequest = z.infer<typeof MeshBroadcastRequestSchema>;
 
 /**
  * `GET /api/mesh/outbound` — the sealed blobs this node currently holds and is willing to hand to a
- * nearby device over the opportunistic transport (Phase 3, docs/16 / docs/17). It is the exact set
- * `buildSyncDigest().sealed` advertises, but returned as full `SealedMessage` records so the courier
+ * nearby device over the opportunistic transport (Phase 3, docs/16 / docs/17). It is drawn from the set
+ * `buildSyncDigest().sealed` advertises, at most 200 per answer and rotated across calls (the blobs
+ * handed out longest ago first), returned as full `SealedMessage` records so the courier
  * can ship the bytes straight to a peer's radio without a second fetch. Loopback-only + gated on
  * `mesh.enabled` — it exists purely so the in-process Android launcher (`nodejs-project-template/main.js`)
  * can bridge the native BLE/Wi-Fi-Aware transport to the already-built sealed relay. Never exposed to

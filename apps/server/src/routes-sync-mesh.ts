@@ -13,6 +13,9 @@ import { attachmentFileName, parseAttachmentFileName } from "./media.js";
 import { localInterfaceAddresses, remoteClientAddresses } from "./net.js";
 import type { FastifyReply, FastifyRequest } from "fastify";
 
+/** Most sealed blobs one `GET /api/mesh/outbound` answer hands the radio courier. */
+const MESH_OUTBOUND_BATCH = 200;
+
 /** Register the node-to-node sync endpoints and the opportunistic-mesh endpoints (cards, contacts, send, bridge, admin sync). */
 export function registerSyncMeshRoutes(ctx: AppContext): void {
   // GET for a plaintext (`off`-mode) peer; POST for a sealed peer, which carries the `{ s, b, tok }`
@@ -400,11 +403,13 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
         return reply.code(404).send(errorBody("Not found"));
       }
 
-      // Exactly what the sync digest would advertise as `sealed`, but as full records ready to hand to
-      // the radio. Bounded so one transfer window can't try to push the whole store at once.
-      const messages = ctx.data.messages
-        .filter((message): message is SealedMessage => message.type === "sealed" && ctx.sync.isSyncableMessage(message))
-        .slice(0, 200);
+      // What the sync digest would advertise as `sealed`, but as full records ready to hand to the radio.
+      // Bounded so one transfer window can't try to push the whole store at once, and rotated so that a
+      // queue longer than the bound reaches the radio in turn across the courier's polls (nextOutboundBatch).
+      const held = ctx.data.messages.filter(
+        (message): message is SealedMessage => message.type === "sealed" && ctx.sync.isSyncableMessage(message),
+      );
+      const messages = ctx.mesh.nextOutboundBatch(held, MESH_OUTBOUND_BATCH);
       return { messages };
     },
   );
