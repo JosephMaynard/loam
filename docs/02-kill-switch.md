@@ -43,6 +43,14 @@
 > cleared could roll the deletion back with nothing left to finish it. A checkpoint that comes back busy or
 > partial counts as a failed wipe, so the node stays locked with its journal on disk.
 >
+> **Durable writes on Windows.** The wipe journal and `config.json` are written to a staging file, flushed,
+> renamed into place, and then the directory is flushed. Windows needs two changes to that recipe: the
+> staging file is flushed through a handle opened for writing (FlushFileBuffers refuses a read-only one),
+> and the directory flush is skipped, because Node has no way to flush a directory there and NTFS journals
+> the rename itself. Before this, every durable write on a Windows `loamnet` host reported failure, so an
+> Emergency Reset would have locked the node. The fix is covered by tests that emulate the Windows rules, but
+> it has not yet been run on a real Windows machine (docs/25, O3).
+>
 > **Which branch a keyed node takes.** `persistent`/`passphrase` nodes take the journaled fixed-key wipe
 > (delete, prove gone, journal, hand off or recreate); `ephemeral` nodes rotate their RAM key. A real key
 > with no declared `LOAM_DB_ENCRYPTION_MODE` (the `loamnet --encrypt` CLI, a bare `LOAM_DB_KEY=<secret>`)

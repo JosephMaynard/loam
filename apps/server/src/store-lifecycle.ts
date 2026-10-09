@@ -545,7 +545,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     } catch (error) {
       fail(error instanceof Error ? error.message : String(error));
     }
-    if (hadMarker && process.platform !== "win32" && !fsyncDir(dataDir)) {
+    if (hadMarker && !fsyncDir(dataDir)) {
       fail("the data directory could not be flushed to disk after removing it");
     }
   }
@@ -581,7 +581,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     } catch (error) {
       fail(error instanceof Error ? error.message : String(error));
     }
-    if (process.platform !== "win32" && !fsyncDir(dataDir)) {
+    if (!fsyncDir(dataDir)) {
       fail("the data directory could not be flushed to disk");
     }
   }
@@ -632,8 +632,16 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
    * need genuine durability must fail closed on false, NOT log-and-continue. Some filesystems legitimately
    * reject directory fsync with EINVAL; a caller may choose to tolerate that, but the wipe/config paths
    * here do not (correctness over availability on those platforms).
+   *
+   * On Windows this reports success without flushing: Node exposes no directory flush there (a directory
+   * handle can't be flushed with FlushFileBuffers, so the call would always fail), and NTFS journals the
+   * metadata of a create, rename or delete itself. Failing here would make every durable write "not
+   * durable" and lock a Windows host on its first Emergency Reset or config save.
    */
   function fsyncDir(dir: string): boolean {
+    if (process.platform === "win32") {
+      return true;
+    }
     try {
       const dirFd = openSync(dir, "r");
       try {
@@ -658,8 +666,8 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
    * and for config.json means silently disarming an armed kill switch. There is deliberately NO non-durable
    * fallback: a failure returns `false` so the caller fails closed rather than proceeding on an unflushed
    * write it believes is durable. The staged bytes are written by PATH (a single interceptable call); the
-   * file fsync then reopens the temp read-only purely to flush it (fsync flushes the inode, reachable via
-   * any fd, regardless of that fd's mode). The staging file is created with the target's current mode when
+   * file fsync then reopens the temp for writing purely to flush it (POSIX flushes the inode through any fd,
+   * but Windows' FlushFileBuffers refuses a read-only handle with EPERM). The staging file is created with the target's current mode when
    * the target exists (so a rewrite never widens an operator's 0600 `config.json` to the umask default) and
    * 0600 otherwise (`.loam-wipe-phase` carries the config snapshot, which only this user should read).
    */
@@ -669,7 +677,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       const mode = existingFileMode(filePath) ?? 0o600;
       writeFileSync(tmpPath, contents, { encoding: "utf8", mode });
       chmodSync(tmpPath, mode); // exact, whatever the process umask took off at creation
-      const fd = openSync(tmpPath, "r");
+      const fd = openSync(tmpPath, "r+");
       try {
         fsyncSync(fd);
       } finally {
