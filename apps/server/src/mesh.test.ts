@@ -281,12 +281,14 @@ describe("opportunistic mesh: sealed mailbox", () => {
     expect(JSON.stringify(sealed)).not.toContain("dawn");
 
     // Metadata privacy: the routing tag is derived from Bob's SECRET mailbox token, not his public kx —
-    // so a carrier holding only public key material (as v1 leaked) cannot recompute it. The sealer
-    // stamped `ttlExpiresAt = sendTime + ttlMs`, so we recover the exact send-time epoch.
+    // so a carrier holding only public key material (as v1 leaked) cannot recompute it. The tag is for the
+    // epoch of the real send time, a moment ago (the outer fields state a blurred one, docs/16 §9), so try
+    // today and, in case the test straddled midnight, yesterday.
     const sealedMsg = sealed as { ttlExpiresAt: number; toTag: string };
-    const epoch = currentEpoch(sealedMsg.ttlExpiresAt - MESH.ttlMs, 24 * 3_600_000);
-    expect(sealedMsg.toTag).toBe(mailboxTag(bobCard.mailboxToken, epoch));
-    expect(sealedMsg.toTag).not.toBe(mailboxTag(bobCard.kx, epoch));
+    const today = currentEpoch(Date.now(), 24 * 3_600_000);
+    const epoch = [today, today - 1].find((candidate) => mailboxTag(bobCard.mailboxToken, candidate) === sealedMsg.toTag);
+    expect(epoch).toBeDefined();
+    expect(sealedMsg.toTag).not.toBe(mailboxTag(bobCard.kx, epoch!));
   });
 
   describe("group/broadcast fan-out (POST /api/mesh/broadcast)", () => {

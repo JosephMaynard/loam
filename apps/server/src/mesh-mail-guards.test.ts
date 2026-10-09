@@ -13,10 +13,11 @@ import { buildApp, type LoamApp } from "./app.js";
 import type { AppOptions } from "./types.js";
 
 /**
- * Two guards on the sealed-mail layer (docs/16): a re-offered copy may raise the hop budget of mail this node
- * CARRIES, never of mail a local user sealed here; and a contact card's keys must have the lengths the
+ * Guards on the sealed-mail layer (docs/16): a re-offered copy may raise the hop budget of mail this node
+ * CARRIES, never of mail a local user sealed here; a contact card's keys must have the lengths the
  * crypto expects, checked when the card is added, when stored cards are loaded, and before sealing, so a
- * malformed card can neither be added nor turn a later send into a 500.
+ * malformed card can neither be added nor turn a later send into a 500; and mail sealed here starts with a
+ * drawn hop budget and a backdated stated send time, within bounds (docs/16 §9).
  */
 
 const cleanups: (() => Promise<void> | void)[] = [];
@@ -157,12 +158,15 @@ describe("a re-offered copy with a larger hop budget", () => {
     const { app } = await makeApp({ sync: { enabled: true, peers: [{ url: peer.url }], intervalMs: 3_600_000 }, mesh: MESH });
     const { cookie } = await newSession(app);
 
-    // A local user seals mail to a remote contact: stored here at the configured hop budget, waiting to be carried.
+    // A local user seals mail to a remote contact: stored here at a hop budget drawn just below the configured
+    // maximum (docs/16 §9), waiting to be carried.
     const remote = createMeshIdentity();
     expect((await addContact(app, cookie, cardOf(remote))).statusCode).toBe(200);
     expect((await sendSealed(app, cookie, remote.meshId)).statusCode).toBe(200);
     const own = app.store.loadMessages().find((message): message is SealedMessage => message.type === "sealed");
-    expect(own?.hopLimit).toBe(MESH.hopLimit);
+    const ownHop = own?.hopLimit ?? -1;
+    expect(ownHop).toBeGreaterThanOrEqual(MESH.hopLimit - 2);
+    expect(ownHop).toBeLessThanOrEqual(MESH.hopLimit);
 
     // A stranger's mail arrives from the peer at hop 3 and is carried at 2.
     const foreign = strangerMail("seal_foreign", Date.now() + 60_000, 3);
@@ -177,7 +181,7 @@ describe("a re-offered copy with a larger hop budget", () => {
     ];
     await syncRound(app, cookie);
     expect(heldHop(app, "seal_foreign")).toBe(7);
-    expect(heldHop(app, own?.id ?? "")).toBe(MESH.hopLimit);
+    expect(heldHop(app, own?.id ?? "")).toBe(ownHop);
     const ids = new Set(app.store.loadMessages().map((message) => message.id));
     expect(ids.has("seal_foreign_again")).toBe(false);
     expect(ids.has("seal_own_again")).toBe(false);
@@ -217,5 +221,70 @@ describe("a contact card with a wrong-length key", () => {
     expect(contacts.map((contact) => contact.meshId)).toEqual([good.meshId]);
     expect((await sendSealed(reopened, cookie, bad.meshId)).statusCode).toBe(404);
     expect((await sendSealed(reopened, cookie, good.meshId)).statusCode).toBe(200);
+  });
+});
+
+/**
+ * Seal one message from a local user to each of `count` fresh remote contacts (none of them on this node, so
+ * every copy is stored to wait for a carrier), in broadcasts of 40, and return the stored sealed rows.
+ */
+async function sealToStrangers(app: LoamApp, cookie: string, count: number): Promise<SealedMessage[]> {
+  const meshIds: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const remote = createMeshIdentity();
+    expect((await addContact(app, cookie, cardOf(remote))).statusCode).toBe(200);
+    meshIds.push(remote.meshId);
+  }
+  for (let start = 0; start < meshIds.length; start += 40) {
+    const res = await app.server.inject({
+      method: "POST",
+      url: "/api/mesh/broadcast",
+      headers: { cookie },
+      payload: { toMeshIds: meshIds.slice(start, start + 40), body: "spread me" },
+    });
+    expect(res.statusCode).toBe(200);
+  }
+  const sealed = app.store.loadMessages().filter((message): message is SealedMessage => message.type === "sealed");
+  expect(sealed).toHaveLength(count);
+  return sealed;
+}
+
+describe("origination blurs the fields that marked mail as sealed here (docs/16 §9)", () => {
+  it("starts the hop budget anywhere in the top three values and states a send time up to a fifth of the TTL early", async () => {
+    const { app } = await makeApp({ mesh: MESH });
+    const { cookie } = await newSession(app);
+    const before = Date.now();
+    const sealed = await sealToStrangers(app, cookie, 50);
+    const after = Date.now();
+
+    const hops = new Set(sealed.map((message) => message.hopLimit));
+    // Never above the configured maximum, never more than two below it, and (50 independent draws) all three seen.
+    expect([...hops].sort((a, b) => a - b)).toEqual([MESH.hopLimit - 2, MESH.hopLimit - 1, MESH.hopLimit]);
+
+    const maxBackdate = MESH.ttlMs / 5;
+    for (const message of sealed) {
+      // One stated send time behind both fields: the lifetime is still exactly the configured TTL from it.
+      expect(message.ttlExpiresAt - message.createdAt).toBe(MESH.ttlMs);
+      expect(message.createdAt).toBeLessThanOrEqual(after);
+      expect(message.createdAt).toBeGreaterThanOrEqual(before - maxBackdate);
+    }
+    // The stated send times spread over the window rather than sitting at the real one.
+    const stated = sealed.map((message) => message.createdAt);
+    expect(Math.max(...stated) - Math.min(...stated)).toBeGreaterThan(60_000);
+  });
+
+  it("keeps a hop budget of 2 as it is, and backdates by at most a fifth of the node's retention TTL", async () => {
+    const retentionMs = 10 * 60_000;
+    const { app } = await makeApp({ mesh: { ...MESH, hopLimit: 2 }, retention: { messageTtlMs: retentionMs } });
+    const { cookie } = await newSession(app);
+    const before = Date.now();
+    const sealed = await sealToStrangers(app, cookie, 20);
+
+    // Two hops are what one carrier between sender and recipient needs: the spread never goes below that.
+    expect(new Set(sealed.map((message) => message.hopLimit))).toEqual(new Set([2]));
+    for (const message of sealed) {
+      // Retention ages sealed rows by `createdAt`, so a larger step could let the reaper take fresh mail.
+      expect(message.createdAt).toBeGreaterThanOrEqual(before - retentionMs / 5);
+    }
   });
 });

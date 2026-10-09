@@ -142,6 +142,22 @@ async function inbound(app: LoamApp, messages: unknown[]): Promise<number> {
   return changed;
 }
 
+/** Sealed mail for a stranger on no test node, offered at hop budget 3, expiring `lifetimeMs` from now. */
+function strangerBlob(id: string, lifetimeMs = 3_600_000): Record<string, unknown> {
+  const stranger = createMeshIdentity();
+  const sender = createMeshIdentity();
+  const now = Date.now();
+  const ttlExpiresAt = now + lifetimeMs;
+  const toTag = mailboxTag(stranger.mailboxToken, currentEpoch(now, 24 * 3_600_000));
+  const sealed = sealMailbox({
+    recipientKxPublic: stranger.kxPublic,
+    sender: { signPublic: sender.signPublic, signSecret: sender.signSecret, kxPublic: sender.kxPublic },
+    plaintext: id,
+    aad: `${toTag}|${ttlExpiresAt}`,
+  });
+  return { id, type: "sealed", authorId: "mesh.sealed", createdAt: now, toTag, sealed, ttlExpiresAt, hopLimit: 3 };
+}
+
 describe("opportunistic mesh: transport bridge", () => {
   describe("transport bridge (GET /api/mesh/outbound + POST /api/mesh/inbound)", () => {
     it("404s both endpoints when mesh is disabled", async () => {
@@ -363,6 +379,37 @@ describe("opportunistic mesh: transport bridge", () => {
       expect(await dmBodies(nodeB, bob.cookie, contact!.id)).toContain("meet at the docks");
     });
 
+    it("hands a queue longer than one answer to the courier in turn, never more than 200 at once", async () => {
+      // A relay carrying 250 blobs. The courier replaces its list with every answer, so an endpoint that always
+      // answered with the same first 200 would never let the radio carry the other 50.
+      const relay = await makeApp({ mesh: MESH });
+      const blobs = Array.from({ length: 250 }, (_, index) =>
+        strangerBlob(`seal_queue_${String(index).padStart(3, "0")}`, 3_600_000 + index * 1_000),
+      );
+      for (let start = 0; start < blobs.length; start += 64) {
+        expect(await inbound(relay, blobs.slice(start, start + 64))).toBe(Math.min(64, blobs.length - start));
+      }
+      const outbound = async (): Promise<string[]> => {
+        const response = await relay.server.inject({ method: "GET", url: "/api/mesh/outbound" });
+        expect(response.statusCode).toBe(200);
+        const ids = (response.json() as { messages: { id: string }[] }).messages.map((message) => message.id);
+        expect(ids.length).toBeLessThanOrEqual(200);
+        expect(new Set(ids).size).toBe(ids.length);
+        return ids;
+      };
+      const ids = blobs.map((blob) => blob.id as string);
+
+      // Nothing handed out yet: the 200 that expire soonest.
+      const first = await outbound();
+      expect(first).toEqual(ids.slice(0, 200));
+      // Next, the 50 never handed out, then the soonest-expiring of the rest.
+      const second = await outbound();
+      expect(second).toEqual([...ids.slice(200), ...ids.slice(0, 150)]);
+      expect(new Set([...first, ...second]).size).toBe(250);
+      // Then the ones handed out longest ago.
+      expect((await outbound()).slice(0, 50)).toEqual(ids.slice(150, 200));
+    }, 30_000); // sealing and taking in 250 blobs is slow under a fully parallel test run
+
     it("stays reachable over loopback when transport encryption is REQUIRED (courier must not wedge)", async () => {
       // The in-process courier polls these endpoints over plain 127.0.0.1 with no transport session. In
       // `required` mode the general content gate would 401 an unsealed direct hit; the mesh bridge is
@@ -415,21 +462,6 @@ describe("opportunistic mesh: transport bridge", () => {
         messages: (Record<string, unknown> & { id: string })[];
       };
       return messages.find((message) => !before.has(message.id))!;
-    }
-
-    function strangerBlob(id: string): Record<string, unknown> {
-      const stranger = createMeshIdentity();
-      const sender = createMeshIdentity();
-      const now = Date.now();
-      const ttlExpiresAt = now + 3_600_000;
-      const toTag = mailboxTag(stranger.mailboxToken, currentEpoch(now, 24 * 3_600_000));
-      const sealed = sealMailbox({
-        recipientKxPublic: stranger.kxPublic,
-        sender: { signPublic: sender.signPublic, signSecret: sender.signSecret, kxPublic: sender.kxPublic },
-        plaintext: id,
-        aad: `${toTag}|${ttlExpiresAt}`,
-      });
-      return { id, type: "sealed", authorId: "mesh.sealed", createdAt: now, toTag, sealed, ttlExpiresAt, hopLimit: 3 };
     }
 
     it("answers a delivered, a carried and a dropped blob identically", async () => {
