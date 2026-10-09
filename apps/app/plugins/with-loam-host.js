@@ -382,7 +382,7 @@ function withMeshManifest(config) {
     // location from BLE scanning or Wi-Fi Aware. Critically for NEARBY_WIFI_DEVICES (API 33+): without this
     // flag Android *also* requires ACCESS_FINE_LOCATION to be granted, so a fresh MESH-ONLY startup (which
     // requests only NEARBY_WIFI_DEVICES) would fail unless the hotspot flow had separately granted location
-    // first (P1). The hotspot keeps its own ACCESS_FINE_LOCATION declaration, so this is additive.
+    // first. The hotspot keeps its own ACCESS_FINE_LOCATION declaration, so this is additive.
     const perms = manifest["uses-permission"] ?? [];
     for (const name of ["android.permission.BLUETOOTH_SCAN", "android.permission.NEARBY_WIFI_DEVICES"]) {
       const entry = perms.find((permission) => permission.$?.["android:name"] === name);
@@ -394,40 +394,21 @@ function withMeshManifest(config) {
   });
 }
 
-// --- REGRESSION NOTE (fix/device-feedback-round1) ---------------------------------------------
-// A prior change ("A10") added a `withFineLocationMaxSdk` step here that stamped
-// `android:maxSdkVersion="32"` onto ACCESS_FINE_LOCATION, reasoning that NEARBY_WIFI_DEVICES
-// (declared `neverForLocation` by withMeshManifest below) would cover the hotspot on API 33+ same
-// as it does Wi-Fi Aware/BLE scanning. That capped the permission clean off the merged manifest on
-// API 33+ devices (Android 13/14/15) — including the Galaxy S25 Ultra (API 35).
+// --- Why ACCESS_FINE_LOCATION has no maxSdkVersion cap -------------------------------------------
+// `WifiManager.startLocalOnlyHotspot()` accepts NEARBY_WIFI_DEVICES instead of ACCESS_FINE_LOCATION on
+// API 33+ (developer.android.com/develop/connectivity/wifi/wifi-permissions,
+// developer.android.com/develop/connectivity/wifi/localonlyhotspot), so a `maxSdkVersion="32"` cap on
+// ACCESS_FINE_LOCATION looks safe. It isn't while the runtime request still asks for location there: the
+// JS side (src/lib/hotspot-permissions.ts, used by use-hotspot.ts) requests ACCESS_FINE_LOCATION and
+// ACCESS_COARSE_LOCATION on every API level (plus NEARBY_WIFI_DEVICES on 33+), and
+// `PermissionsAndroid.requestMultiple` silently auto-denies a permission the manifest doesn't declare for
+// the running API level (no dialog). A capped manifest once made the hotspot impossible to start on every
+// API 33+ device ("Host stopped / location permission is needed"). The coarse entry in HOTSPOT_PERMISSIONS
+// above exists for the same reason: Android 12+ ignores a fine-only request on some releases.
 //
-// The bug: `WifiManager.startLocalOnlyHotspot()` DOES accept NEARBY_WIFI_DEVICES as an alternative
-// to ACCESS_FINE_LOCATION on API 33+ per Android's own docs (developer.android.com/develop/
-// connectivity/wifi/wifi-permissions, developer.android.com/develop/connectivity/wifi/
-// localonlyhotspot) — but only if the app's *runtime permission request* is updated to ask for
-// NEARBY_WIFI_DEVICES instead of ACCESS_FINE_LOCATION on those API levels. `src/hooks/use-hotspot.ts`
-// (apps/app/src, outside this module's scope) was never updated to do that split: it still requests
-// ACCESS_FINE_LOCATION unconditionally on every API level, *plus* NEARBY_WIFI_DEVICES on 33+, and
-// requires every requested permission to be granted. Once the manifest capped ACCESS_FINE_LOCATION
-// off API 33+, `PermissionsAndroid.requestMultiple` silently auto-denies that request (a runtime
-// request for a permission the manifest doesn't declare for the running API level shows no dialog
-// and comes back denied) — so the combined grant check always failed on API 33+, regardless of what
-// the user tapped on the NEARBY_WIFI_DEVICES prompt. The hotspot could never start on any API 33+
-// device, which matches the reported "Host stopped / location permission is needed" failure.
-//
-// Fix: declare ACCESS_FINE_LOCATION on ALL supported API levels (no cap), so the JS side's existing
-// (unconditional) request is satisfiable again. This restores the exact configuration that was
-// verified working on an arm64 API-35 emulator (docs/04, "Emulator-verified... tapping it prompts
-// for ACCESS_FINE_LOCATION then NEARBY_WIFI_DEVICES, and startHotspot() runs").
-//
-// Since then the JS side (src/lib/hotspot-permissions.ts, used by use-hotspot.ts) has changed in two
-// ways. It requests ACCESS_COARSE_LOCATION together with ACCESS_FINE_LOCATION on every API level,
-// because Android 12+ ignores a fine-only request on some releases (hence the coarse entry in
-// HOTSPOT_PERMISSIONS above: an undeclared permission in a request auto-denies, exactly the failure
-// described here). And on API 33+ it now gates the start on NEARBY_WIFI_DEVICES alone, as Android
-// does, so a denied location answer there no longer blocks the hotspot. The location request itself
-// is still issued on API 33+, so ACCESS_FINE_LOCATION stays uncapped; dropping that request on 33+
-// (and letting the cap come back) remains the follow-up noted in docs/04.
+// On API 33+ the JS side gates the start on NEARBY_WIFI_DEVICES alone, as Android does, so a denied
+// location answer there doesn't block the hotspot. Dropping the location request on 33+ (and then
+// letting the cap come back) is the follow-up noted in docs/04.
 // -------------------------------------------------------------------------------------------------
 
 // --- Stale-prebuild guard ------------------------------------------------------------------------

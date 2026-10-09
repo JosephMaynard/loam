@@ -1,6 +1,6 @@
 // The transport-encryption session layer (docs/08, docs/20): the host identity, live sessions + replay
 // windows, the internal tunnel token, the global request hooks, and the handshake/resume/logout/tunnel
-// routes. Extracted verbatim from app.ts (2026-09-04 split) over the shared AppContext.
+// routes, registered over the shared AppContext.
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
 
@@ -48,7 +48,7 @@ function isInternalDispatchForLogging(request: { headers?: Record<string, unknow
 }
 
 /**
- * The server's request-log controller: never log a tunnel re-dispatch (review 2026-09-25 #10). Its URL is the
+ * The server's request-log controller: never log a tunnel re-dispatch. Its URL is the
  * real path + query the tunnel exists to hide (`/api/search?q=…`), and server logs outlive an Emergency
  * Reset. The OUTER `POST /api/transport/tunnel` is still logged, which is all the wire shows too.
  */
@@ -186,7 +186,7 @@ export function originMatchesHost(
 
 /**
  * Scrub request URLs from a free-text log message. A few of Fastify's own lines interpolate the raw URL into
- * the message, bypassing both the `req` serializer and the LogController (review 2026-09-25 follow-up): the
+ * the message, bypassing both the `req` serializer and the LogController: the
  * double-send warnings name it — for a request re-dispatched inside the tunnel, that's the hidden inner path
  * — so their URL is dropped outright; any other URL-shaped token keeps its path but loses its query string.
  */
@@ -320,7 +320,7 @@ export function createTransportServer(ctx: AppContext) {
    */
   function acceptTransportSeq(session: TransportSession, seq: number): boolean {
     // isSafeInteger, not isInteger: a value past 2^53 loses precision, so a key-holding client could
-    // otherwise submit an enormous sequence and poison its own replay window (docs/20 review #8). The
+    // otherwise submit an enormous sequence and poison its own replay window. The
     // client re-handshakes long before its counter approaches this, resetting the window.
     if (!Number.isSafeInteger(seq) || seq < 1) {
       return false;
@@ -361,7 +361,7 @@ export function createTransportServer(ctx: AppContext) {
     }
     const candidate = value as Partial<TransportIdentity>;
     // Both fields must be well-formed base64url AND form a consistent keypair — the public key is
-    // exactly the one derived from the secret (docs/20 #7). A truncated/mismatched persisted record that
+    // exactly the one derived from the secret. A truncated/mismatched persisted record that
     // merely passes the charset check would otherwise slip through and only surface later inside the
     // crypto at handshake time; caught here it's regenerated. `verifyTransportKeypair` also enforces the
     // 32-byte secret length and re-derives the (32-byte) public, so no separate length check is needed.
@@ -443,11 +443,11 @@ export function createTransportServer(ctx: AppContext) {
    * ONLY through the internal tunnel dispatch (docs/20) — so a direct hit is refused (401) and a
    * captured session id / cookie is inert. Matched on the RESOLVED route pattern (`routeOptions.url`),
    * NOT the raw request URL — Fastify percent-decodes the path before routing, so string-matching the
-   * raw URL let `/%61pi/users` (→ `/api/users`) slip past enforcement. The only DIRECTLY reachable
+   * raw URL would let `/%61pi/users` (→ `/api/users`) slip past enforcement. The only DIRECTLY reachable
    * `/api/` routes in required mode are the public bootstrap, health, the handshake, the sealed resume,
    * the sealed logout, the DIRECT cookie-clear (`/api/session/end` — unauthenticated + side-effect-only,
    * it mints nothing and only clears the caller's own presented cookie, so a device wipe can revoke a
-   * legacy cookie that a bound session's `credentials:"omit"` requests never send, docs/20 #3), and the
+   * legacy cookie that a bound session's `credentials:"omit"` requests never send, docs/20), and the
    * tunnel endpoint itself; everything else — including `/api/config`, which now returns `currentUser`
    * only for a bound session over the tunnel — is content. (Internal tunnel dispatches never reach this —
    * they return at the top of `onRequest`; the static shell + `/ws` are handled separately.) */
@@ -501,9 +501,9 @@ export function createTransportServer(ctx: AppContext) {
   const MESH_LOOPBACK_BRIDGE_ROUTES = new Set(["/api/mesh/outbound", "/api/mesh/inbound", "/api/host/clients", "/api/host/invite", "/api/host/link-code"]);
 
   /**
-   * Per-route semantic rate-limit config that ALSO counts internal tunnel re-dispatches (Sol P2-6).
+   * Per-route semantic rate-limit config that ALSO counts internal tunnel re-dispatches.
    * Route configs inherit the global registration's `allowList`, which exempts tunnel dispatches —
-   * correct for the blanket limiter (see above), but on the expensive routes it silently lifted the
+   * correct for the blanket limiter (see above), but on the expensive routes it would silently lift the
    * tighter caps for any client using the encrypted tunnel (e.g. ~200 MB/min of upload attempts
    * inside the 300/min tunnel budget). Overriding the allowList here counts every arrival path; the
    * tunnel forwards the real caller's address (`remoteAddress: request.ip`), so the per-IP key is
@@ -538,10 +538,10 @@ export function createTransportServer(ctx: AppContext) {
    * Who may drive the mesh transport bridge: ONLY a loopback caller presenting the launcher's per-boot
    * `hostToken`. The Android launcher's courier (`nodejs-project-template/main.js`) is the bridge's one real
    * caller and always sends it as `x-loam-host-token`. Loopback alone is never enough: on Android every
-   * installed app (and `adb forward`) reaches 127.0.0.1 (review 2026-09-04), and on a desktop/Pi a
-   * same-host reverse proxy or the Vite dev proxy makes EVERY LAN client arrive from loopback (review
-   * 2026-09-25 #12). So a host with no `hostToken` (desktop/Pi — there is no radio courier there) has no
-   * bridge at all: the routes 404 exactly as if mesh were off.
+   * installed app (and `adb forward`) reaches 127.0.0.1, and on a desktop/Pi a same-host reverse proxy
+   * or the Vite dev proxy makes EVERY LAN client arrive from loopback. So a host with no `hostToken` (the
+   * plain `server.ts` entry) has no bridge at all: the routes 404 exactly as if mesh were off. `loamnet`
+   * mints a token but never hands it out, and neither desktop entry has a radio courier.
    */
   function meshBridgeCallerAuthorized(request: FastifyRequest): boolean {
     return requestFromLoopback(request) && !!ctx.options.hostToken && ctx.presentsHostToken(request);
@@ -620,9 +620,9 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
   // session — content goes through the path-hiding tunnel (`/api/transport/tunnel`), images included,
   // so only "a tunnel request happened" + ciphertext size/timing remain. All inert when the mode is `off`.
   ctx.server.addHook("onRequest", async (request, reply) => {
-    // RF1: once a persistent/passphrase kill switch has handed off to the launcher for a restart, this
-    // process must not serve anything from its (deliberately) stale in-memory mirrors while it waits to
-    // be torn down. Checked before EVERYTHING else, including the internal tunnel bypass — the only
+    // The kill switch's 503 gate: while a wipe is in flight, after it has handed off to the launcher for
+    // a restart, or after it failed closed, this process must not serve anything from its in-memory
+    // mirrors or surviving sessions. Checked before EVERYTHING else, including the internal tunnel bypass — the only
     // route that stays reachable is the liveness probe, so the Android launcher's readiness poll still
     // works. See `executeKillSwitchBody`.
     if (ctx.awaitingWipeRestart && request.routeOptions?.url !== "/api/health") {
@@ -752,11 +752,11 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
     if (!key || typeof payload !== "string") {
       return payload;
     }
-    // Bind a node-to-node sync RESPONSE to the request's authenticated sequence (docs/08 / Sol round-2 #1):
+    // Bind a node-to-node sync RESPONSE to the request's authenticated sequence (docs/08):
     // sealing under `${method} ${url}#${seq}` means a captured response can't be replayed or cross-fed to a
     // different request on the same route (the puller opens with the exact seq it sent). Scoped to the
-    // direct-sealed sync routes — the browser's own direct/tunnel paths are unchanged. (`transportRequestSeq`
-    // is always set for a sync request, since every sealed sync request now carries a `{ s }` envelope.)
+    // direct-sealed sync routes — the browser's own direct/tunnel paths are unaffected. (`transportRequestSeq`
+    // is always set for a sync request, since every sealed sync request carries a `{ s }` envelope.)
     const seq = ctx.transportRequestSeq.get(request);
     const routeUrl = request.routeOptions?.url;
     const responseAad =
@@ -907,7 +907,7 @@ export function registerTransportRoutes(ctx: AppContext): void {
     const body = request.body as { token?: unknown } | undefined;
     const rawToken = body?.token;
     // A `token` that is present but not a string ({token:123}, {token:{}}, …) is a malformed request — a
-    // hard 400, not a silent mint (which would fragment an incompatible client's identity, docs/20 review).
+    // hard 400, not a silent mint (which would fragment an incompatible client's identity, docs/20).
     if (rawToken !== undefined && typeof rawToken !== "string") {
       return reply.code(400).send(errorBody("Invalid identity token"));
     }

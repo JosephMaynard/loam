@@ -117,8 +117,9 @@ declare global {
   interface Window {
     /**
      * Set by the Android host on its OWN WebView only (`injectedJavaScriptBeforeContentLoaded`): the
-     * launcher's per-boot host token, which claims admin under the `hostDevice` bootstrap (review
-     * 2026-09-04). Never present for a LAN joiner. Consumed on first use.
+     * launcher's per-boot host token, which claims admin under the `hostDevice` bootstrap. Never present
+     * for a LAN joiner. Kept for the life of the page, so a failed claim retries and a new identity (after
+     * a wipe) claims again.
      */
     __loamHostDeviceToken?: string;
   }
@@ -146,7 +147,7 @@ function conversationOfPath(path: string): Conversation | undefined {
   return route.screen === "channels" ? route.conversation : undefined;
 }
 // How long the boot keeps hydrated (cached) content OFF screen while the node is asked to confirm this
-// browser's identity (CodeRabbit, PR #130). A node that reset the identity hands back a different one and the
+// browser's identity. A node that reset the identity hands back a different one and the
 // cache is purged before anything renders; online, the answer arrives well inside this. Offline, the fetch
 // would only fail at its 10 s timeout, so the cap lifts the gate first — the offline-first cache still shows
 // after a short splash rather than never.
@@ -293,7 +294,7 @@ async function loadConfig(): Promise<Config> {
       // required — where a key WAS available but the handshake failed (node unreachable, or an on-path
       // attacker dropping the handshake POST): surface it and retry rather than silently degrading a
       // QR-joined client to plaintext + a cookie identity. `mode` is the UNAUTHENTICATED advertisement,
-      // so it alone must never decide this (review 2026-09-04).
+      // so it alone must never decide this.
       throw sessionError;
     }
     // `optional` with no QR key: proceed without a session (plaintext) rather than stranding the user.
@@ -310,7 +311,7 @@ async function loadConfig(): Promise<Config> {
     } catch (resumeError) {
       // A lost/ambiguous response may have left the session BOUND server-side already — critically for the
       // first user, whose mint made them admin and cached the only copy of their token in the response
-      // that was lost (docs/20 H2). Retry on the SAME session FIRST: it hits the server's idempotent cached
+      // that was lost (docs/20). Retry on the SAME session FIRST: it hits the server's idempotent cached
       // result and recovers the SAME identity + token, instead of re-handshaking and minting a second,
       // non-admin user (which would strand the sole administrator). Only if the same-session retry ALSO
       // fails is the session genuinely dead → then re-handshake+rebind and resume.
@@ -369,16 +370,15 @@ function conversationKey(conversation: Conversation): string {
 const TYPING_TTL_MS = 5000;
 const TYPING_THROTTLE_MS = 2500;
 
-// (Removed the dead `notifyIfHidden` OS-notification path — docs/25 D2. It could never fire:
-// Notification.requestPermission() was never called, so permission was never "granted", and web-push
-// needs a secure context that a plain-HTTP LAN origin doesn't provide. The in-app `pushToast` is the
-// working new-message signal; a real OS/web-push notification for the Android host is future work, P15.)
+// No OS notifications: web-push needs a secure context that a plain-HTTP LAN origin doesn't provide, so the
+// in-app `pushToast` is the new-message signal. OS push for the Android host is future work (docs/25 P15).
 
 /**
  * Tell the Android host app (if this page is running inside its WebView) that the node was just
- * wiped, so it can rotate any Keystore-held DB-encryption key material (AF1 / Sol P1-1) — see
- * `apps/app/src/app/index.tsx`'s WebView `onMessage` handler and `apps/app/src/lib/db-encryption.ts`'s
- * `clearStoredDbKeys()`. `window.ReactNativeWebView` only ever exists inside that WebView (react-native-
+ * wiped, so it drops its cached shared files and remounts the WebView under the node's new transport key
+ * (`apps/app/src/app/index.tsx`'s WebView `onMessage` handler). It never rotates DB-key material: that is
+ * authorized only by the launcher's acked `loam-wipe-restart` handoff, not by this unauthenticated notice.
+ * `window.ReactNativeWebView` only ever exists inside that WebView (react-native-
  * webview injects it), so this is a silent no-op on every other origin this client runs on — desktop
  * browser, Pi, another phone's browser. Best-effort and never throws.
  */
@@ -472,7 +472,7 @@ function LoamApp() {
   const [pinChange, setPinChange] = useState<{ current: string; next: string; matchesNode: boolean }>();
   // Deletes/edits applied by live events, so a history snapshot fetched before them can't undo them.
   const liveChangesRef = useRef(new LiveChangeJournal());
-  // A freshly-scanned join QR (`#k=`) present at THIS load = an explicit rejoin (docs/20 round-4 H2). The
+  // A freshly-scanned join QR (`#k=`) present at THIS load = an explicit rejoin (docs/20). The
   // transport layer records it in `captureJoinKey()` (main.tsx) before stripping the fragment from the URL,
   // so it must be read from there, never from `window.location.hash` (the hash is
   // already gone by the time this renders). Inside the Android host's own WebView the launcher's injected
@@ -481,10 +481,10 @@ function LoamApp() {
   const rejoinQrPresent = joinKeyPresentAtStartup();
   // Whether THIS load is a verified-rejoin attempt of a tombstoned device (a scanned QR while the tombstone
   // is still set). Captured once at mount. The tombstone is lifted only AFTER the QR handshake actually
-  // succeeds (docs/20 round-5 H2) — not merely because a syntactically-valid `#k=` was present (a
+  // succeeds — not merely because a syntactically-valid `#k=` was present (a
   // stale/invalid QR, or a crash, must not remove the gate).
   const bootRejoinAttempt = useRef(rejoinQrPresent && isWipeTombstoned());
-  // BOOT GATE (docs/20 round-4 H2): if a prior device wipe's durable tombstone is still set, do NOT
+  // BOOT GATE (docs/20): if a prior device wipe's durable tombstone is still set, do NOT
   // auto-render/reconnect the normal app (a surviving HttpOnly cookie could otherwise rehydrate the wiped
   // identity). Reuse the "Device wiped, scan the join QR" screen; a scanned QR lets boot PROCEED, and a
   // successful handshake there is what clears the tombstone.
@@ -532,7 +532,7 @@ function LoamApp() {
   const [blockedUserIds, setBlockedUserIds] = useState<ReadonlySet<string>>(() => new Set());
   const blockedUserIdsRef = useRef(blockedUserIds);
   blockedUserIdsRef.current = blockedUserIds;
-  // Ephemeral typing signals (P14): conversationKey → (userId → last-seen ms). Pruned on a timer.
+  // Ephemeral typing signals: conversationKey → (userId → last-seen ms). Pruned on a timer.
   const [typing, setTyping] = useState<Record<string, Record<string, number>>>({});
 
   // Prune stale typing entries on a timer while any are present, so "typing…" clears itself. Keyed on a
@@ -705,7 +705,7 @@ function LoamApp() {
    * permanently deleted): purge the channel, its cached messages, AND the reactions targeting them
    * (reactions carry only a targetMessageId, no channelId — without the second pass they'd linger
    * in IndexedDB forever after a "gone for good" delete), then leave the conversation if it is on
-   * screen. Archiving no longer calls this — archived channels stay cached, read-only.
+   * screen. Archiving doesn't call this: archived channels stay cached, read-only.
    */
   const removeChannel = useCallback((channelId: string) => {
     setChannels((previous) => previous.filter((channel) => channel.id !== channelId));
@@ -1031,15 +1031,15 @@ function LoamApp() {
     if (scope === "device") {
       if (!opts.remote) {
         // Capture the token + server-origin snapshots for the server revocation BEFORE anything that can
-        // reach a sibling tab (docs/20 round-5/round-6 H1). BOTH `setWipeTombstone()` and `announceWipe()`
+        // reach a sibling tab (docs/20). BOTH `setWipeTombstone()` and `announceWipe()`
         // are cross-tab signals now — writing the tombstone fires a `storage` event that a sibling's
         // `listenForRemoteWipe` acts on, clearing the shared token before we'd snapshot it. So snapshot
         // FIRST, then raise the tombstone, then broadcast.
         snapshotForWipe();
       }
-      setWipeTombstone(); // durable "do not auto-reconnect" (docs/20 round-4 H2)
+      setWipeTombstone(); // durable "do not auto-reconnect" (docs/20)
       if (!opts.remote) {
-        // Announce to every OTHER tab so they tear down too (round-4 Medium). Skipped on a remote wipe to
+        // Announce to every OTHER tab so they tear down too. Skipped on a remote wipe to
         // avoid a broadcast loop.
         announceWipe();
       }
@@ -1062,7 +1062,7 @@ function LoamApp() {
     // server revocation below authenticates on the in-memory transport session + the browser cookie, which
     // both survive local-storage erasure, so clearing the token here doesn't weaken it.)
     clearStoredIdentityToken();
-    // The cached host transport key goes too (review 2026-09-04): a NODE wipe rotates the host's key, so
+    // The cached host transport key goes too: a NODE wipe rotates the host's key, so
     // keeping the old one would loop the next boot on a failed resume instead of reaching the rescan
     // gate; a DEVICE wipe's verified rejoin needs a fresh `#k=` scan anyway.
     clearCachedHostPublicKey();
@@ -1074,7 +1074,7 @@ function LoamApp() {
     forgetConfirmedIdentity();
     tabIdentityRef.current = undefined;
     // In-memory residue: decrypted avatar/attachment `blob:` URLs and rendered message HTML would
-    // otherwise outlive the wipe in the still-open tab (review 2026-09-04).
+    // otherwise outlive the wipe in the still-open tab.
     clearImageObjectUrls();
     clearMarkdownCache();
 
@@ -1107,8 +1107,8 @@ function LoamApp() {
     // still-in-memory transport session) AND the legacy HttpOnly cookie (bare `session/end`). Only the
     // INITIATING tab does this (a remote tab's initiator owns it), and only it removes the shared
     // SERVER_URL_KEY — a remote tab removing it could redirect the initiator's in-flight revocation calls to
-    // the wrong origin (docs/20 round-5 H1). The tombstone is NOT lifted here: `session/end` is unsealed and
-    // forgeable, so it's no security confirmation (round-5 H2) — the tombstone stays until a VERIFIED rejoin.
+    // the wrong origin (docs/20). The tombstone is NOT lifted here: `session/end` is unsealed and
+    // forgeable, so it's no security confirmation — the tombstone stays until a VERIFIED rejoin.
     if (scope === "device" && !opts.remote) {
       // Both steps are best-effort and independent: the revocation can fail (node unreachable, deadline
       // hit) and the wiped screen is already up, so neither a rejection nor a skipped URL removal may
@@ -1129,7 +1129,7 @@ function LoamApp() {
   /**
    * Drop every piece of cached content, in memory and on disk. REJECTS when the on-disk clear failed (the
    * in-memory half has already happened): the identity-change path must not confirm the new identity over
-   * a cache it couldn't clear (CodeRabbit, PR #130), while a wipe — which also deletes the database — treats
+   * a cache it couldn't clear, while a wipe — which also deletes the database — treats
    * it as best-effort. A storage failure on the last-conversation key alone is not a failed purge.
    */
   const purgeCachedContent = useCallback(async () => {
@@ -1180,7 +1180,7 @@ function LoamApp() {
     [],
   );
 
-  // Tear THIS tab down if another tab initiates a device wipe (docs/20 round-4 Medium / round-5 Medium): the
+  // Tear THIS tab down if another tab initiates a device wipe (docs/20): the
   // initiating tab announces over a BroadcastChannel AND raises the durable tombstone (a `storage` event) —
   // `listenForRemoteWipe` covers both. We run a local-only purge (no re-announce, no server revocation).
   useEffect(() => {
@@ -1188,7 +1188,7 @@ function LoamApp() {
     const unsubscribe = listenForRemoteWipe(onRemote);
     // Re-check on install: a wipe may have landed between this tab's first render and this effect running
     // (the one-shot BroadcastChannel message would be missed). If we're tombstoned now but didn't already
-    // gate at render, tear down (docs/20 round-5 Medium).
+    // gate at render, tear down.
     if (isWipeTombstoned() && !wiped && !bootRejoinAttempt.current) {
       onRemote();
     }
@@ -1586,7 +1586,7 @@ function LoamApp() {
   }, [moderates, reportsVersion, connection === "live"]);
 
   useEffect(() => {
-    // BOOT GATE (docs/20 round-4 H2): an outstanding wipe tombstone (shown via `wiped`) must block the
+    // BOOT GATE (docs/20): an outstanding wipe tombstone (shown via `wiped`) must block the
     // normal boot — no hydration, no config fetch, no auto-reconnect — until the user explicitly rejoins.
     if (wiped) {
       return;
@@ -1667,7 +1667,7 @@ function LoamApp() {
         setPinChange(getPendingHostKeyChange());
         syncFailuresRef.current = 0;
         setError(undefined);
-        // A VERIFIED rejoin (docs/20 round-5 H2): `loadConfig` succeeded, so the QR-pinned handshake/resume
+        // A VERIFIED rejoin (docs/20): `loadConfig` succeeded, so the QR-pinned handshake/resume
         // actually completed — only NOW is it safe to lift the wipe tombstone (and best-effort clear the old
         // cookie). A syntactically-valid `#k=` alone never clears it, so a stale/invalid QR or a crash leaves
         // the boot gate intact.
@@ -1680,7 +1680,7 @@ function LoamApp() {
         // reset (an Emergency Reset whose `wipe` event this backgrounded device missed, an expired cookie, a
         // revoked token). Everything cached belongs to the previous identity: purge it before carrying on as
         // the new one, rather than merging a stranger's DMs and private channels into this session. The new
-        // identity is recorded only AFTER a SUCCESSFUL purge (`confirmIdentity`; CodeRabbit, PR #130): a tab
+        // identity is recorded only AFTER a SUCCESSFUL purge (`confirmIdentity`): a tab
         // killed mid-purge, or a purge the cache refused, must leave the old identity recorded so the next
         // boot purges again, and a sibling tab (reloaded by the `storage` event the record fires) must only
         // ever hydrate an already-cleared cache. On a persistent failure this session still carries on as
@@ -1703,7 +1703,7 @@ function LoamApp() {
         );
 
         // The Android host's own WebView (never a LAN joiner) is injected with the launcher's per-boot host
-        // token: claim admin with it (`hostDevice` bootstrap, review 2026-09-04). It is kept for the life of
+        // token: claim admin with it (`hostDevice` bootstrap). It is kept for the life of
         // the page: a failed claim (a rate limit, a blip) retries on the next boot pass, and a new
         // identity (after a wipe) claims again, since with `hostDevice` there is no other way for this node to
         // gain an admin. One claim at a time; the server treats a claim by an existing admin as a no-op. Boot
@@ -1872,7 +1872,7 @@ function LoamApp() {
         setError(nextError instanceof Error ? nextError.message : t("app.serverUnreachable"), true);
         setConnection("offline");
         // Retry with backoff — a one-shot boot fetch would strand the app offline forever when the
-        // server is momentarily unreachable (previously a manual reload was the only way out).
+        // server is momentarily unreachable, leaving a manual reload the only way out.
         const delay = Math.min(30_000, 2_000 * 2 ** syncFailuresRef.current);
         syncFailuresRef.current += 1;
         retryTimer = window.setTimeout(() => setSyncTick((tick) => tick + 1), delay);
@@ -2035,7 +2035,7 @@ function LoamApp() {
     window.addEventListener("online", checkConnection);
     document.addEventListener("visibilitychange", onVisibilityChange);
 
-    // A transparent REST re-handshake replaced the module session (review 2026-09-04): a socket confirmed
+    // A transparent REST re-handshake replaced the module session: a socket confirmed
     // under the previous key would decrypt every later frame against the wrong key and go silently deaf
     // while still showing "live". Close it; `onclose` schedules the normal reconnect, which reopens a
     // socket under the current session. (The reconnect path's own `reestablishSession` fires this too —
@@ -2095,7 +2095,7 @@ function LoamApp() {
       } catch {
         // No encrypted session on a node whose effective mode is `required` (the QR gate is showing, or a
         // pin was broken mid-session): never open a plaintext socket — stay offline and let the next boot
-        // pass / rescan re-establish a session first (review 2026-09-04).
+        // pass / rescan re-establish a session first.
         setConnection("offline");
         scheduleReconnect();
         return;
@@ -2203,7 +2203,7 @@ function LoamApp() {
         if (payload.type === "configUpdated") {
           setConfig((previous) => {
             // A live transport-mode flip only takes effect through `ensureSession`, which runs on the
-            // boot/resync path — so re-run it (review 2026-09-04): an `optional`→`required` flip then
+            // boot/resync path — so re-run it: an `optional`→`required` flip then
             // shows the QR gate instead of erroring until a reload, and the fetch path re-evaluates.
             if (previous && previous.networkConfig.transportEncryption !== payload.networkConfig.transportEncryption) {
               queueMicrotask(() => setSyncTick((tick) => tick + 1));
@@ -2237,9 +2237,8 @@ function LoamApp() {
 
         if (payload.type === "wipe") {
           void purgeLocalData();
-          // Server-initiated node wipe (kill switch) — distinct from a self-service "wipe this
-          // device" action, which never touches the node's DB-encryption key material. See
-          // `notifyAndroidHostOfWipe`'s comment (AF1 / Sol P1-1).
+          // Server-initiated node wipe (kill switch), distinct from a self-service "wipe this
+          // device" action. See `notifyAndroidHostOfWipe`'s comment.
           notifyAndroidHostOfWipe();
           return;
         }
@@ -2306,7 +2305,7 @@ function LoamApp() {
         .map(([userId]) => usersById.get(userId)?.displayName ?? generateDisplayName(userId))
     : [];
 
-  // Fire-and-forget, throttled "I'm typing" ping for the active conversation (P14).
+  // Fire-and-forget, throttled "I'm typing" ping for the active conversation.
   const lastTypingSentRef = useRef(0);
   const sendTyping = useCallback((conversation: Conversation) => {
     const now = Date.now();
@@ -2381,8 +2380,8 @@ function LoamApp() {
   );
 
   // The active conversation is always "read": its marker is the newest SERVER timestamp on screen, so its
-  // own new messages never light up an unread badge. (It used to be this device's `Date.now()`, which a
-  // clock running ahead of the host's turned into "everything is read" for messages that came later.)
+  // own new messages never light up an unread badge. Never this device's `Date.now()`: a clock running ahead
+  // of the host's would turn that into "everything is read" for messages that came later.
   const activeKey = activeConversation ? conversationKey(activeConversation) : undefined;
   const newestSeen = useMemo(() => newestMessageTimestamp(selectedMessages), [selectedMessages]);
   useEffect(() => {

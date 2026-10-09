@@ -81,10 +81,10 @@ export interface ConversationViewProps {
  * Everything conversation-scoped below this point — the composer's draft text, pending attachments
  * (including uploads still in flight), the location draft, the members panel, report dialogs, the
  * message list's scroll bookkeeping — lives in a subtree KEYED by the conversation, so switching
- * conversations mounts a fresh one (pre-release review 2026-09-25). Before, those survived a route
- * change: a DM draft, a private photo or coordinates typed for one conversation went out into the next
- * one on a single Enter, and an upload finishing after the switch attached itself to the new
- * conversation. An upload that completes after its composer unmounted now lands nowhere.
+ * conversations mounts a fresh one. Otherwise a DM draft, a private photo or coordinates typed for one
+ * conversation would go out into the next on a single Enter, and an upload finishing after the switch
+ * would attach itself to the new conversation. An upload that completes after its composer unmounted
+ * lands nowhere.
  */
 export function ConversationView(props: ConversationViewProps) {
   const { conversation } = props;
@@ -214,8 +214,8 @@ function ConversationPane({
         {isPrivateChannel ? <IconLock size={18} /> : <IconHash size={18} />}
       </span>
     );
-  // A DM's subtitle says "Online" while the peer is connected, and is otherwise empty (the raw user id it
-  // used to show meant nothing to people). A channel's is its topic.
+  // A DM's subtitle says "Online" while the peer is connected, and is otherwise empty (a raw user id would
+  // mean nothing to people). A channel's is its topic.
   const subtitle =
     conversation.kind === "dm" ? (
       peerOnline ? (

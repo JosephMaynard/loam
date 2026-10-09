@@ -15,8 +15,8 @@ export const ATTACHMENT_IMAGE_SOURCE_MAX_BYTES = 50 * 1024 * 1024;
 
 /**
  * The size limit a picked file breaks, or `undefined` when it may be read and uploaded. Checked BEFORE
- * reading the file (pre-release review 2026-09-25: a 100 MB pick used to be read whole and base64'd a byte
- * at a time, hanging the tab, only for the server to refuse it).
+ * reading the file: reading a huge pick whole and base64-encoding it would hang the tab, only for the
+ * server to refuse it.
  */
 export function exceededAttachmentLimit(file: Pick<File, "size" | "type">): number | undefined {
   const limit = file.type.startsWith("image/") ? ATTACHMENT_IMAGE_SOURCE_MAX_BYTES : ATTACHMENT_FILE_MAX_BYTES;

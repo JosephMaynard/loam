@@ -1,6 +1,6 @@
 'use strict';
 
-// Pure gate for "may a DB key be resolved (and boot proceed) on THIS invocation?" (P1-2, Sol round 5).
+// Pure gate for "may a DB key be resolved (and boot proceed) on THIS invocation?".
 // Split out from main.js into its own dependency-free CJS module — with no `require('rn-bridge')` and
 // no top-level side effects — specifically so it can be unit-tested directly (see
 // apps/app/src/lib/db-key-gate.test.ts). main.js itself pulls in `rn-bridge` at import time and runs
@@ -9,14 +9,13 @@
 //
 // EVERY boot/unlock entry point in main.js — the initial boot AND the `loam-db-unlock` retry listener —
 // MUST route through `bootWithWipeResume()`, the single caller of `resolveDbEncryptionAndBoot()`, which
-// in turn is gated by this function. Before this fix, `loam-db-unlock`'s handler called
-// `resolveDbEncryptionAndBoot()` directly, bypassing the marker check entirely: a Retry/Unlock tap after
-// a `db_encryption_locked` boot-timeout report could resolve a key and boot a fresh (post-wipe) database
-// under the OLD secret the wipe was meant to destroy, while the wipe-pending marker sat unread on disk.
+// in turn is gated by this function. A direct `resolveDbEncryptionAndBoot()` call would skip the wipe-phase
+// check: a Retry/Unlock tap after a `db_encryption_locked` report could then resolve a key and boot a fresh
+// (post-wipe) database under the OLD secret the wipe was meant to destroy.
 //
-// P1-1 (Sol round 8): the input is now whether a device-KEY-CLEAR is still pending — i.e. the durable
+// The input is whether a device-KEY-CLEAR is still pending — i.e. the durable
 // `.loam-wipe-phase` file (written by the server's kill switch before it hands off to the launcher — see
-// `executeKillSwitchBody` in apps/server/src/app.ts) reads `key-clear-ready`. That phase means every wiped
+// `executeKillSwitchBody` in apps/server/src/kill-switch.ts) reads `key-clear-ready`. That phase means every wiped
 // artifact is PROVEN gone and the ONLY remaining step is clearing the device key, which was never confirmed
 // complete (`db-encryption.ts`'s `clearStoredDbKeys` / main.js's `loam-wipe-complete` handler). Resolving a
 // key — let alone booting — while that's true risks encrypting/opening the fresh post-wipe database under

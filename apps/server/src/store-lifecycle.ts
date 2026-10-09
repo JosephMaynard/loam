@@ -1,8 +1,8 @@
 // The SQLite/SQLCipher store lifecycle: opening the database under the resolved key (with the
 // passphrase-derivation migration, the unreadable-DB / plaintext-unconverted recovery paths, and the
 // operator-confirmed start-fresh marker), the durable wipe journal, and the boot-time resume of an
-// interrupted emergency wipe. Extracted verbatim from app.ts (2026-09-04 split) behind an explicit
-// dependency object; `buildApp` composes it and owns the live `store` binding.
+// interrupted emergency wipe, behind an explicit dependency object; `buildApp` composes it and owns the
+// live `store` binding.
 import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
@@ -62,10 +62,10 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     dbKey: ephemeralDbKey ? randomBytes(32).toString("hex") : options.dbEncryptionKey,
     encryptionEnabled: false,
   };
-  // Whether the store is ACTUALLY open with a key right now. Starts as "a key was resolved", but
-  // `openInitialStore` below can downgrade it to `false` (case 2) if that key turns out not to open
-  // what's on disk. `currentNetworkConfig()` reports THIS — not the merely-configured
-  // `appConfig.security.dbEncryption` — so the wire never claims encryption that isn't active (F5).
+  // Whether the store is ACTUALLY open with a key right now: "a key was resolved". `openInitialStore` below
+  // never serves a keyed node from a plaintext file (it locks instead), so a resolved key means a keyed store.
+  // `currentNetworkConfig()` reports THIS — not the merely-configured `appConfig.security.dbEncryption` — so
+  // the wire never claims encryption that isn't active.
   state.encryptionEnabled = state.dbKey !== undefined;
 
   const openLoamStore = (): LoamStore => {
@@ -100,17 +100,17 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   }
 
   /**
-   * EVERY on-disk artifact of the SQLite/SQLCipher database (P1-2, Sol round 7) — the single source of
-   * truth for exhaustive kill-switch deletion. Deleting only the three live files (`loam.db`/`-wal`/
-   * `-shm`) is a crypto-wipe hole: it leaves the DELETE-mode rollback `-journal`, the rekey-migration
-   * `.premigration` snapshot (+ its `.tmp`/`-wal`/`-shm`/`-journal` and the legacy multi-file
-   * `-wal.premigration`/`-shm.premigration` sidecars), and the timestamped `*.unreadable-<ts>` recovery
-   * renames. CRITICALLY, `.premigration` is copied BEFORE the rekey (see `openInitialStore`), so it is
+   * EVERY on-disk artifact of the SQLite/SQLCipher database — the single source of truth for exhaustive
+   * kill-switch deletion. Deleting only the three live files (`loam.db`/`-wal`/`-shm`) is a crypto-wipe
+   * hole: it leaves the DELETE-mode rollback `-journal`, the rekey-migration `.premigration` snapshot
+   * (+ its `.tmp`/`-wal`/`-shm`/`-journal` and the legacy multi-file `-wal.premigration`/
+   * `-shm.premigration` sidecars), and any timestamped `*.unreadable-<ts>` renames an older build's
+   * start-fresh recovery left. CRITICALLY, `.premigration` is copied BEFORE the rekey (see `openInitialStore`), so it is
    * encrypted under the LEGACY `SHA256(passphrase)` derivation (no discardable device secret) — clearing
    * the device secret does NOT cryptographically erase it; anyone with the passphrase could still open it.
    * Only physically deleting it satisfies the "wipe all persisted data" + cryptographic-wipe guarantees.
    * Returns the STATIC absolute paths plus the globbed recovery renames enumerated from the data dir,
-   * AND whether that enumeration FAILED (P1-2, Sol round 8): an unreadable data dir (EACCES/EIO) is NOT
+   * AND whether that enumeration FAILED: an unreadable data dir (EACCES/EIO) is NOT
    * proof no `*.unreadable-*` survivor exists, so a `readdirSync` failure surfaces as `enumerationError`
    * rather than being swallowed into an empty enumeration — the secure-wipe callers treat that as an error
    * that BLOCKS completion. Callers delete + PROVE-gone each path before declaring the wipe complete.
@@ -129,9 +129,10 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       `${dbPath}-wal.premigration`,
       `${dbPath}-shm.premigration`,
     ];
-    // The marker-gated fresh-start recovery renames unopenable files aside as `<name>.unreadable-<ts>`
-    // (openInitialStore case 3, timestamp+random suffix). Those are still-readable ciphertext under a
-    // possibly-legacy key, so a wipe must remove them too — enumerate them by prefix from the data dir.
+    // Older builds' marker-gated start-fresh recovery renamed unopenable files aside as
+    // `<name>.unreadable-<ts>` (the current one moves them into a `.loam-recovery-*` snapshot instead, swept
+    // by `deleteAndVerifyRecoverySnapshots`). Those are still-readable ciphertext under a possibly-legacy
+    // key, so a wipe must remove them too — enumerate them by prefix from the data dir.
     const base = basename(dbPath);
     try {
       for (const entry of readdirSync(dataDir)) {
@@ -140,7 +141,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
         }
       }
     } catch (error) {
-      // P1-2 (Sol round 8): "can't enumerate" is NOT "nothing to enumerate" — a `*.unreadable-*` survivor
+      // "Can't enumerate" is NOT "nothing to enumerate" — a `*.unreadable-*` survivor
       // could be present and unseen. Surface it so `deleteAndVerifyDbArtifacts` fails closed instead of
       // reporting a false-clean wipe.
       return { paths, enumerationError: `readdir ${dataDir}: ${error instanceof Error ? error.message : String(error)}` };
@@ -155,7 +156,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   }
 
   /**
-   * Prove a path's absence (P1-2, Sol round 8). `existsSync` returns `false` for MANY stat/access errors,
+   * Prove a path's absence. `existsSync` returns `false` for MANY stat/access errors,
    * conflating "confirmed absent" with "could-not-determine" — so a wipe that trusts it can report a
    * survivor as gone. `lstatSync` distinguishes them: `ENOENT` is the ONLY confirmed absence; the file
    * still being there is confirmed presence; ANY other error is `"unknown"` (unverifiable — must NOT be
@@ -170,13 +171,10 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     }
   }
 
-  /** Structured result of a fail-closed deletion sweep (P1-2, Sol round 8): `ok` is true ONLY when every
-   *  path is PROVEN absent (no survivors AND no unverifiable/unknown paths AND no enumeration error). */
-
   /**
-   * Delete every {@link dbArtifactInventory} entry and PROVE each is gone (P1-2, Sol round 8). Best-effort
-   * per file (a delete failure is caught, then the path is re-checked via {@link provenAbsence}). Unlike
-   * the old `existsSync`-based check, "confirmed absent" is ONLY `ENOENT`: a still-present file → `survivors`,
+   * Delete every {@link dbArtifactInventory} entry and PROVE each is gone. Best-effort per file (a delete
+   * failure is caught, then the path is re-checked via {@link provenAbsence}). "Confirmed absent" is ONLY
+   * `ENOENT`: a still-present file → `survivors`,
    * and ANY other stat error (or a failed data-dir enumeration) → `errors` ("could-not-determine", NOT
    * absence). `ok` is false on either, so every encrypted wipe branch can FAIL CLOSED on an unverifiable
    * result rather than continue rotating/reopening while recoverable ciphertext might survive.
@@ -205,7 +203,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   }
 
   /**
-   * The FULL secure-wipe deletion set (P1-2, Sol round 8): every DB artifact PLUS the plaintext user-media
+   * The FULL secure-wipe deletion set: every DB artifact PLUS the plaintext user-media
    * directories (avatars/attachments), each deleted and PROVEN gone. Used by every fixed-key launcher-handoff
    * gate and by the boot-time wipe-phase resume, so the "verified gone" decision covers the whole inventory
    * (not just the DB files) before the launcher is ever signaled / the phase advances.
@@ -221,9 +219,9 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
 
   /**
    * Delete + PROVE gone every preserve-recovery artifact: the `.loam-recovery-<suffix>/` snapshot directories
-   * (Sol round-11 — an old, still-readable-under-the-prior-key DB set + avatars + attachments moved aside by a
-   * `preserve` start-fresh) and the `.loam-recovery-state` anchor. EVERY emergency-wipe branch must remove
-   * them — the ephemeral and plaintext branches too, not only the fixed-key ones (review 2026-09-25 #7).
+   * (an old, still-readable-under-the-prior-key DB set + avatars + attachments moved aside by a `preserve`
+   * start-fresh) and the `.loam-recovery-state` anchor. EVERY emergency-wipe branch must remove them — the
+   * ephemeral and plaintext branches too, not only the fixed-key ones.
    */
   function deleteAndVerifyRecoverySnapshots(): DeletionResult {
     return deleteAndVerifyPaths([], true);
@@ -265,11 +263,11 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
 
   /**
    * {@link deleteAndVerifyAllWipeArtifacts} PLUS a parent-directory fsync so the deletions are DURABLE across
-   * power-loss (P1-1/P1-2, Sol round-9) before the caller opens a fresh DB or reports the wipe done — otherwise
-   * a "permanently deleted" result proves only current-namespace absence, not that the unlinks survived a crash.
-   * `ok` is true ONLY when every artifact + media path is proven gone AND the directory fsync succeeded (fail
-   * closed on either). The single destructive-recovery / no-hook-wipe helper Sol round-9 asked every branch to
-   * funnel through, so full-inventory + durable is enforced in one place.
+   * power-loss before the caller opens a fresh DB or reports the wipe done — otherwise a "permanently
+   * deleted" result proves only current-namespace absence, not that the unlinks survived a crash. `ok` is
+   * true ONLY when every artifact + media path is proven gone AND the directory fsync succeeded (fail closed
+   * on either). Every destructive-recovery and fixed-key wipe branch funnels through this one helper, so
+   * full-inventory + durable is enforced in one place.
    */
   function deleteAndVerifyAllWipeArtifactsDurable(): DeletionResult {
     const result = deleteAndVerifyAllWipeArtifacts();
@@ -305,14 +303,14 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   }
 
   /**
-   * Move (or FINISH moving) the whole unopenable DB set + user media into `recoveryDir`, durably (P1, Sol
-   * round-12). Idempotent/resumable: only entries still in the ACTIVE namespace are moved, so a re-run after a
+   * Move (or FINISH moving) the whole unopenable DB set + user media into `recoveryDir`, durably.
+   * Idempotent/resumable: only entries still in the ACTIVE namespace are moved, so a re-run after a
    * crash completes a partial move rather than duplicating it — the DB set therefore always ends up COHERENT
    * (every `loam.db*` file together) in the snapshot. Every source-presence check is ENOENT-only
    * (`provenAbsence`); an UNVERIFIABLE stat aborts (returns false) BEFORE any fresh store could be opened, so a
-   * transient EIO can't silently leave media in the active namespace (P1-4). fsyncs BOTH parent directories —
+   * transient EIO can't silently leave media in the active namespace. fsyncs BOTH parent directories —
    * a cross-directory rename changes both, so making only the source durable would risk losing the destination
-   * link (P1-1). Returns whether the snapshot is now complete AND durable.
+   * link. Returns whether the snapshot is now complete AND durable.
    */
   function completePreserveMove(recoveryDir: string): boolean {
     try {
@@ -364,7 +362,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
         }
       }
     }
-    // COMPLETENESS verification (CodeRabbit round-12): the ACTIVE namespace must now hold NO `loam.db*` artifact
+    // COMPLETENESS verification: the ACTIVE namespace must now hold NO `loam.db*` artifact
     // and NO media directory — if one does (a rename silently didn't take, or a stat became unverifiable), the
     // snapshot is INCOMPLETE, so fail closed rather than clear the anchor / open fresh over a partial preserve.
     // Because renames are ATOMIC (a file is never lost — it is either here in the active namespace or already
@@ -392,7 +390,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   }
 
   /**
-   * Boot-time resume of an interrupted preserve recovery (P1, Sol round-12): if the durable anchor is present,
+   * Boot-time resume of an interrupted preserve recovery: if the durable anchor is present,
    * FINISH the move into the recorded snapshot and clear the anchor, so `openInitialStore` below never opens a
    * fresh DB over a half-moved (incoherent) set. Runs before the store is opened. Fails closed (throws the
    * recoverable {@link DbEncryptionUnreadableError}) rather than open over an uncertain state.
@@ -443,11 +441,11 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     log.warn(`Resumed and completed an interrupted preserve recovery into "${recoveryDirName}".`);
   }
 
-  // Operator "start fresh" confirmation marker (shared launcher contract, SF2/docs/15): the RN host's
-  // explicit start-fresh UI writes this file BEFORE restarting the server; `openInitialStore` below
-  // consumes (deletes) it as the ONLY thing allowed to trigger an automatic destructive DB replace.
-  // Its mere presence is standing in for an operator's affirmative click — nothing else may substitute
-  // for it (Sol's design review: an automatic replace on every unopenable DB is wrong).
+  // Operator "start fresh" confirmation marker (shared launcher contract): the RN host's explicit
+  // start-fresh UI writes this file BEFORE restarting the server; `openInitialStore` below consumes
+  // (deletes) it as the ONLY thing allowed to trigger an automatic destructive DB replace. Its mere
+  // presence stands in for an operator's affirmative click — nothing else may substitute for it: an
+  // automatic replace on every unopenable DB would destroy data the operator could still recover.
   const dbStartFreshMarkerPath = join(dataDir, ".loam-db-start-fresh");
 
   // Records that the LAST boot ran under an ephemeral key. Same file name and contents (a millisecond
@@ -460,9 +458,9 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   /**
    * Make the data dir fit the key mode BEFORE the database is opened. An ephemeral key is minted fresh
    * every boot, so a `loam.db` encrypted under the previous boot's key can never be opened again: left in
-   * place, the keyed open would fail and the boot stop on a misleading "wrong or lost key" error (the bare
-   * desktop server and a `loamnet --encrypt` service used to die on their second start this way; only the
-   * Android launcher cleaned up). Under an ephemeral key:
+   * place, the keyed open would fail and the boot stop on a misleading "wrong or lost key" error (this covers
+   * the bare desktop server and the `loamnet` CLI, which have no launcher to clean up first). Under an
+   * ephemeral key:
    *   - the marker is present: the files are last boot's leftovers. Delete `loam.db` (+ `-wal`/`-shm`/
    *     `-journal`) and the `avatars/` and `attachments/` dirs (that media is content of the dead key's
    *     network and would otherwise outlive every restart, docs/02), then write the marker for the next boot.
@@ -588,7 +586,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     }
   }
 
-  // Durable ANCHOR for a RESUMABLE preserve recovery (P1, Sol round-12). A `preserve` start-fresh moves the
+  // Durable ANCHOR for a RESUMABLE preserve recovery. A `preserve` start-fresh moves the
   // whole unopenable DB set + media into a unique `.loam-recovery-<suffix>/` snapshot. The moves are not one
   // atomic op, so this state file (written BEFORE any move, cleared only after the move is durable) records
   // the target snapshot: a boot-time `resumePreserveRecovery` sees it and FINISHES the move, so a crash can
@@ -596,9 +594,9 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   // partial one. Named under the `.loam-recovery-` prefix so a kill switch's snapshot sweep clears it too.
   const recoveryStatePath = join(dataDir, ".loam-recovery-state");
 
-  // Durable wipe PHASE file (P1-1, Sol round 8) — replaces the old single `.loam-wipe-pending` marker,
-  // which conflated "deletion still pending" with "safe to clear the key". A shared launcher contract with
-  // `apps/app/nodejs-project-template/main.js` (both sides updated together):
+  // Durable wipe PHASE file. It separates "deletion still pending" from "safe to clear the key", which the
+  // older single `.loam-wipe-pending` marker conflated. A shared launcher contract with
+  // `apps/app/nodejs-project-template/main.js` (both sides change together):
   //   - `delete-pending`  → a fixed-key wipe started; artifacts are NOT yet PROVEN gone. The launcher must
   //                         NOT clear the device key — it defers to the SERVER's boot-time retry, which
   //                         re-runs artifact deletion under the still-available OLD key before serving.
@@ -608,24 +606,17 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   // deletion is verified. Route on the PHASE, never on mere presence — see `executeKillSwitchBody` and the
   // boot-time resume below.
   const wipePhaseMarkerPath = join(dataDir, ".loam-wipe-phase");
-  // The PRE-round-8 single marker. A round-7 fail-closed wipe could leave THIS on disk alongside a deletion
-  // survivor (e.g. an undeletable legacy-key `.premigration`) while 503-locked, telling the operator to
-  // reopen. If a device upgrades to this build before reopening, the new phase machine must still recognise
-  // the old marker as an unfinished wipe (P1-1, Sol round-8) rather than forgetting it and serving surviving
-  // pre-wipe data. Migrated forward to `.loam-wipe-phase=delete-pending`; both names are cleared together
-  // only once the whole wipe protocol completes.
+  // The older single marker. A fail-closed wipe by an older build could leave THIS on disk alongside a
+  // deletion survivor (e.g. an undeletable legacy-key `.premigration`) while 503-locked, telling the operator
+  // to reopen. If a device upgrades before reopening, the phase machine must still recognise the old marker
+  // as an unfinished wipe rather than forgetting it and serving surviving pre-wipe data. Migrated forward to
+  // `.loam-wipe-phase=delete-pending`; both names are cleared together only once the whole wipe protocol
+  // completes.
   const legacyWipePendingMarkerPath = join(dataDir, ".loam-wipe-pending");
   // Left behind by a fixed-key Emergency Reset that had to strip a configured `sync.token` from the config it
   // carries across the restart (and so turned sync off), read and removed by the next boot that serves.
   const syncOffAfterResetMarkerPath = join(dataDir, ".loam-sync-off-after-reset");
 
-  /**
-   * fsync a directory so a create/rename/unlink INSIDE it is durable across power-loss (the directory
-   * entry, not just the file's bytes, must be flushed). Returns whether the fsync succeeded — callers that
-   * need genuine durability must fail closed on false, NOT log-and-continue (Sol round-8 P1-5). Some
-   * filesystems legitimately reject directory fsync with EINVAL; a caller may choose to tolerate that, but
-   * the wipe/config paths here do not (correctness over availability on those platforms).
-   */
   /** The permission bits of an existing file, or undefined when there is none (or they can't be read). */
   function existingFileMode(filePath: string): number | undefined {
     try {
@@ -635,6 +626,13 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     }
   }
 
+  /**
+   * fsync a directory so a create/rename/unlink INSIDE it is durable across power-loss (the directory
+   * entry, not just the file's bytes, must be flushed). Returns whether the fsync succeeded — callers that
+   * need genuine durability must fail closed on false, NOT log-and-continue. Some filesystems legitimately
+   * reject directory fsync with EINVAL; a caller may choose to tolerate that, but the wipe/config paths
+   * here do not (correctness over availability on those platforms).
+   */
   function fsyncDir(dir: string): boolean {
     try {
       const dirFd = openSync(dir, "r");
@@ -651,7 +649,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   }
 
   /**
-   * Write `contents` to `filePath` DURABLY and ATOMICALLY (Sol round-8 P1-5 / P2-1). Atomic: a reader sees
+   * Write `contents` to `filePath` DURABLY and ATOMICALLY. Atomic: a reader sees
    * the old file or the complete new one, never a torn write. Durable: it returns `true` ONLY after EVERY
    * step — staging write, file-bytes fsync, atomic rename, AND parent-directory fsync — succeeded, so a
    * caller may treat the write as power-loss-durable strictly on `true`. A bare `writeFileSync`+`rename` is
@@ -692,17 +690,17 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     return fsyncDir(dirname(filePath));
   }
 
-  /** The durable wipe JOURNAL (Sol round-10 P1-4): `.loam-wipe-phase` now carries the wipe PHASE *and* a
-   *  sanitized snapshot of the effective config, committed together in ONE atomic durable write. A SIGKILL
-   *  between "record intent" and "persist config.json" can then no longer either FORGET the wipe or LOSE the
-   *  current admin config — a boot-time resume restores config.json from this snapshot before it clears the
-   *  journal, so config is durable the instant the intent is. */
+  // The durable wipe JOURNAL: `.loam-wipe-phase` carries the wipe PHASE *and* a sanitized snapshot of the
+  // effective config, committed together in ONE atomic durable write. A SIGKILL between "record intent" and
+  // "persist config.json" can then neither FORGET the wipe nor LOSE the current admin config — a boot-time
+  // resume restores config.json from this snapshot before it clears the journal, so config is durable the
+  // instant the intent is.
   // `configInvalid` distinguishes a genuinely ABSENT config snapshot (legacy wipe / no snapshot → proceed)
   // from one that is PRESENT but fails schema validation. `corrupt` covers a journal we cannot read or parse
   // at all (non-ENOENT read error, malformed JSON, a JSON primitive, or unrecognized non-JSON content) — as
   // opposed to an EXACT legacy plain string. In BOTH the `configInvalid` and `corrupt` cases the resume fails
   // closed (locks WITHOUT clearing/rewriting the journal), so if the journal is the only durable copy of the
-  // admin config it is never silently dropped and reverted to defaults (CodeRabbit/Sol round-11/12).
+  // admin config it is never silently dropped and reverted to defaults.
 
   /**
    * Strip the one plaintext bearer secret (`sync.token`) before it is written to `.loam-wipe-phase` or
@@ -746,10 +744,10 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   }
 
   /**
-   * Durably write the wipe journal `{ phase, config? }` (Sol round-10 P1-4). Returns whether a genuinely
-   * DURABLE write succeeded — `true` only after file + parent-directory fsync (fail closed on `false`). The
-   * config snapshot (already sanitized) rides along so a resume can restore config.json from it. `readWipeJournal`
-   * fail-safes any ambiguous content to `{delete-pending}`.
+   * Durably write the wipe journal `{ phase, config? }`. Returns whether a genuinely DURABLE write
+   * succeeded — `true` only after file + parent-directory fsync (fail closed on `false`). The config
+   * snapshot (already sanitized) rides along so a resume can restore config.json from it. `readWipeJournal`
+   * fail-safes any ambiguous content to a `delete-pending` that locks (`corrupt`).
    */
   function writeWipeJournal(phase: WipePhase, config?: LoamConfig): boolean {
     const payload = config === undefined ? { phase } : { phase, config };
@@ -759,9 +757,10 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   /**
    * Read the durable wipe journal. A confirmed `ENOENT` → check the legacy marker (→ `{delete-pending}` or
    * undefined = no wipe). A well-formed `{ phase, config? }` → that (the config is validated against the
-   * schema; an invalid config is DROPPED, never trusted). Legacy pre-round-10 plain-string content
-   * (`key-clear-ready`/anything-else) is still recognized. ANY other state (unreadable / malformed) →
-   * `{delete-pending}` (fail-safe: an ambiguous-but-present journal means a wipe WAS in progress).
+   * schema after the legacy-value repairs; an invalid one sets `configInvalid`, never trusted). The exact
+   * legacy plain strings `delete-pending` / `key-clear-ready` (an older build's journal, no config snapshot)
+   * are still recognized. ANY other state (unreadable / malformed) → `{delete-pending, corrupt}` (fail-safe:
+   * an ambiguous-but-present journal means a wipe WAS in progress, and the resume locks on it).
    */
   function readWipeJournal(): WipeJournal | undefined {
     let raw: string;
@@ -769,14 +768,14 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       raw = readFileSync(wipePhaseMarkerPath, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-        // No NEW journal — but a PRE-round-8 `.loam-wipe-pending` marker may still record an unfinished wipe.
+        // No journal — but an older build's `.loam-wipe-pending` marker may still record an unfinished wipe.
         return migrateLegacyWipeMarkerIfPresent();
       }
       // A non-ENOENT read error (EIO/EACCES): we CANNOT read the journal, so we cannot know whether it holds
-      // the only config copy. CORRUPT/unverifiable → the resume locks without clearing it (P1-3, round-12).
+      // the only config copy. CORRUPT/unverifiable → the resume locks without clearing it.
       return { phase: "delete-pending", corrupt: true };
     }
-    // EXACT legacy plain-string content (pre-round-10, no config snapshot) — the ONLY non-JSON forms accepted.
+    // EXACT legacy plain-string content (an older build's journal, no config snapshot) — the ONLY non-JSON forms accepted.
     const trimmed = raw.trim();
     if (trimmed === "delete-pending") {
       return { phase: "delete-pending" };
@@ -784,14 +783,14 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     if (trimmed === "key-clear-ready") {
       return { phase: "key-clear-ready" };
     }
-    // New JSON journal format (round-10+).
+    // The JSON journal format.
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {
       // Not JSON and not an exact legacy string → unrecognized/malformed. durableWriteFileSync writes the
       // journal atomically (temp+rename), so this is disk corruption, NOT a torn write. CORRUPT → lock, never
-      // treat an ambiguous file as a legacy no-config journal and clear it (P1-3, round-12).
+      // treat an ambiguous file as a legacy no-config journal and clear it.
       return { phase: "delete-pending", corrupt: true };
     }
     // JSON must be a `{ phase, config? }` OBJECT. A primitive (null/number/string/boolean) or an array is not
@@ -801,7 +800,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     }
     const obj = parsed as { phase?: unknown; config?: unknown };
     // Only the two recognized phases are valid. A missing or unrecognized `phase` is a malformed journal →
-    // CORRUPT (lock), NOT silently coerced to `delete-pending` (which would clear it, losing config) — CodeRabbit.
+    // CORRUPT (lock), NOT silently coerced to `delete-pending` (which would clear it, losing config).
     if (obj.phase !== "delete-pending" && obj.phase !== "key-clear-ready") {
       return { phase: "delete-pending", corrupt: true };
     }
@@ -828,8 +827,8 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   }
 
   /**
-   * P1-1 (Sol round-8) upgrade path: when there is NO new `.loam-wipe-phase`, a present (or unreadable)
-   * legacy `.loam-wipe-pending` marker means a pre-round-8 wipe was still unfinished — treat it as
+   * Upgrade path: when there is NO `.loam-wipe-phase`, a present (or unreadable) legacy
+   * `.loam-wipe-pending` marker means an older build's wipe was still unfinished — treat it as
    * `delete-pending` (NEVER `key-clear-ready`: the old marker cannot prove deletion completed) and MIGRATE it
    * durably to the new journal (no config snapshot exists for a legacy wipe). The legacy marker is NOT removed
    * here — both names are cleared together only once the protocol completes (`clearWipePhase`).
@@ -853,12 +852,13 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   }
 
   /** Delete the durable wipe-phase file, returning whether it is now PROVEN gone (removed, or confirmed
-   *  absent). The ONLY places allowed to call this: the launcher's verified `loam-wipe-complete` handoff
-   *  (via main.js, not here) after a `key-clear-ready` wipe, and the desktop/no-hook fallback below where
-   *  the key cannot be rotated in-process anyway. A `false` return means the marker may still be on disk,
+   *  absent). Only a wipe with no device key left to clear may call this: the in-process kill-switch
+   *  branches (no-hook fixed key, ephemeral, plaintext) and the boot-time resume on a node without a
+   *  launcher handoff. After a `key-clear-ready` wipe the launcher removes the file itself, once its
+   *  key-clear is verified (main.js, `loam-wipe-complete`). A `false` return means the marker may still be on disk,
    *  so the caller must NOT treat the wipe as finished (else the next boot re-reads it and re-wipes). */
   function clearWipePhase(): boolean {
-    // Remove BOTH the new phase file AND any migrated-from legacy `.loam-wipe-pending` marker (P1-1): if the
+    // Remove BOTH the phase file AND any migrated-from legacy `.loam-wipe-pending` marker: if the
     // legacy name lingered after a migration, leaving it would make the NEXT boot re-recognise it as a
     // pending wipe and re-wipe the fresh DB in a loop. Both must be proven gone for a clean completion.
     for (const path of [wipePhaseMarkerPath, legacyWipePendingMarkerPath]) {
@@ -873,53 +873,52 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       }
     }
     // fsync the parent DIRECTORY so the unlinks are durable BEFORE any caller mints a new device key or opens
-    // a fresh DB (Sol round-8 P1-5.3): otherwise a power-loss after the unlink but before it reaches stable
+    // a fresh DB: otherwise a power-loss after the unlink but before it reaches stable
     // storage can RESURRECT the phase file as `key-clear-ready`, and the next boot would clear the freshly
     // minted key and strand the new database. A parent-dir fsync failure → report NOT-cleared (fail closed).
     return fsyncDir(dataDir);
   }
 
   /**
-   * Boot-time store open, tolerant of an unopenable DB (F4/SF2, docs/15). A failure here used to reject
-   * `buildApp` outright — and because the DB-encryption mode is persisted config, EVERY later boot hit
-   * the identical failure, permanently locking the operator out of their own node. The host must always
-   * boot (crisis-messaging priority), so this degrades in order instead of throwing straight through:
+   * Boot-time store open, tolerant of an unopenable DB. Because the DB-encryption mode is persisted
+   * config, a boot that simply threw here would hit the identical failure on EVERY later boot,
+   * permanently locking the operator out of their own node. The host must always be recoverable
+   * (crisis-messaging priority), so this degrades in order instead of throwing straight through. Before
+   * step 0 it finishes any interrupted preserve recovery and fits the data dir to the key mode
+   * (`resumePreserveRecovery`, `prepareEphemeralDataDir`):
    *
-   *  0. Consume the start-fresh confirmation marker FIRST, before touching anything else (P2-3, Sol
-   *     round 3). It's a one-shot, human-confirmed authorization for a SPECIFIC unopenable-DB incident,
-   *     so it must be read-and-deleted atomically-in-intent up front, not lazily checked only once
-   *     everything else has already failed — the old code left it on disk untouched whenever the
-   *     normal open (step 1) or the plaintext fallback (step 2) happened to succeed (e.g. the operator
-   *     independently fixed the key), so a stale marker could silently authorize a LATER, UNRELATED
-   *     unopenable-DB failure the operator never actually confirmed. If the delete itself fails, fail
-   *     CLOSED: treat the marker as NOT confirmed for this boot rather than risk honoring it without
-   *     actually consuming it.
-   *  1. Open exactly as configured (keyed if a key was resolved, else plaintext).
-   *  2. On failure, IF a key was resolved, probe whether the SAME file opens with no key. If it does, the
-   *     on-disk DB is genuinely PLAINTEXT while an encrypted mode is configured (P1-4-server, Sol round 8).
-   *     The old code SILENTLY served that plaintext file (a confidentiality downgrade). Now it does NOT:
-   *       - with a start-fresh confirmation (step 0) → DELETE the plaintext DB (not rename-aside — leaving
-   *         readable plaintext would defeat the switch to encryption) and open a FRESH ENCRYPTED database
-   *         (`db_encryption_recovered_fresh`);
+   *  0. Consume the start-fresh confirmation marker FIRST, before any open attempt. It's a one-shot,
+   *     human-confirmed authorization for a SPECIFIC unopenable-DB incident, so it is read-and-deleted up
+   *     front, never lazily checked only once everything else has failed: a marker left on disk after an
+   *     open that happened to succeed (e.g. the operator independently fixed the key) could silently
+   *     authorize a LATER, UNRELATED unopenable-DB failure the operator never confirmed. If the delete
+   *     itself fails, fail CLOSED: treat the marker as NOT confirmed for this boot rather than risk
+   *     honoring it without actually consuming it. The marker carries the operator's intent (`delete` or
+   *     `preserve`, see `startFreshWithIntent`). Step 0b then restores an interrupted key-migration rekey.
+   *  1. Open exactly as configured (keyed if a key was resolved, else plaintext). A keyed open that fails
+   *     because the SQLCipher driver won't load, or that had no database to begin with, stops here
+   *     (`failFatallyIfKeyedOpenCannotRecover`); otherwise the legacy passphrase-key migration is tried.
+   *  2. Still failing with a key resolved: probe whether the SAME file is a PLAINTEXT database (only a file
+   *     with the plaintext SQLite header is opened). If it is, an encrypted mode is configured over a
+   *     plaintext DB, and it is NEVER served (that would be a silent confidentiality downgrade):
+   *       - with a start-fresh confirmation (step 0) → `startFreshWithIntent`;
    *       - without one → report `db_encryption_plaintext_unconverted` and THROW a typed error, LOCKING
    *         (like the unreadable path) so the RN UI can offer the destructive "delete data and start
-   *         encrypted" flow. The plaintext-fallback-to-serving is only reached when NO key was resolved
-   *         (step 1 already WAS the plaintext open). A ciphertext file with the wrong key falls through to
+   *         encrypted" flow. A plaintext open is only ever served when NO key was resolved (step 1
+   *         already WAS the plaintext open). A ciphertext file with the wrong key falls through to
    *         step 3 (marker-gated recovery), not a raw "file is not a database" throw.
    *  3. Still unopenable: the file is genuinely unreadable with what we have (wrong/lost key, or
    *     ciphertext with no key at all). An automatic destructive "start fresh" is NEVER triggered here
-   *     — only an explicit operator confirmation may do that (the design issue with the old behaviour,
-   *     which auto-replaced on every unopenable DB and, on a second occurrence, renamed straight onto
-   *     the fixed `loam.db.unreadable` name, destroying the first preserved copy — P1-3). So:
+   *     — only an explicit operator confirmation may do that. So:
    *       - marker was NOT confirmed (step 0) → report `db_encryption_unreadable` and THROW a typed
    *         {@link DbEncryptionUnreadableError}, failing boot NON-destructively (the original files are
    *         untouched) — `embedded-main.ts` recognizes the `.code` and keeps the host runtime alive
    *         (rather than exiting) specifically so the RN launcher bridge can still receive an
-   *         operator's subsequent start-fresh confirmation and retry boot in-process (P1-1).
-   *       - marker WAS confirmed (step 0) → rename the whole `loam.db`/`-wal`/`-shm` set aside together
-   *         under a UNIQUE, collision-proof suffix (timestamp + random bytes, so two successive
-   *         recoveries each keep their own preserved copy instead of the second overwriting the first),
-   *         open a fresh database, and report `db_encryption_recovered_fresh`.
+   *         operator's subsequent start-fresh confirmation and retry boot in-process.
+   *       - marker WAS confirmed (step 0) → `startFreshWithIntent`: `delete` removes and proves gone the
+   *         whole inventory, `preserve` moves the DB set + media into a unique `.loam-recovery-<suffix>/`
+   *         snapshot (so successive recoveries each keep their own copy); either way a fresh database
+   *         opens and `db_encryption_recovered_fresh` is reported.
    *
    * Every report goes over the same RN bridge `embedded-main.ts` uses for fatal boot errors — and NEVER
    * includes the key itself — so the host UI can surface the right action. The real fix for case 2 is a
@@ -927,7 +926,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
    * this is a boot-time safety net, not a substitute for it.
    */
   function openInitialStore(): LoamStore {
-    // P1 (Sol round-12): FINISH any interrupted preserve recovery FIRST — before consuming the start-fresh
+    // FINISH any interrupted preserve recovery FIRST — before consuming the start-fresh
     // marker or opening the store — so a fresh DB is never opened over a half-moved (incoherent) DB set. A
     // no-op when no recovery is pending; throws (locks) on an unverifiable/incomplete resume.
     resumePreserveRecovery();
@@ -982,7 +981,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     }
 
     /**
-     * Execute a confirmed start-fresh honoring the operator's INTENT (P1-2, Sol round-9) — the SINGLE place
+     * Execute a confirmed start-fresh honoring the operator's INTENT — the SINGLE place
      * every destructive/preservative start-fresh branch (plaintext-under-encrypted AND ciphertext-wrong-key)
      * funnels through, so the full-inventory + durability rules are enforced once:
      *   - `delete` (deliberate destructive mode change): delete + PROVE-gone the FULL inventory — every DB
@@ -990,8 +989,9 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
      *     (dir fsync), fail closed on any survivor/unverifiable path, then open fresh. A renamed-aside copy
      *     would stay recoverable under the retained device secret, so a real, verified, durable delete is
      *     required; "permanently deleted" must mean durable absence, not just current-namespace absence.
-     *   - `preserve` (accidental wrong/lost-key lockout): rename the whole DB set aside under a unique suffix
-     *     for a possible later attempt, then open fresh. NEVER reaches deletion.
+     *   - `preserve` (accidental wrong/lost-key lockout): move the whole DB set + media into a unique
+     *     `.loam-recovery-<suffix>/` snapshot for a possible later attempt, then open fresh. NEVER reaches
+     *     deletion.
      * A failure after the (already consumed) one-shot marker is recast as the recognized
      * `db_encryption_unreadable` recovery so the runtime stays alive and the operator can re-confirm, rather
      * than a generic `boot_failed` process exit.
@@ -1029,8 +1029,8 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       }
 
       // preserve: move the WHOLE snapshot — the DB set AND user media (avatars + attachments) — into a UNIQUE
-      // recovery DIRECTORY, RESUMABLY (P1, Sol round-12). Leaving media in the active namespace let the orphan
-      // reaper delete it; a dedicated `.loam-recovery-<suffix>/` keeps the snapshot coherent and out of the
+      // recovery DIRECTORY, RESUMABLY. Media left in the active namespace would be deleted by the orphan
+      // reaper; a dedicated `.loam-recovery-<suffix>/` keeps the snapshot coherent and out of the
       // reaper's path AND the fresh node's active dirs. Because the moves aren't one atomic op, a durable ANCHOR
       // (`.loam-recovery-state`) is written BEFORE any move, so a crash mid-move is FINISHED by
       // `resumePreserveRecovery` on the next boot (the DB set never ends up split across the two directories).
@@ -1062,7 +1062,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
         if (!clearRecoveryState()) {
           throw new Error("could not durably clear the preserve-recovery anchor");
         }
-        // Open the fresh store BEFORE reporting success (CodeRabbit): a fresh-open failure must surface as the
+        // Open the fresh store BEFORE reporting success: a fresh-open failure must surface as the
         // recoverable `db_encryption_unreadable` (via the catch below), not a false `db_encryption_recovered_fresh`.
         const store = openLoamStore();
         const message =
@@ -1083,10 +1083,10 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       }
     }
 
-    // Step 0 (P2-3): consume the marker up front, unconditionally, before any open attempt — see the
+    // Step 0: consume the marker up front, unconditionally, before any open attempt — see the
     // doc comment above for why this can't wait until both opens have failed.
     let startFreshConfirmed = false;
-    // P1-6 (Sol round 8): the marker carries the operator's INTENT. `delete` = a DELIBERATE destructive mode
+    // The marker carries the operator's INTENT. `delete` = a DELIBERATE destructive mode
     // change (the operator chose "Delete & start fresh" in Settings) → the prior DB must be DELETED and PROVEN
     // gone, not renamed aside (a renamed-aside encrypted DB stays recoverable under the retained device
     // secret, so "deleted" would be a lie). Anything else — `preserve`, a legacy timestamp marker, or an
@@ -1113,37 +1113,36 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       }
     }
 
-    // Step 0b (P1-a, Sol round 6): resume an interrupted rekey-migration, CRASH-ATOMICALLY. The migration
+    // Step 0b: resume an interrupted rekey-migration, CRASH-ATOMICALLY. The migration
     // branch below rekeys the live DB in place (SQLCipher `PRAGMA rekey`), which is NOT crash-atomic — an
     // OS-kill mid-rekey can leave `loam.db` openable under NEITHER the legacy key nor the current one,
-    // destroying pre-round-4 passphrase data. To make that recoverable the migration first COMMITS a
+    // destroying a legacy-derivation passphrase DB. To make that recoverable the migration first COMMITS a
     // single-file, checkpoint-folded snapshot of the intact legacy DB to `loam.db.premigration` (copy →
     // `.tmp` → atomic rename), then rekeys, then deletes it on success. A COMMITTED `loam.db.premigration`
-    // present HERE is AMBIGUOUS (RF6-b): usually an interrupted rekey (restore it), but possibly a
+    // present HERE is AMBIGUOUS: usually an interrupted rekey (restore it), but possibly a
     // migration that already SUCCEEDED whose backup-cleanup `rmSync` threw — leaving the stale snapshot
     // behind through a serving session whose new data now lives in `loam.db`. The two are disambiguated
     // below by PROBING the live DB under the current key: opens → already migrated, discard the stale
     // backup and preserve the live data; doesn't open → genuine interrupt, restore. Because the snapshot
-    // is a SINGLE file, restore is ONE atomic `rename` (RF6-a: after first clearing a FOREIGN `loam.db-wal`/
+    // is a SINGLE file, restore is ONE atomic `rename` (after first clearing a FOREIGN `loam.db-wal`/
     // `-shm`/`-journal` — the rekey runs under DELETE journal mode, so an interrupt leaves a `-journal`
     // rollback journal, NOT a `-wal`/`-shm` pair) — no multi-file race, and it can never install a partial
     // backup. A leftover `.premigration.tmp` (a kill before the commit rename) is NOT a committed backup —
     // discard it, never restore from it (the live DB is still intact; the migration just re-runs).
-    // Best-effort — a restore failure falls through to the normal open/recovery chain below (no worse than
-    // before). The backup holds ciphertext, not the key.
+    // Best-effort — a restore failure falls through to the normal open/recovery chain below. The backup
+    // holds ciphertext, not the key.
     {
       const committedBackup = `${dbPath}.premigration`;
       const backupTmp = `${dbPath}.premigration.tmp`;
       try {
         // Discard any uncommitted/partial artifacts unconditionally: a stray `.tmp` (killed before the
-        // commit rename) and any legacy multi-file `-wal`/`-shm` sidecars a pre-redesign build may have
-        // left. None of these is a committed backup, so none is ever restored.
+        // commit rename) and any multi-file `-wal`/`-shm` sidecars an older build may have left. None of these is a committed backup, so none is ever restored.
         rmSync(backupTmp, { force: true });
         rmSync(`${dbPath}-wal.premigration`, { force: true });
         rmSync(`${dbPath}-shm.premigration`, { force: true });
 
         if (existsSync(committedBackup)) {
-          // RF6-b (Sol round 6): a committed `.premigration` present here is AMBIGUOUS. Normally it is the
+          // A committed `.premigration` present here is AMBIGUOUS. Normally it is the
           // intact legacy snapshot left by an INTERRUPTED rekey (restore is correct) — UNLESS a PRIOR
           // migration actually SUCCEEDED and its post-success `rmSync(committedBackup)` cleanup threw
           // (read-only dir, locked file), leaving the stale backup behind through a whole serving session.
@@ -1181,7 +1180,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
             );
           } else {
             // Genuine interrupted rekey (or a plaintext boot that can't probe): restore the intact single-
-            // file snapshot. RF6-a: the rekey runs under DELETE journal mode (SQLCipher refuses to rekey
+            // file snapshot. The rekey runs under DELETE journal mode (SQLCipher refuses to rekey
             // under WAL), so an interrupted rekey leaves a `loam.db-journal` ROLLBACK journal — NOT a
             // `-wal`/`-shm` pair. Drop `-wal`/`-shm`/`-journal` first so the restored single self-consistent
             // file can never be paired with a FOREIGN hot journal, then a SINGLE atomic rename installs the
@@ -1213,12 +1212,11 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     try {
       const opened = openLoamStore();
       if (keyWasResolved && (options.dbEncryptionMigrateFromKey !== undefined || options.dbEncryptionMode === "passphrase")) {
-        // P1-1 (Sol round 5): the current key opened it directly — either this is already migrated, or
-        // it's a genuinely fresh install that never needed the legacy key at all. Either way, the
-        // launcher offered a legacy key because it hasn't recorded a confirmed migration yet (see
-        // db-encryption.ts's passphrase key-version marker) — tell it to stop, so later boots skip this
-        // extra key entirely. Since 2026-09-04 the ack is ALSO sent for every successful passphrase-mode
-        // open: it is the launcher's "the database opened under this attempt's passphrase" confirmation,
+        // The current key opened it directly — either this is already migrated, or it's a genuinely fresh
+        // install that never needed the legacy key at all. If the launcher offered a legacy key, it hasn't
+        // recorded a confirmed migration yet (see db-encryption.ts's passphrase key-version marker) — tell it
+        // to stop, so later boots skip this extra key entirely. The ack is ALSO sent for every successful
+        // passphrase-mode open: it is the launcher's "the database opened under this attempt's passphrase" confirmation,
         // which is what retires a pre-change install's stored passphrase and records that a passphrase
         // governs the database — never at read time, where a discarded attempt would lose it.
         reportDbKeyMigrated(options.dbKeyRequestId);
@@ -1228,13 +1226,13 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       if (keyWasResolved) {
         failFatallyIfKeyedOpenCannotRecover(openError, dbExistedBeforeOpen);
       }
-      // Fall through — try the legacy-key migration below, then the plaintext fallback (case 2), or
-      // recovery (case 3).
+      // Fall through — try the legacy-key migration below, then the plaintext probe (step 2), or
+      // recovery (step 3).
     }
 
-    // P1-1 (Sol round 5): passphrase key-derivation migration. Round 4 changed the passphrase-mode key
-    // from `SHA256(passphrase)` to `SHA256(passphrase + ':' + deviceSecret)` — an existing passphrase DB
-    // encrypted under the OLD derivation can no longer be opened with `state.dbKey` at all. If the launcher
+    // Passphrase key-derivation migration. The passphrase-mode key changed from `SHA256(passphrase)` to
+    // `SHA256(passphrase + ':' + deviceSecret)` — a passphrase DB encrypted under the legacy derivation
+    // can't be opened with `state.dbKey` at all. If the launcher
     // handed us that legacy derivation too (`dbEncryptionMigrateFromKey`, set only when it hasn't
     // recorded a confirmed migration), try opening with IT; on success, `PRAGMA rekey` the database to
     // the current key in place — every later boot then opens directly under `state.dbKey`, and this boot
@@ -1246,10 +1244,10 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
           driver: options.dbDriver,
         });
 
-        // P1-a (Sol round 6): commit a CRASH-ATOMIC, single-file pre-migration backup BEFORE the in-place
-        // `PRAGMA rekey`. `rekey` rewrites pages under the new key in place and is NOT crash-atomic; an
-        // OS-kill mid-rekey could leave the DB openable under neither key, permanently losing pre-round-4
-        // passphrase data. The backup makes that recoverable — but the backup ITSELF must be crash-atomic,
+        // Commit a CRASH-ATOMIC, single-file pre-migration backup BEFORE the in-place `PRAGMA rekey`.
+        // `rekey` rewrites pages under the new key in place and is NOT crash-atomic; an OS-kill mid-rekey
+        // could leave the DB openable under neither key, permanently losing the legacy-derivation passphrase
+        // data. The backup makes that recoverable — but the backup ITSELF must be crash-atomic,
         // or a kill mid-copy would leave a truncated sidecar that Step 0b then restores OVER the intact live
         // DB. So, crash-atomically:
         //   1. `checkpoint()` (`wal_checkpoint(TRUNCATE)`) folds the WAL into the single `loam.db` file, so
@@ -1290,17 +1288,16 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
           throw rekeyError;
         }
 
-        // P2-2 (Sol round 7): the rekey is the COMMIT point of the migration. From here `loam.db` is a
-        // valid database under the CURRENT key and `legacyStore` is its live, migrated handle — the
-        // migration has SUCCEEDED regardless of whether the post-success sidecar cleanup below works. So
-        // COMMIT FIRST — flip `state.encryptionEnabled`, report the migration to the launcher, and return the
-        // live store — and treat the `.premigration` cleanup as strictly best-effort in its OWN
-        // try/catch. Previously that cleanup sat inside the broad outer migration `try`, so a throwing
-        // `rmSync` (read-only dir, locked file) jumped to the outer `catch` and fell through as if the
-        // legacy key / rekey had FAILED — leaking this already-rekeyed handle and running the plaintext/
-        // recovery chain against a DB that is ALREADY valid under the current key. A stale backup left
-        // behind is harmless: the next boot's Step-0b probe finds the live DB opens under the current key
-        // and discards it (RF6-b). NEVER let a cleanup failure fail this boot.
+        // The rekey is the COMMIT point of the migration. From here `loam.db` is a valid database under the
+        // CURRENT key and `legacyStore` is its live, migrated handle — the migration has SUCCEEDED regardless
+        // of whether the post-success sidecar cleanup below works. So COMMIT FIRST — flip
+        // `state.encryptionEnabled`, report the migration to the launcher, and return the live store — and
+        // keep the `.premigration` cleanup strictly best-effort in its OWN try/catch: a throwing `rmSync`
+        // (read-only dir, locked file) reaching the outer `catch` would fall through as if the legacy key /
+        // rekey had FAILED, leaking this already-rekeyed handle and running the plaintext/recovery chain
+        // against a DB that is ALREADY valid under the current key. A stale backup left behind is harmless:
+        // the next boot's Step-0b probe finds the live DB opens under the current key and discards it. NEVER
+        // let a cleanup failure fail this boot.
         state.encryptionEnabled = true;
         restrictDbFilePermissions();
         const message = "Migrated an existing passphrase-encrypted database to the current key derivation.";
@@ -1308,7 +1305,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
         reportDbKeyMigrated(options.dbKeyRequestId);
 
         // Best-effort post-commit cleanup: drop the pre-migration backup (and any stray tmp) so a later
-        // boot doesn't mistake it for an interrupted migration to resume. RF6-a: also clear any
+        // boot doesn't mistake it for an interrupted migration to resume. Also clear any
         // `loam.db-journal` the DELETE-mode rekey may have left — a successful rekey folds WAL back on and
         // SQLCipher deletes its rollback journal on commit, so this is normally a no-op, but removing it
         // defensively guarantees the freshly-rekeyed single file is never left paired with a foreign
@@ -1336,11 +1333,10 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     }
 
     if (keyWasResolved) {
-      // P1-4-server (Sol round 8): an encrypted mode is configured (a key was resolved) but the keyed open
-      // failed. Probe whether the on-disk DB is actually PLAINTEXT. If it opens with no key, the file is a
-      // genuine plaintext SQLite DB under an encrypted mode — the persisted mode/hint say encrypted. The old
-      // code SILENTLY served that plaintext file (`state.encryptionEnabled=false`, `db_encryption_open_failed`),
-      // a confidentiality downgrade the operator was never told about. Instead LOCK: do NOT serve plaintext.
+      // An encrypted mode is configured (a key was resolved) but the keyed open failed. Probe whether the
+      // on-disk DB is actually PLAINTEXT. If it opens with no key, the file is a genuine plaintext SQLite DB
+      // under an encrypted mode — the persisted mode/hint say encrypted. Serving it would be a silent
+      // confidentiality downgrade, so LOCK instead: never serve plaintext here.
       // Probe only a file that carries the plaintext SQLite header: opening anything else without a key
       // would either fail (ciphertext) or, for a missing path, CREATE a fresh plaintext database.
       let plainStore: LoamStore | undefined;
@@ -1357,11 +1353,10 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
         plainStore.close();
 
         if (startFreshConfirmed) {
-          // P1-2 (Sol round-9): HONOR THE INTENT even here. The old code deleted the plaintext DB regardless
-          // of intent, so a `preserve`/legacy/malformed marker (which defaults to `preserve`) could still
-          // authorize destruction — violating the "preserve never deletes" contract. Route through the single
-          // intent-aware helper: `delete` deletes + proves the FULL inventory (incl. media) gone durably;
-          // `preserve` renames the DB aside. (The plaintext-unconverted recovery button now sends `delete`.)
+          // HONOR THE INTENT even here: a `preserve`/legacy/malformed marker (which defaults to `preserve`)
+          // must never authorize destruction. Route through the single intent-aware helper: `delete` deletes
+          // + proves the FULL inventory (incl. media) gone durably; `preserve` moves the DB set aside. (The
+          // plaintext-unconverted recovery button sends `delete`.)
           return startFreshWithIntent(startFreshIntent);
         }
 
@@ -1388,14 +1383,14 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     }
 
     // The existing DB is genuine ciphertext the current key can't open. Route through the single intent-aware
-    // helper (P1-2/P1-6, Sol round-9): `delete` (deliberate mode change) deletes + proves the FULL inventory
-    // gone durably (a renamed-aside encrypted DB stays recoverable under the retained device secret, so a real
-    // delete is required); `preserve` (accidental lockout) renames the set aside for a later attempt.
+    // helper: `delete` (deliberate mode change) deletes + proves the FULL inventory gone durably (a
+    // moved-aside encrypted DB stays recoverable under the retained device secret, so a real delete is
+    // required); `preserve` (accidental lockout) moves the set aside for a later attempt.
     return startFreshWithIntent(startFreshIntent);
   }
 
   /**
-   * Boot-time wipe-phase resume (P1-1, Sol round 8) — runs BEFORE the real store is opened for serving.
+   * Boot-time wipe-phase resume — runs BEFORE the real store is opened for serving.
    * Routes on the durable PHASE, not mere marker presence:
    *   - `delete-pending`  → an earlier wipe never PROVED its artifacts gone (or was killed mid-deletion): a
    *                         fixed-key wipe, or an ephemeral/plaintext one whose in-process steps threw. RE-RUN
@@ -1421,7 +1416,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     // (re-)advance — so only the config snapshot is read here; the phase is fail-safe either way.
     const { config, configInvalid, corrupt } = journal;
 
-    // Round-11/12 (CodeRabbit/Sol): a journal we cannot trust — either UNREADABLE/unparseable (`corrupt`) or
+    // A journal we cannot trust — either UNREADABLE/unparseable (`corrupt`) or
     // with a PRESENT-but-INVALID config snapshot (`configInvalid`) — must NOT be silently proceeded past. If
     // config.json's live write failed, this journal is the only durable copy of the admin config; clearing or
     // ignoring it would revert the armed kill switch / security profile / retention to defaults. Fail closed:
@@ -1438,7 +1433,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       throw new WipeResumeInProgressError(message);
     }
 
-    // P1-4 (Sol round-10): RESTORE config.json FROM THE JOURNAL SNAPSHOT FIRST — before any deletion or phase
+    // RESTORE config.json FROM THE JOURNAL SNAPSHOT FIRST — before any deletion or phase
     // advance, and before the journal is ever cleared. The live wipe committed the effective config INTO the
     // journal atomically with the intent, so even if its live config.json write never landed (or a crash hit
     // before it), the current admin config (armed kill switch, panic token, security profile, retention…) is
@@ -1463,9 +1458,9 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     const finishInProcess = !hook || !fixedKeyMode;
 
     // Both phases need the artifacts PROVEN gone (and the deletion made DURABLE — dir fsync) before any
-    // device-key clear. For `delete-pending` this is the retry the whole redesign hinges on; for
+    // device-key clear. For `delete-pending` this is the retry the whole phase protocol hinges on; for
     // `key-clear-ready` it's a cheap idempotent re-verify. Durable so the deletions can't be lost by a
-    // power-loss between here and the key clear (CodeRabbit round-10).
+    // power-loss between here and the key clear.
     const deletion = deleteAndVerifyAllWipeArtifactsDurable();
 
     if (!deletion.ok) {
@@ -1474,7 +1469,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       // The downgrade write matters when we ENTERED at `key-clear-ready` (a defensive re-verify that just
       // failed): if the file can't be rewritten to `delete-pending`, it lingers as `key-clear-ready` and the
       // launcher's next-boot gate could clear the key while artifacts survive. We can't force a broken FS to
-      // accept the write, but we surface it loudly and stay locked THIS boot regardless (CodeRabbit CRITICAL).
+      // accept the write, but we surface it loudly and stay locked THIS boot regardless.
       const downgraded = writeWipeJournal("delete-pending", config);
       const remaining = [...deletion.survivors, ...deletion.errors].join(", ");
       const durability = downgraded
@@ -1497,7 +1492,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       // key under a fixed one, none under plaintext). If the journal can't be removed, do NOT open a fresh
       // store: the next boot would re-read `delete-pending` and re-wipe the fresh DB on every launch. Stay
       // locked (fail-closed) so a persistent FS fault surfaces as a stuck node rather than a silent
-      // perpetual-wipe loop (CodeRabbit MAJOR).
+      // perpetual-wipe loop.
       if (!clearWipePhase()) {
         const message =
           "Resuming an interrupted emergency wipe: artifacts are deleted, but the durable wipe-phase file could " +
@@ -1533,7 +1528,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     // Be honest about what actually happened: if the hook threw, the launcher was NOT signaled this run. The
     // durable `key-clear-ready` phase (when it wrote) still lets a later app restart's main.js re-drive the
     // key-clear on its own gate, so recovery converges either way — but the notice must not claim a signal we
-    // didn't send (CodeRabbit MAJOR).
+    // didn't send.
     const phaseNote = phaseReady
       ? "durable `key-clear-ready` phase written"
       : "the `key-clear-ready` phase could NOT be written durably (a later boot re-verifies deletion and retries)";
@@ -1549,19 +1544,18 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   }
 
   /**
-   * The RN launcher's wipe-restart hook (P1-2, docs/15), if installed. `nodejs-project-template/main.js`
+   * The RN launcher's wipe-restart hook, if installed. `nodejs-project-template/main.js`
    * sets this on `globalThis` before requiring the server bundle, same pattern as `__loamReportBootError`
    * and `__loamOnDeviceChat` — absent on every other host (desktop/Pi/CI), where it's simply undefined.
    * Exposed as a getter rather than an eager call so the caller can decide whether it's even worth
-   * writing the durable handoff marker (P1-2b) BEFORE actually signaling.
+   * writing the durable handoff journal BEFORE actually signaling.
    */
   function wipeRestartHook(): (() => void) | undefined {
     return (globalThis as { __loamRequestWipeRestart?: () => void }).__loamRequestWipeRestart;
   }
 
   /**
-   * Persist `config` to `configPath` (P1-3/P1-4, Sol rounds 4/5): the fixed-key kill-switch branch below
-   * deletes the whole DB — and with it, its `config` table — without ever recreating one in-process; the
+   * Persist `config` to `configPath`: the fixed-key kill-switch branch (kill-switch.ts) deletes the whole DB — and with it, its `config` table — without ever recreating one in-process; the
    * fresh DB only exists once the NEXT boot resolves a rotated key. Without this, admin-set values (an
    * armed kill switch, the panic token, the security profile, retention, sync/mesh, feature flags…)
    * would silently revert to config.json/defaults on that next boot, DISARMING the kill switch along
@@ -1573,16 +1567,15 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
    * ever have lived in — and turns sync off when that token was in use (`sanitizeConfigForRestart`).
    *
    * Retries once on failure (a transient fs error shouldn't cost the operator their config) and returns
-   * whether it EVENTUALLY succeeded. FULLY SYNCHRONOUS (P1-4, Sol round-9): the caller must persist config
-   * BEFORE writing the `delete-pending` phase and before any destruction — config.json must be durable ahead
-   * of the phase so that a boot-time resume (which DELETES the DB, and with it the DB `config` table) always
-   * has the CURRENT effective config to fall back to on config.json. Being sync (not async) also keeps the
-   * whole kill-switch critical section await-free, so there is no interleaving window between the in-memory
-   * lockdown and the phase write.
+   * whether it EVENTUALLY succeeded. Callers gate the irreversible next step on `true`: the launcher
+   * handoff (whose key-clear also clears the journal) and the journal clear itself, because until
+   * config.json lands the wipe journal's snapshot is the only durable copy of the current config (a
+   * boot-time resume restores config.json from it). FULLY SYNCHRONOUS, which keeps the kill-switch critical
+   * section free of awaits between the in-memory lockdown and the journal writes.
    */
   function persistConfigForRestart(config: LoamConfig): boolean {
     const contents = JSON.stringify(sanitizeConfigForRestart(config), null, 2);
-    // DURABLE write (P2-1, Sol round-8): staging write + file fsync + atomic rename + parent-dir fsync, via
+    // DURABLE write: staging write + file fsync + atomic rename + parent-dir fsync, via
     // `durableWriteFileSync`. A bare writeFile+rename is atomic but NOT power-loss-durable — it could return
     // "success" while a crash then discards the new bytes or the rename, silently reverting admin settings
     // (the armed kill switch, panic token, security profile…) to config.json/defaults after the wipe deletes

@@ -1,6 +1,5 @@
 // The live-event layer: connected sockets, audience filtering, sealed WebSocket frames, presence, and
-// the `/ws` route with its reflection-safe key-confirmation. Extracted verbatim from app.ts
-// (2026-09-04 split) over the shared AppContext.
+// the `/ws` route with its reflection-safe key-confirmation, registered over the shared AppContext.
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { openTransport, sealTransport } from "@loam/crypto";
 import type { StreamEvent } from "@loam/schema";
@@ -24,7 +23,7 @@ const WS_UNCONFIRMED_CAP = 128;
  * everyone out. A real client confirms in milliseconds, so it never holds more than one or two at once. */
 const WS_UNCONFIRMED_PER_IP_CAP = 8;
 /**
- * Largest client→server WebSocket frame the server will assemble (review 2026-09-04). The only frame a
+ * Largest client→server WebSocket frame the server will assemble. The only frame a
  * client ever legitimately sends is the ~200-byte sealed key-confirmation proof (confirmed sockets are
  * ignored, plaintext sockets register no listener) — but `ws` still buffers every inbound frame in full
  * before emitting it, and its default cap is 100 MiB, so an admitted socket could push several of those
@@ -32,7 +31,7 @@ const WS_UNCONFIRMED_PER_IP_CAP = 8;
  */
 export const WS_MAX_INBOUND_FRAME_BYTES = 16 * 1024;
 /**
- * Heartbeat period for every admitted socket (pre-release review 2026-09-25). A LOAM client never sends
+ * Heartbeat period for every admitted socket. A LOAM client never sends
  * after its key confirmation, so a connection whose peer silently vanished (phone left the hotspot, AP
  * dropped the flow) never errors on its side: it would show "live" forever and miss every event. The
  * server sends a content-free `{ type: "ping" }` on admission and then every interval; the client's

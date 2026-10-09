@@ -63,7 +63,7 @@ internal class MeshWifiAwareController(
   // ONE lock serializes the whole lifecycle — `start`, the async `onAttached` (generation check AND the
   // session/socket/publish/subscribe setup, atomically), `updateAdvert`, and `stop`'s teardown — so
   // `stop()` can't interleave between `onAttached`'s guard check and its resource publication and resurrect
-  // a session/socket/executor after teardown (P1). The generation is the secondary guard inside the lock.
+  // a session/socket/executor after teardown. The generation is the secondary guard inside the lock.
   private val lifecycleLock = Any()
   @Volatile private var generation = 0
   @Volatile private var starting = false
@@ -72,9 +72,9 @@ internal class MeshWifiAwareController(
   private var publishing = false
   private var pendingAdvert: MeshAdvert? = null
   // Same for subscribe: without it a config-fail / termination would leave discovery permanently dead
-  // (nothing re-subscribes) — the recurring start() re-subscribes when both are clear (P1).
+  // (nothing re-subscribes) — the recurring start() re-subscribes when both are clear.
   private var subscribing = false
-  // Cross-version parent-session-death recovery (P1): API 33+ has `AttachCallback.onAwareSessionTerminated`,
+  // Cross-version parent-session-death recovery: API 33+ has `AttachCallback.onAwareSessionTerminated`,
   // but on API 29-32 AOSP's publish()/subscribe() just log-and-return on a dead parent (no
   // `onSessionConfigFailed`), so a counter-based fallback can't work. The documented solution on all
   // versions is to listen for `ACTION_WIFI_AWARE_STATE_CHANGED`: when Aware availability changes under a
@@ -84,7 +84,7 @@ internal class MeshWifiAwareController(
   private val executor = Executors.newCachedThreadPool()
   // Hard cap on concurrent inbound transfers. `ServerSocket` accepts on local interfaces, so without this
   // a flood of connections would each spawn a receive thread (unbounded) before any server-side sealed
-  // validation runs (P1-5). Excess connections are closed immediately — before a thread is dispatched.
+  // validation runs. Excess connections are closed immediately — before a thread is dispatched.
   private val activeReceives = java.util.concurrent.atomic.AtomicInteger(0)
   private var awareManager: WifiAwareManager? = null
   private var session: WifiAwareSession? = null
@@ -95,7 +95,7 @@ internal class MeshWifiAwareController(
 
   // Opaque peerId → the live PeerHandle we can open a data path to. peerId is a session-local string so
   // the JS bridge never touches a PeerHandle (not serialisable) or a MAC (privacy). Bounded LRU so a churn
-  // of transient matches can't grow it until transport shutdown (P2); guarded by `peersLock`.
+  // of transient matches can't grow it until transport shutdown; guarded by `peersLock`.
   private val peers = object : LinkedHashMap<String, PeerHandle>(16, 0.75f, true) {
     override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, PeerHandle>): Boolean =
       size > MeshConstants.MAX_TRACKED_PEERS
@@ -111,9 +111,9 @@ internal class MeshWifiAwareController(
   /** Attach, start the responder socket, then publish + subscribe. Best-effort; errors surface via the
    * listener and leave the module in a BLE-only state. */
   fun start(advert: MeshAdvert) = synchronized(lifecycleLock) {
-    // Already attached → refresh the advert (P1-2; a re-attach every 30s would leak
+    // Already attached → refresh the advert (a re-attach every 30s would leak
     // sessions/sockets/threads) AND re-subscribe if discovery died, so a failed/terminated subscribe
-    // self-heals on the recurring tick instead of leaving this node permanently unable to discover peers (P1).
+    // self-heals on the recurring tick instead of leaving this node permanently unable to discover peers.
     val active = session
     if (active != null) {
       updateAdvert(advert)
@@ -129,7 +129,7 @@ internal class MeshWifiAwareController(
       return
     }
     awareManager = manager
-    // Listen for Aware availability changes so a dead PARENT session is detected on every API level (P1).
+    // Listen for Aware availability changes so a dead PARENT session is detected on every API level.
     registerStateReceiver()
     val gen = generation
     starting = true
@@ -138,7 +138,7 @@ internal class MeshWifiAwareController(
         override fun onAttached(newSession: WifiAwareSession) {
           // Hold the SAME lifecycle lock across the generation check AND the whole resource setup, so a
           // stop() can't slip in between (advancing the generation + shutting the executor down) and leave
-          // this callback publishing a session/socket onto a torn-down controller (P1). stop() either ran
+          // this callback publishing a session/socket onto a torn-down controller. stop() either ran
           // before us (generation advanced → discard) or waits behind us (tears our resources back down).
           synchronized(lifecycleLock) {
             if (gen != generation) {
@@ -167,7 +167,7 @@ internal class MeshWifiAwareController(
 
         // The PARENT Aware session itself terminated (API 33+). Because `session` would otherwise stay
         // non-null, every later start() would keep refreshing discovery on a DEAD attach. Reset for a fresh
-        // reattach on the next tick — WITHOUT shutting the executor down (P1). (Pre-33 has no such callback;
+        // reattach on the next tick — WITHOUT shutting the executor down. (Pre-33 has no such callback;
         // the ACTION_WIFI_AWARE_STATE_CHANGED receiver is the cross-version path.)
         override fun onAwareSessionTerminated() {
           synchronized(lifecycleLock) {
@@ -189,7 +189,7 @@ internal class MeshWifiAwareController(
   /** Update the advertised have-mail flag. Prefer updating the ACTIVE publish IN PLACE
    * (`PublishDiscoverySession.updatePublish`, API 26+) — closing and asynchronously re-publishing lets two
    * overlapping refreshes each create a session where only the last `onPublishStarted` handle is tracked,
-   * leaking the others (P1). Only publish afresh if there is no live publish yet. */
+   * leaking the others. Only publish afresh if there is no live publish yet. */
   fun updateAdvert(advert: MeshAdvert): Unit = synchronized(lifecycleLock) {
     val existing = publishSession
     if (existing != null) {
@@ -198,7 +198,7 @@ internal class MeshWifiAwareController(
     }
     if (publishing) {
       // A first publish() is in flight but onPublishStarted hasn't returned the handle yet — do NOT
-      // publish again (that would orphan sessions, P1). Stash the latest advert; onPublishStarted applies
+      // publish again (that would orphan sessions). Stash the latest advert; onPublishStarted applies
       // it in place once the handle arrives.
       pendingAdvert = advert
       return
@@ -216,7 +216,7 @@ internal class MeshWifiAwareController(
   private fun publish(session: WifiAwareSession, advert: MeshAdvert) {
     publishing = true
     // Bind this publish attempt to the current lifecycle generation, so its async callbacks (which may
-    // arrive after a stop()/re-start) can tell whether they're still current (P1).
+    // arrive after a stop()/re-start) can tell whether they're still current.
     val gen = generation
     session.publish(buildPublishConfig(advert), object : DiscoverySessionCallback() {
       override fun onPublishStarted(discoverySession: android.net.wifi.aware.PublishDiscoverySession) {
@@ -232,7 +232,7 @@ internal class MeshWifiAwareController(
           }
           publishing = false
           publishSession = discoverySession
-          // Apply any advert refresh that arrived while this first publish was in flight (P1).
+          // Apply any advert refresh that arrived while this first publish was in flight.
           pendingAdvert?.let { discoverySession.updatePublish(buildPublishConfig(it)) }
           pendingAdvert = null
         }
@@ -244,9 +244,9 @@ internal class MeshWifiAwareController(
             return
           }
           // The initial publish FAILED. Clear `publishing` so a later updateAdvert can retry, instead of
-          // wedging forever (every refresh only overwriting pendingAdvert, never re-publishing) (P1). Also
+          // wedging forever (every refresh only overwriting pendingAdvert, never re-publishing). Also
           // drop the stashed pendingAdvert: it's now stale, and a fresh retry publishes the CURRENT advert —
-          // otherwise a later success could apply this old value and briefly revert the payload (P2).
+          // otherwise a later success could apply this old value and briefly revert the payload.
           publishing = false
           pendingAdvert = null
           listener.onError("Wi-Fi Aware publish failed")
@@ -257,7 +257,7 @@ internal class MeshWifiAwareController(
         synchronized(lifecycleLock) {
           // The publish session ended on its own — drop the stale handle + pending advert + clear
           // `publishing` so the next updateAdvert re-publishes the current advert rather than calling
-          // updatePublish on a dead session or replaying a stale pending value (P1/P2).
+          // updatePublish on a dead session or replaying a stale pending value.
           if (gen == generation) {
             publishSession = null
             publishing = false
@@ -317,7 +317,7 @@ internal class MeshWifiAwareController(
   }
 
   /** Re-subscribe if discovery isn't live — called from the recurring start() so a failed/terminated
-   * subscribe self-heals on the next 30s tick (P1). Caller holds the lifecycle lock. */
+   * subscribe self-heals on the next 30s tick. Caller holds the lifecycle lock. */
   private fun ensureSubscribed(session: WifiAwareSession) {
     if (subscribeSession == null && !subscribing) {
       subscribe(session)
@@ -352,7 +352,7 @@ internal class MeshWifiAwareController(
             return
           }
           // Discovery couldn't start. Clear `subscribing` so the recurring start()'s ensureSubscribed
-          // re-subscribes — otherwise this node would never discover peers (P1).
+          // re-subscribes — otherwise this node would never discover peers.
           subscribing = false
           listener.onError("Wi-Fi Aware subscribe failed")
         }
@@ -360,7 +360,7 @@ internal class MeshWifiAwareController(
 
       override fun onSessionTerminated() {
         synchronized(lifecycleLock) {
-          // The subscribe session ended — drop the dead handle so the next start() re-subscribes (P1).
+          // The subscribe session ended — drop the dead handle so the next start() re-subscribes.
           if (gen == generation) {
             subscribeSession = null
             subscribing = false
@@ -404,7 +404,7 @@ internal class MeshWifiAwareController(
    */
   private fun startResponderSocket() {
     try {
-      // NOTE (P1-5 + port-exchange, DEVICE-ITERATION): the bulk-transfer data path is a marked scaffold, not
+      // NOTE (responder binding + port exchange, DEVICE-ITERATION): the bulk-transfer data path is a marked scaffold, not
       // yet a working end-to-end link. Two pieces are deferred together because neither can be built or
       // verified without two Wi-Fi Aware radios (docs/17): (1) `ServerSocket(0)` binds all local interfaces —
       // on a device also running the hotspot a LAN client that found the port could connect here; binding to
@@ -424,7 +424,7 @@ internal class MeshWifiAwareController(
           try {
             val client = socket.accept()
             // Hard admission cap: close excess connections immediately (before dispatching a thread) so a
-            // flood can't spawn unbounded receive threads ahead of server-side validation (P1-5).
+            // flood can't spawn unbounded receive threads ahead of server-side validation.
             if (activeReceives.get() >= MeshConstants.MAX_CONCURRENT_TRANSFERS) {
               try {
                 client.close()
@@ -436,7 +436,7 @@ internal class MeshWifiAwareController(
                 executor.execute { receiveOne(client) }
               } catch (rejected: RejectedExecutionException) {
                 // stop() shut the executor down between accept and dispatch — undo the reservation and
-                // close the client rather than leak an ever-open connection + a stuck counter (P1).
+                // close the client rather than leak an ever-open connection + a stuck counter.
                 activeReceives.decrementAndGet()
                 try {
                   client.close()
@@ -462,7 +462,7 @@ internal class MeshWifiAwareController(
   private fun receiveOne(client: Socket) {
     // Absolute deadline: `soTimeout` only bounds a single blocked read, so a peer trickling one byte per
     // sub-timeout window could hold the connection indefinitely. A watchdog closes the socket after the
-    // whole-transfer budget regardless, capping how long any one slot is held (P1-5).
+    // whole-transfer budget regardless, capping how long any one slot is held.
     val watchdog = executor.let {
       Thread {
         try {
@@ -497,10 +497,11 @@ internal class MeshWifiAwareController(
    * responder and write the framed blob. Blocks (on the caller's background thread) until the transfer
    * completes or times out. Returns normally on success, throws on failure.
    *
-   * ⚠️ The peer's listen port must be learned out-of-band; here we assume a convention (the responder's
-   * [WifiAwareNetworkInfo] exposes an IPv6 peer address, and both sides use a fixed derived port). A
-   * real implementation exchanges the port over the discovery message channel first — left as a clearly
-   * marked step because it can't be verified without two radios (docs/17).
+   * ⚠️ The peer's listen port must be learned out-of-band. Today [writeOverNetwork] takes the IPv6 peer
+   * address and port from [WifiAwareNetworkInfo], falling back to THIS node's own `listenPort` when the
+   * port is 0 (only correct if both responders happened to bind the same port). A real implementation
+   * exchanges the port over the discovery message channel first — left as a clearly marked step because
+   * it can't be verified without two radios (docs/17).
    */
   fun sendBlob(peerId: String, bytes: ByteArray) {
     val manager = awareManager ?: throw IOException("Wi-Fi Aware not attached")
@@ -540,7 +541,7 @@ internal class MeshWifiAwareController(
           }
         } catch (rejected: RejectedExecutionException) {
           // stop() shut the executor down while the data path was coming up — fail fast instead of letting
-          // the latch below block until the full transfer timeout (P1).
+          // the latch below block until the full transfer timeout.
           failure = IOException("Wi-Fi Aware transport stopped")
           done.countDown()
         }
@@ -568,8 +569,8 @@ internal class MeshWifiAwareController(
 
   private fun writeOverNetwork(network: Network, info: WifiAwareNetworkInfo, bytes: ByteArray) {
     val peerAddress = info.peerIpv6Addr ?: throw IOException("No peer IPv6 address")
-    // See the doc-comment caveat: the port must really be exchanged over the discovery channel. We use
-    // the responder's advertised port convention here.
+    // See the doc-comment caveat: the port must really be exchanged over the discovery channel. Until then,
+    // use the port the data path reports, else fall back to our own responder's port.
     val port = if (info.port != 0) info.port else listenPort
     val socket = network.socketFactory.createSocket()
     try {
@@ -591,8 +592,7 @@ internal class MeshWifiAwareController(
   /** Recover from a dead PARENT Wi-Fi Aware session (its `onAwareSessionTerminated` on API 33+, or the
    * cross-version `ACTION_WIFI_AWARE_STATE_CHANGED` receiver). Unlike [stop], this does NOT shut the executor
    * down — the controller stays alive and simply reattaches on the next `start()` tick (session is cleared to
-   * null,
-   * so `start()` takes the fresh-attach path) (P1). */
+   * null, so `start()` takes the fresh-attach path). */
   private fun resetForReattach(): Unit = synchronized(lifecycleLock) {
     teardown(shutdownExecutor = false)
   }
@@ -606,7 +606,7 @@ internal class MeshWifiAwareController(
     publishing = false
     subscribing = false
     pendingAdvert = null
-    // Close each resource INDEPENDENTLY (P2): a single shared try means one failing close would skip the
+    // Close each resource INDEPENDENTLY: a single shared try means one failing close would skip the
     // rest — critically the responder socket — while all references are nulled, so during a reattach (the
     // executor stays alive) the orphaned accept loop keeps running while a new responder is created.
     closeQuietly("publish") { publishSession?.close() }

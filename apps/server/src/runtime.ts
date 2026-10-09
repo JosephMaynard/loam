@@ -1,5 +1,5 @@
 // The shared view the extracted server subsystems (llm.ts, mesh.ts, sync.ts) get of the app's live
-// state and domain helpers (2026-09-04 split). `buildApp` builds one of these with GETTERS over its
+// state and domain helpers. `buildApp` builds one of these with GETTERS over its
 // mutable bindings (`appConfig`, `data`, `store`, the wipe counters) so a kill-switch reopen or a config
 // reload is observed immediately, plus the hoisted helper functions the subsystems call back into.
 import type { FastifyBaseLogger } from "fastify";
@@ -33,7 +33,7 @@ export type Runtime = {
   /** Message ids deliberately deleted on this node — never re-imported. For the current boot it also holds
    *  the quarantined message ids (in memory only), so every tombstone refusal covers them. */
   tombstones: Set<string>;
-  /** Channel ids imported from a sync peer (C1 provenance). */
+  /** Channel ids imported from a sync peer (provenance for the metadata re-sync). */
   syncedChannelIds: Set<string>;
   broadcast(event: ClientEvent): void;
   sendEventToUsers(audience: Set<string>, event: ClientEvent): void;

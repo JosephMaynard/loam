@@ -31,7 +31,7 @@ function reactNativeBridge(): ReactNativeBridge | undefined {
  *   the QR carries the host's transport public key out-of-band while the displayed text stays plain.
  *   Defaults to `joinUrl` when omitted.
  * @param qrSuppressed - Withhold the QR and explain why: the node's advertised key contradicts the key
- *   this client joined with, so any key the QR could carry is suspect (pre-release review 2026-09-25).
+ *   this client joined with, so any key the QR could carry is suspect.
  */
 export function InviteControl({
   joinUrl,

@@ -20,7 +20,7 @@ function isSafeLink(href: string): boolean {
 }
 
 /**
- * Strip a join-QR host-key fragment (`#k=…`) from a message link (pre-release review 2026-09-25). A `#k=`
+ * Strip a join-QR host-key fragment (`#k=…`) from a message link. A `#k=`
  * is only meaningful when it arrives out-of-band from a physically scanned QR; a link carrying one in a
  * message would otherwise let any member hand others a key to pin — for this node's origin that's a
  * remote lockout (or, with an on-path position, a key substitution). The link still works; it just no
@@ -103,7 +103,7 @@ const markdownCache = new Map<string, string>();
 const MARKDOWN_CACHE_LIMIT = 500;
 
 /** Drop every cached rendering — part of a device/node wipe, so rendered message bodies don't linger in
- * memory after the on-disk copy is gone (review 2026-09-04). */
+ * memory after the on-disk copy is gone. */
 export function clearMarkdownCache(): void {
   markdownCache.clear();
 }

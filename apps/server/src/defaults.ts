@@ -1,4 +1,4 @@
-// Seed data and small tunables shared across the server. Extracted from app.ts (2026-09-04 split).
+// Seed data and small tunables shared across the server.
 import type { Channel } from "@loam/schema";
 
 export const sessionCookieName = "loam_session";

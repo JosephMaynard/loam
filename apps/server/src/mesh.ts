@@ -1,6 +1,5 @@
 // The opportunistic-mesh sealed-mail layer (docs/16): per-user mesh identities and contacts, sealing,
-// deliver-or-relay, and the expiry reaper. Extracted verbatim from app.ts (2026-09-04 split) behind the
-// shared `Runtime` view.
+// deliver-or-relay, and the expiry reaper, behind the shared `Runtime` view.
 import { createHash } from "node:crypto";
 
 import { type MeshIdentity, createMeshIdentity, currentEpoch, isCanonicalSealedBlob, mailboxTag, meshIdFromSignPublic, openMailbox, sealMailbox, verifyKxBinding } from "@loam/crypto";
@@ -55,9 +54,9 @@ export function createMeshLayer(rt: Runtime) {
   /**
    * Whether `user` is a LOCAL person who may hold a mesh identity on this node: a non-banned human that
    * this node did not import from a sync peer, and not a mesh-sender display record (`mesh.*`). Minting
-   * for anyone else (review 2026-09-25 #3) gave every peer-imported user a secret keypair HERE, overwrote
-   * the key they published at home (then re-exported that forgery), and let a peer that pushes thousands
-   * of users grow `mesh_identities` — and the per-message decrypt loop — without bound.
+   * for anyone else would give every peer-imported user a secret keypair HERE, overwrite the key they
+   * published at home (then re-export that forgery), and let a peer that pushes thousands of users grow
+   * `mesh_identities` — and the per-message decrypt loop — without bound.
    */
   function isLocalMeshUser(user: { id: string; type: string; banned?: boolean }): boolean {
     return user.type === "human" && !user.banned && !user.id.startsWith("mesh.") && !rt.store.isUserSynced(user.id);
@@ -67,8 +66,7 @@ export function createMeshLayer(rt: Runtime) {
   const LEGACY_SYNCED_USERS_BACKFILL_KEY = "migration.syncedUsersBackfill.v1";
 
   /**
-   * One-time repair of a database written before sync provenance existed (v0.4.0 and earlier; review
-   * 2026-09-25 follow-up). That build imported EVERY user a peer's payload listed, recorded none of them in
+   * One-time repair of a database written before sync provenance existed (v0.4.0 and earlier). That build imported EVERY user a peer's payload listed, recorded none of them in
    * `synced_users`, and minted a mesh keypair for every human — peer-imported users and `mesh.*` sender
    * records included — publishing it as their `identityKey`. Without provenance, `isLocalMeshUser` can't
    * tell those users from local ones, so the boot purge in {@link loadMeshIdentities} kept the forged keys.
@@ -340,8 +338,7 @@ export function createMeshLayer(rt: Runtime) {
    * to a recipient (metadata-unlinkability; docs/16 §2). A sender computes the same tag from the
    * contact's `mailboxToken`, which it obtained out-of-band with the rest of the card.
    *
-   * The window starts at now − MESH_TTL_MAX_MS, NOT now − this node's own `mesh.ttlMs` (review 2026-09-25
-   * #5): the lifetime is the SENDER's choice (anything up to the schema max), so a recipient configured
+   * The window starts at now − MESH_TTL_MAX_MS, NOT now − this node's own `mesh.ttlMs`: the lifetime is the SENDER's choice (anything up to the schema max), so a recipient configured
    * with a shorter TTL must still recognise mail a default-TTL sender sealed days ago. */
   function localTagsForWindow(identity: MeshIdentity, now: number): Set<string> {
     const nowEpoch = currentEpoch(now, MESH_EPOCH_WINDOW_MS);
@@ -462,7 +459,7 @@ export function createMeshLayer(rt: Runtime) {
       // Sealed mail lands as a DM, so it obeys the node's DM policy like every other DM
       // (`createMessage` refuses DMs when the flag is off). With DMs disabled the mail is ours but
       // undeliverable: drop it — and tombstone it so it isn't carried/re-offered forever — rather than
-      // materialise a DM the operator switched off (review 2026-09-04, mirrors the shadow-ban drop).
+      // materialise a DM the operator switched off (mirrors the shadow-ban drop).
       if (rt.appConfig.features.enableDMs) {
         deliverSealedAsDm(recipientUserId, opened.senderMeshId, opened.plaintext, now);
       } else {
@@ -480,7 +477,7 @@ export function createMeshLayer(rt: Runtime) {
   /**
    * Every check {@link acceptSealedFromPeer} makes on a sealed offer's OUTER fields alone — the fields a sync
    * digest advertises — so a puller can skip exactly the offers acceptance would refuse without downloading
-   * them (review 2026-09-25 #1). One predicate for both, so they can't drift apart again.
+   * them. One predicate for both, so they can't drift apart.
    */
   function sealedOfferAdmissible(offer: Pick<SealedMessage, "id" | "ttlExpiresAt" | "hopLimit">, now: number): boolean {
     // A peer may not name a record inside the replay-key namespace, and a sealed offer must carry a sealed id.

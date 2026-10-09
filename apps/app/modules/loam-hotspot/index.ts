@@ -40,7 +40,7 @@ export async function startHotspot(): Promise<HotspotCredentials> {
 }
 
 /**
- * Subscribe to the system stopping the hotspot out from under us (review 2026-09-04) — see
+ * Subscribe to the system stopping the hotspot out from under us — see
  * `LoamHotspotEvents.onHotspotStopped`. Returns an unsubscribe; a no-op subscription when unsupported.
  */
 export function addHotspotStoppedListener(handler: () => void): () => void {

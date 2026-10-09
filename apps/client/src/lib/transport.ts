@@ -26,8 +26,8 @@ const HOST_KEY_STORAGE_PREFIX = "loam.transportHostKey.";
  * optional configured server origin override. The single place that knows how to reach the server —
  * used for both `fetch` calls and non-fetch resource URLs (`<img src>`, `<a href>`). During a wipe it
  * falls back to the captured origin snapshot: a sibling tab may have already removed the shared
- * `SERVER_URL_KEY`, and the initiating tab's revocation calls must still reach the RIGHT origin (docs/20
- * round-5 H1) — a wrong-origin logout/`session/end` would be useless or redirected. */
+ * `SERVER_URL_KEY`, and the initiating tab's revocation calls must still reach the RIGHT origin (docs/20)
+ * — a wrong-origin logout/`session/end` would be useless or redirected. */
 export function apiUrl(path: string): string {
   const base = wipeServerUrlSnapshot ?? localStorage.getItem(SERVER_URL_KEY) ?? "";
   return `${base}${path}`;
@@ -44,7 +44,7 @@ export class TransportNeedsQrError extends Error {
    * Why a scan is needed: `"missing"` — no host key at all; `"changed"` — the key this client had pinned
    * (a cached QR key) no longer matches the key the node actually holds (the node rotated it, e.g. an
    * Emergency Reset, or the cached poster is stale), so the cache was dropped and a fresh scan is the
-   * only way back (review 2026-09-04).
+   * only way back.
    */
   readonly reason: "missing" | "changed";
 
@@ -89,18 +89,18 @@ let session: Session | undefined;
 const IDENTITY_TOKEN_STORAGE_PREFIX = "loam.identityToken.";
 
 /** An in-memory snapshot of the identity token, captured before a wipe clears it from localStorage
- * (docs/20 #3): the wipe erases local state FIRST, but the server-side revocation still needs the token to
+ * (docs/20): the wipe erases local state FIRST, but the server-side revocation still needs the token to
  * re-establish + retry if the bound session died. `storedIdentityToken()` falls back to this during the
  * wipe, and `storeIdentityToken` is gated by `mintSuppressed` so the snapshot can't be written back. */
 let wipeTokenSnapshot: string | undefined;
 /** In-memory snapshot of the configured server origin, captured alongside the token so the wipe's server
  * revocation reaches the right origin even if a sibling tab has already removed `SERVER_URL_KEY` from the
- * shared localStorage (docs/20 round-5 H1). `apiUrl` prefers it while set. */
+ * shared localStorage (docs/20). `apiUrl` prefers it while set. */
 let wipeServerUrlSnapshot: string | undefined;
 
 /** Capture the token AND the server-origin override into in-memory wipe snapshots BEFORE local erasure (or
  * any cross-tab announce) clears them from shared localStorage, so `wipeServerCredentials`'s stale-session
- * recovery can still present the token and reach the right origin (docs/20 #3 H1 / round-5 H1). MUST be
+ * recovery can still present the token and reach the right origin (docs/20). MUST be
  * called before `announceWipe()` — a sibling tab receiving the announce clears both from localStorage. */
 export function snapshotForWipe(): void {
   wipeTokenSnapshot = localStorage.getItem(IDENTITY_TOKEN_STORAGE_PREFIX + keyStorageOrigin()) ?? undefined;
@@ -143,14 +143,14 @@ function sessionCredentials(): RequestCredentials {
 let hostKeyMismatch = false;
 
 /**
- * Set for the duration of a device wipe (docs/20 H3): while true, `resumeAttempt` REFUSES to mint a new
+ * Set for the duration of a device wipe (docs/20): while true, `resumeAttempt` REFUSES to mint a new
  * identity (it throws instead). The wipe revokes the existing identity and clears local state; any
  * re-handshake it triggers along the way (revoking a token over a revived session, or the cookie
  * `session/end` fallback) must NOT silently mint a fresh orphan identity to replace the one being wiped.
  */
 let mintSuppressed = false;
 
-/** Enter/leave the wipe window where new-identity minting is suppressed (docs/20 H3). */
+/** Enter/leave the wipe window where new-identity minting is suppressed (docs/20). */
 export function setMintSuppressed(value: boolean): void {
   mintSuppressed = value;
 }
@@ -201,7 +201,7 @@ function consumeHashKey(): string | undefined {
   window.history.replaceState(window.history.state, "", url.toString());
 
   // A `#k=` can arrive from ANY same-origin navigation, not only a scanned QR — a link someone posted in a
-  // channel, say (pre-release review 2026-09-25). So it only ever ESTABLISHES a pin silently; it never
+  // channel, say. So it only ever ESTABLISHES a pin silently; it never
   // silently REPLACES a different one. Replacing it would let any member lock others out (their next
   // handshake mismatches the node's real key → a pin-broken rescan gate), or — with an on-path position —
   // swap in an attacker's key. A different key is parked as a pending change: it is dropped silently if the
@@ -221,7 +221,7 @@ function consumeHashKey(): string | undefined {
 /**
  * Pin `key` as this origin's trusted host key and clear any "pin broken" marker left by a mismatching
  * handshake (see `handshake`). Kept in memory as well as localStorage so a storage failure (quota, blocked
- * site data) can't downgrade a just-scanned join to an unpinned one for this load (review 2026-09-04).
+ * site data) can't downgrade a just-scanned join to an unpinned one for this load.
  */
 function adoptHostKey(key: string): void {
   memoryHostKey = key;
@@ -243,7 +243,7 @@ let pendingHostKey: string | undefined;
 /** The host key the node itself reported in a handshake that contradicted the pin (this load, memory only).
  * A pending `#k=` may replace the pin only if it equals this key: a link whose key the node doesn't hold can
  * only be someone else's key (a planted link or QR sticker), and pinning it would lock the user out — or,
- * for an on-path attacker, hand them the session (pre-release review 2026-09-25). */
+ * for an on-path attacker, hand them the session. */
 let observedHostKey: string | undefined;
 
 /**
@@ -296,8 +296,8 @@ export function rejectPendingHostKey(): void {
 let memoryHostKey: string | undefined;
 let memoryPinBroken = false;
 
-/** Where "the node's handshake reported a different key than this client's pin" is durably recorded
- * (review 2026-09-04). While set, the pinned key is neither trusted for a handshake nor replaced by the
+/** Where "the node's handshake reported a different key than this client's pin" is durably recorded.
+ * While set, the pinned key is neither trusted for a handshake nor replaced by the
  * node's advertised key: the client gates on a fresh `#k=` scan, the only channel that can legitimately
  * re-establish trust. Cleared when a key is (re)adopted — a first `#k=` for this origin, the same key
  * rescanned, or an explicitly accepted key change (`adoptHostKey`). */
@@ -315,7 +315,7 @@ function readStorage(key: string): string | undefined {
 export function getCachedHostPublicKey(): string | undefined {
   // The in-memory copy wins: it is set only by a scan on THIS load, so it is never staler than the stored
   // copy — and if the storage write failed, the stored copy may be a PREVIOUS key that must not outrank
-  // the one just scanned (it would break the new pin as "changed"). (CodeRabbit, PR #122)
+  // the one just scanned (it would break the new pin as "changed").
   return memoryHostKey ?? readStorage(HOST_KEY_STORAGE_PREFIX + keyStorageOrigin());
 }
 
@@ -336,7 +336,7 @@ function markHostKeyPinBroken(): void {
 /**
  * Forget the pinned host public key (and any broken-pin marker) for the current origin. Used ONLY by a
  * wipe: a node wipe rotates the host's transport key, a device wipe discards this browser's relationship
- * with the node, and either way the verified rejoin needs a fresh `#k=` scan (review 2026-09-04). A
+ * with the node, and either way the verified rejoin needs a fresh `#k=` scan. A
  * MISMATCHING handshake deliberately does NOT call this — dropping the pin there would let an on-path
  * attacker convert a QR-pinned client into an unpinned one that then trusts the advertised key.
  */
@@ -385,7 +385,7 @@ export function joinQrUrl(joinUrl: string, transportPublicKey?: string): string 
 
 /**
  * The host key to embed in a join QR THIS client shows to others (invite modal, Settings), and whether the
- * QR must be withheld (pre-release review 2026-09-25). Only a key this client itself verified out-of-band —
+ * QR must be withheld. Only a key this client itself verified out-of-band —
  * the live session's key when it came from a scanned QR — may be vouched for: the advertised
  * `networkConfig.transportPublicKey` arrives over the unauthenticated plaintext bootstrap, so re-publishing
  * it as a `#k=` would let an on-path attacker pin every newcomer to THEIR key. With no verified key the QR
@@ -406,8 +406,6 @@ export function fingerprint(hostPublicKey?: string): string | undefined {
   return key ? transportFingerprint(key) : undefined;
 }
 
-/** Run the client↔host handshake against a known host public key and store the resulting session.
- * Throws on any network/validation failure — callers treat that like any other bootstrap failure. */
 /** Listeners told when the live session is REPLACED by a transparent re-handshake (see
  * `subscribeSessionReplaced`) — the WebSocket owner uses this to drop a socket sealed under the old key. */
 const sessionReplacedListeners = new Set<() => void>();
@@ -416,7 +414,7 @@ const sessionReplacedListeners = new Set<() => void>();
  * Subscribe to "the module session was replaced by a re-handshake". A socket confirmed under the previous
  * session key would otherwise decrypt every later frame against the wrong key and go silently deaf while
  * the server (which still holds the old session) keeps it open and the UI shows "live" — a single forged
- * unsealed 401 on a GET was enough to trigger that (review 2026-09-04). The subscriber closes its socket
+ * unsealed 401 on a GET is enough to trigger a re-handshake. The subscriber closes its socket
  * so the normal reconnect path reopens one under the current session. Returns an unsubscribe.
  */
 export function subscribeSessionReplaced(listener: () => void): () => void {
@@ -441,7 +439,7 @@ function notifySessionReplaced(): void {
  * QR (fresh `#k=` or the per-origin cache) rather than the node's own advertisement. The node returns the
  * public key it actually used; if that differs from the one we derived against, the session key is wrong
  * and nothing sealed under it can ever open — so rather than let the caller's retry paths loop forever on
- * `400 Malformed encrypted request` (the post-Emergency-Reset stranding, review 2026-09-04) we fail here.
+ * `400 Malformed encrypted request` (as after an Emergency Reset rotates the key) we fail here.
  * For a QR-pinned key the pin is marked BROKEN (kept, not dropped): the live session — if any — is left
  * exactly as it was, and the caller is told a fresh scan is needed. The pin must never be discarded or
  * replaced from this path, and the returned key is NEVER adopted for the derivation: either would let
@@ -528,8 +526,7 @@ let startupHashKey: string | undefined;
  * fragment (a scanned join QR, whether it was then adopted or parked as a pending change), or the Android
  * launcher's injected key in the host's own WebView. Recorded by {@link captureJoinKey}, which strips the
  * fragment from the URL, so this is the only way the app can learn afterwards that a QR was scanned
- * (the wipe gate used to re-read the hash after it was gone, so a wiped device
- * could never rejoin by rescanning).
+ * (re-reading the hash would find it gone, so a wiped device could never rejoin by rescanning).
  */
 let startupJoinKeyPresent = false;
 
@@ -633,7 +630,7 @@ export async function ensureSession(mode: TransportEncryption, configHostKey?: s
   if (!hostPublicKey) {
     if (effectiveMode === "required") {
       // No QR key on a required join — DROP any existing (possibly `optional`/config-key, non-QR-verified)
-      // session so a later `resumeIdentity` can't bind a secret token over it (docs/20 #8), then gate the app.
+      // session so a later `resumeIdentity` can't bind a secret token over it (docs/20), then gate the app.
       session = undefined;
       sessionQrVerified = false;
       throw new TransportNeedsQrError();
@@ -657,7 +654,7 @@ export async function ensureSession(mode: TransportEncryption, configHostKey?: s
 }
 
 /** The pinned key just handshook (or its live session was reused), so the node holds it; a differing `#k=`
- * parked this load can't be the node's key and is dropped without asking (pre-release review 2026-09-25). */
+ * parked this load can't be the node's key and is dropped without asking. */
 function dropPendingIfPinHealthy(hostPublicKey: string, qrKey: string | undefined): void {
   if (qrKey !== undefined && hostPublicKey === qrKey) {
     pendingHostKey = undefined;
@@ -666,7 +663,7 @@ function dropPendingIfPinHealthy(hostPublicKey: string, qrKey: string | undefine
 
 /**
  * Whether a boot that could not establish a transport session may proceed in plaintext under the
- * node's ADVERTISED mode (review 2026-09-04). Only when the advertisement is `optional` AND this client
+ * node's ADVERTISED mode. Only when the advertisement is `optional` AND this client
  * holds no QR key: a QR key pins the join to `required` (see `ensureSession`'s `effectiveMode`), and the
  * advertisement comes from the unauthenticated bootstrap, so an on-path attacker who fails one handshake
  * POST must not be able to drop a QR-joined client into plaintext + cookie identity with no warning. Call
@@ -728,7 +725,7 @@ async function doReHandshake(): Promise<boolean> {
         await resumeAttempt(session, storedIdentityToken(), {}, false);
       } catch {
         // `handshake` has ALREADY replaced the module session — the socket owner must still be told, or a
-        // socket confirmed under the previous key stays open and deaf (CodeRabbit, PR #122).
+        // socket confirmed under the previous key stays open and deaf.
         notifySessionReplaced();
         return false;
       }
@@ -778,7 +775,7 @@ async function resumeAttempt(
   retriedFreshMint: boolean,
 ): Promise<{ currentUser: unknown }> {
   // A resume with no token asks the server to MINT a fresh identity. During a wipe that must never happen
-  // (docs/20 H3) — the identity is being discarded, not replaced — so refuse rather than spawn an orphan.
+  // (docs/20) — the identity is being discarded, not replaced — so refuse rather than spawn an orphan.
   if (token === undefined && mintSuppressed) {
     throw new Error("Identity minting is suppressed (wipe in progress)");
   }
@@ -860,7 +857,7 @@ export interface EncryptedFetchInit {
 const SAFE_METHODS = new Set(["GET", "HEAD"]);
 
 /** Re-handshake once the per-session request sequence gets within this of the safe-integer ceiling, so
- * the counter never loses precision (docs/20 #8). Vast headroom — this is never hit in a real session. */
+ * the counter never loses precision. Vast headroom — this is never hit in a real session. */
 const SEQ_REHANDSHAKE_THRESHOLD = Number.MAX_SAFE_INTEGER - 1024;
 
 /**
@@ -898,9 +895,9 @@ async function attemptFetch(
   const active = session;
 
   if (!active) {
-    // FAIL CLOSED (review 2026-09-04): under an effective `required` mode (the node requires it, or this
-    // client is QR-pinned) a missing session must never degrade to a plaintext cookie request — that was
-    // exactly the hole a forged 401 + forged handshake could open. `off`/unpinned-`optional` keep the
+    // FAIL CLOSED: under an effective `required` mode (the node requires it, or this client is
+    // QR-pinned) a missing session must never degrade to a plaintext cookie request, or a forged 401 +
+    // forged handshake could open exactly that hole. `off`/unpinned-`optional` keep the
     // pass-through shape.
     if (lastParams?.mode === "required") {
       throw requiredSessionMissing();
@@ -915,7 +912,7 @@ async function attemptFetch(
   }
 
   // Re-handshake (resetting the per-session sequence to 0) well before the counter could approach the
-  // safe-integer ceiling, past which it would lose precision/monotonicity (docs/20 #8). Unreachable in
+  // safe-integer ceiling, past which it would lose precision/monotonicity. Unreachable in
   // practice — a 12h session cannot issue 2^53 requests — but correct, and near-free to check.
   if (active.seq >= SEQ_REHANDSHAKE_THRESHOLD && !retried && (await reHandshake())) {
     return attemptFetch(method, path, body, init, true);
@@ -982,7 +979,7 @@ async function attemptFetch(
   // A 401 USUALLY means the server refused the request in `onRequest`, BEFORE any handler ran (expired
   // session) — safe to retry. But the outer status is OUTSIDE the AEAD: a network middleman could forge a
   // 401 on a request the server actually PROCESSED, stripping `x-loam-enc` so we think the handler never
-  // ran. Retrying then would REPLAY the mutation (duplicate message / repeated admin op, docs/20 H4). So
+  // ran. Retrying then would REPLAY the mutation (duplicate message / repeated admin op, docs/20). So
   // only auto-retry SAFE (GET/HEAD) methods here; a mutation surfaces the 401 to the caller unretried.
   if (response.status === 401 && isSafe && !retried && (await reHandshake())) {
     return attemptFetch(method, path, body, init, true);
@@ -1012,8 +1009,8 @@ function base64ToBytes(b64: string): ArrayBuffer {
  * sealed inside the `{ s, b }` anti-replay envelope and POSTed to the single opaque
  * `/api/transport/tunnel`, so the path/query (a search term, which channel is read) never hit the wire.
  * The sealed response is a `{ status, contentType, bodyB64 }` descriptor rebuilt into a normal
- * `Response`. Mirrors `attemptFetch`'s one-shot re-handshake retry (safe methods on a decrypt failure,
- * any method on a 401), delegating the retry back through `attemptFetch` so it re-tunnels under the
+ * `Response`. Mirrors `attemptFetch`'s one-shot re-handshake retry (safe methods only, on a decrypt
+ * failure or an unsealed 401), delegating the retry back through `attemptFetch` so it re-tunnels under the
  * fresh session.
  */
 async function tunnelFetch(
@@ -1082,13 +1079,13 @@ async function tunnelFetch(
     });
   }
 
-  // Only auto-retry SAFE methods on an unsealed outer 401 (docs/20 H4): the status is outside the AEAD, so
+  // Only auto-retry SAFE methods on an unsealed outer 401 (docs/20): the status is outside the AEAD, so
   // a middleman could forge it on an already-processed request and a retry would replay the mutation.
   if (response.status === 401 && isSafe && !retried && (await reHandshake())) {
     return attemptFetch(method, path, body, init, true);
   }
 
-  // NEVER hand an unsealed body to the caller (pre-release review 2026-09-25). Everything the real server
+  // NEVER hand an unsealed body to the caller. Everything the real server
   // answers on a live tunnel session is sealed, except the pre-handler refusals (an expired session's 401,
   // the post-reset 503, a replay 409, a malformed-envelope 400, a rate-limit 429) — and those carry no
   // content the caller needs. Passing any other unsealed reply through would let an on-path attacker forge
@@ -1132,7 +1129,7 @@ export function isTunnelActive(): boolean {
 const imageObjectUrls = new Map<string, string>();
 /** How many mounted elements currently hold each path's URL (`retainImageUrl`/`releaseImageUrl`). An entry
  * with holders is never evicted: revoking a `blob:` URL an `<img>` still points at breaks the image the
- * next time the browser re-reads it (pre-release review 2026-09-25). */
+ * next time the browser re-reads it. */
 const imageUrlHolders = new Map<string, number>();
 
 /** Mark `path`'s image URL as in use by one more element (call before resolving it, release on unmount). */
@@ -1246,8 +1243,8 @@ export function subscribeImageCacheCleared(listener: () => void): () => void {
 /**
  * Revoke every cached image object URL (wipe, identity change, test reset) so blobs aren't leaked. Holder
  * counts are KEPT: those elements are still mounted, and each releases exactly once when it unmounts or
- * re-resolves — clearing the counts here would let those later releases drive other paths' counts wrong
- * (pre-release review 2026-09-25). Instead the generation is bumped and listeners told, so every mounted
+ * re-resolves — clearing the counts here would let those later releases drive other paths' counts wrong.
+ * Instead the generation is bumped and listeners told, so every mounted
  * image drops its revoked `blob:` URL and resolves again.
  */
 export function clearImageObjectUrls(): void {
@@ -1388,7 +1385,7 @@ async function attemptSecureLogout(init: EncryptedFetchInit): Promise<boolean> {
 }
 
 /**
- * Revoke this device's secure identity SERVER-SIDE (docs/20 §8 / H3) before a local wipe/logout clears
+ * Revoke this device's secure identity SERVER-SIDE (docs/20 §8) before a local wipe/logout clears
  * storage. OUTCOME-driven, so it can't leave the token silently unrevoked:
  *
  *  1. Try the sealed logout on the current session; a `true` return means the server confirmed revocation.
@@ -1450,14 +1447,14 @@ async function withDeadline<T>(op: (signal: AbortSignal) => Promise<T>, timeoutM
 }
 
 /**
- * Clear this device's SERVER-side credentials for a wipe (docs/20 #3): revoke the bound secure identity
+ * Clear this device's SERVER-side credentials for a wipe (docs/20): revoke the bound secure identity
  * token AND clear any legacy `loam_session` cookie, as two INDEPENDENT, each-deadline-bounded steps with
  * minting suppressed throughout. Crucially it always SETTLES (within ~2×`timeoutMs`) even if the network
  * blackholes a step — so the caller's local purge always proceeds. The two steps are separate credentials
  * (§3): the sealed logout omits the cookie; the bare `session/end` sends and clears it.
  *
  * Best-effort: the `session/end` reply is UNSEALED, so an active LAN attacker could forge a 200 while the
- * real request is blocked — meaning we must NOT treat it as a security confirmation (docs/20 round-5 H2).
+ * real request is blocked — meaning we must NOT treat it as a security confirmation (docs/20).
  * The durable wipe tombstone is therefore NOT lifted here; it stays until a VERIFIED explicit rejoin (a
  * QR-pinned handshake that actually succeeds).
  */
@@ -1465,7 +1462,7 @@ export async function wipeServerCredentials(timeoutMs: number): Promise<void> {
   setMintSuppressed(true);
   try {
     // The logout (and its stale-session re-establish/retry) reads `storedIdentityToken()`, which falls back
-    // to the pre-erasure snapshot (docs/20 #3 H1) — so revocation still works even though local storage was
+    // to the pre-erasure snapshot — so revocation still works even though local storage was
     // already cleared. Mint suppression keeps that snapshot from being written back.
     await withDeadline((signal) => logoutSecureIdentity({ signal }), timeoutMs);
     await withDeadline(

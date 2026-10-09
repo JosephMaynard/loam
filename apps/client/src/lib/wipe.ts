@@ -67,7 +67,7 @@ export function announceWipe(): void {
 /**
  * Subscribe to wipe announcements from OTHER tabs; `onWipe` runs when any tab initiates a wipe, so this tab
  * can tear down its own copy. Returns an unsubscribe function. Listens on TWO channels for reliability
- * (docs/20 round-5 Medium): a fast BroadcastChannel message AND the `storage` event fired when the durable
+ * (docs/20): a fast BroadcastChannel message AND the `storage` event fired when the durable
  * `loam.wipeTombstone` flag is written — the latter is delivered even where BroadcastChannel is unavailable
  * or a tab wasn't yet listening when the one-shot message was posted.
  */

@@ -2,11 +2,11 @@
 // the app hosts. Pure (dependencies injected) so it's unit-testable without React Native; the RN wiring
 // lives in host-service.ts.
 //
-// WHY RE-START REPEATEDLY (pre-release review 2026-09-25): the service used to be started exactly once, on
-// the launcher's `ready`. Cold start takes ~80 s, and on API 31+ `startForegroundService` from the
-// background throws ForegroundServiceStartNotAllowedException — caught and logged natively, so an operator
-// who switched away during boot got no service and no wake lock, and Android froze the host once the
-// screen went off. Starting is idempotent on the native side (a second start just re-posts the same
+// WHY RE-START REPEATEDLY: starting the service only once, on the launcher's `ready`, is not enough. Cold
+// start takes ~80 s, and on API 31+ `startForegroundService` from the background throws
+// ForegroundServiceStartNotAllowedException — caught and logged natively, so an operator who switched away
+// during boot would get no service and no wake lock, and Android would freeze the host once the screen
+// went off. Starting is idempotent on the native side (a second start just re-posts the same
 // notification; the wake lock is guarded), so callers invoke `ensure()` on every moment the app is
 // certainly in the foreground: ready, AppState → active, the share overlay opening, the hotspot starting.
 //

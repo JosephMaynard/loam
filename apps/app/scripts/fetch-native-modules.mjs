@@ -77,7 +77,7 @@ const MC_PREBUILD_SHA256 = "40976b009278d0b1da04b8f6d34b0badf60469d7b26df68471ee
 // Exact pins for the JS wrappers' runtime dependencies (both drivers share them: better-sqlite3 → bindings
 // → file-uri-to-path). Installed alongside the wrapper so npm resolves exactly these — a bare install would
 // pick whatever the registry currently satisfies with no lockfile or integrity check, inside the process
-// that holds the DB key (review 2026-09-04). Bump deliberately, together with the driver versions.
+// that holds the DB key. Bump deliberately, together with the driver versions.
 const WRAPPER_RUNTIME_PINS = ["bindings@1.5.0", "file-uri-to-path@1.0.0"];
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -107,7 +107,7 @@ function materialiseWrapper(pkgName, version, runtimePackages) {
   try {
     console.log(`Installing ${pkgName}@${version} JS wrapper (no native build)…`);
     run("npm", ["init", "-y"], { cwd: scratch, stdio: "ignore" });
-    // The wrapper's two runtime deps are pinned to EXACT versions too (review 2026-09-04): they run inside
+    // The wrapper's two runtime deps are pinned to EXACT versions too: they run inside
     // the embedded server process that holds LOAM_DB_KEY, and a bare install would resolve them by semver
     // from the registry at every build with no lockfile — `WRAPPER_RUNTIME_PINS` is the lockfile here.
     run(

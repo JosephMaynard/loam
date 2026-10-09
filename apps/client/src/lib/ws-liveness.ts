@@ -1,5 +1,5 @@
 /**
- * WebSocket liveness (pre-release review 2026-09-25). A socket whose peer vanished — the phone left the
+ * WebSocket liveness. A socket whose peer vanished — the phone left the
  * hotspot, the host slept, a NAT/AP dropped the flow — often never fires `close`: the browser only learns
  * the TCP connection is dead when it next tries to send, and a LOAM client never sends after its key
  * confirmation. It would sit "live" forever, silently missing every event.

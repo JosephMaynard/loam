@@ -1,16 +1,16 @@
 'use strict';
 
-// Durable install of the "Preserve old database & start fresh" marker (Sol P1) — split out from main.js
+// Durable install of the "Preserve old database & start fresh" marker — split out from main.js
 // into its own dependency-free CJS module, with no `require('rn-bridge')` and no top-level side effects,
 // SPECIFICALLY so the filesystem outcome logic can be unit-tested with an injected `fs` (see
 // apps/app/src/lib/start-fresh-marker.test.ts). main.js itself pulls in `rn-bridge` at import time and
 // runs `bootWithWipeResume()` as a boot-time side effect the instant it's required, so it can't safely be
 // `require()`d from a plain Vitest harness — same reasoning as db-key-gate.js's doc comment.
 //
-// WHY A DEDICATED PATH (not the shared `durableWriteFileSync`): the START-FRESH marker's CONTENT encodes
-// intent — `"delete"` (a deliberate destructive mode change: the server DELETES the old DB) or
-// `"preserve"` (accidental-lockout recovery: the server renames it aside). The RN host reports the
-// outcome to the operator, so a "could not be scheduled" ack MUST match on-disk reality. The shared
+// WHY A DEDICATED PATH (not the server's `durableWriteFileSync` in store-lifecycle.ts): the START-FRESH
+// marker's CONTENT encodes intent — `"delete"` (a deliberate destructive mode change: the server DELETES the
+// old DB) or `"preserve"` (accidental-lockout recovery: the server renames it aside). The RN host reports the
+// outcome to the operator, so a "could not be scheduled" ack MUST match on-disk reality.
 // `durableWriteFileSync` renames the temp onto the final path BEFORE its parent-dir fsync, then returns a
 // bare `false` if that dir-fsync fails — leaving the marker INSTALLED in the current filesystem namespace
 // even though the caller was told the write failed. For a `"delete"` marker that means a destructive
@@ -56,7 +56,7 @@ function fsyncDirWith(fs, dir) {
  *
  * The helper also PREPARES the parent directory itself (`mkdirSync(dir, { recursive: true })`) as the very
  * first step of Phase 1, so the whole "prepare dir → stage → fsync → rename" operation is a single tested
- * function with the correct three-outcome contract (the caller no longer wraps it in its own mkdir + catch).
+ * function with the correct three-outcome contract (the caller does not wrap it in its own mkdir + catch).
  * Because the mkdir is INSIDE the Phase-1 try, a directory-preparation failure falls into the SAME Phase-1
  * catch as a write/rename failure: it proves marker absence (ENOENT-only lstat) before reporting
  * `not-installed`, so a mkdir throw while a PRIOR unconsumed marker exists yields `indeterminate`, never a
@@ -80,7 +80,7 @@ function installStartFreshMarker(options) {
   var dir = options.dir;
   var contents = options.contents;
 
-  // CodeRabbit: detect a PRE-EXISTING (unconsumed) marker BEFORE Phase 1's atomic rename overwrites it. If
+  // Detect a PRE-EXISTING (unconsumed) marker BEFORE Phase 1's atomic rename overwrites it. If
   // that rename then succeeds but the Phase-2 durability fsync fails, the rollback must NOT unlink the marker
   // — doing so would delete a reset request that was ALREADY pending and falsely report 'not-installed'.
   // lstat; treat any non-ENOENT stat error as "possibly present" so we fail safe toward preserving.
@@ -95,9 +95,9 @@ function installStartFreshMarker(options) {
   // Phase 1 — prepare the parent directory, stage the bytes, fsync the file inode, then atomically rename
   // onto the marker path. A failure here (INCLUDING the directory preparation) means THIS call did not
   // install a new marker. But the atomic rename leaves any PRE-EXISTING marker (from an earlier unconsumed
-  // request) untouched, so "this write failed" does NOT prove the marker path is absent (CodeRabbit round-10
-  // CRITICAL; keeping mkdir inside this try is the Sol P2 fix so a mkdir throw routes through the same
-  // absence-proof rather than a false "not scheduled"). Clean up the staging file, then PROVE absence (lstat,
+  // request) untouched, so "this write failed" does NOT prove the marker path is absent (and mkdir stays
+  // inside this try so a mkdir throw routes through the same absence-proof rather than a false "not
+  // scheduled"). Clean up the staging file, then PROVE absence (lstat,
   // ENOENT-only) before reporting `not-installed`; if a marker still exists — or absence can't be verified —
   // report `indeterminate` so the caller never claims "nothing was written" while a consumable marker is on
   // disk.
@@ -135,7 +135,7 @@ function installStartFreshMarker(options) {
   // make that removal durable. Only a fully proven rollback downgrades to 'not-installed'; any step we
   // cannot prove leaves the marker possibly-consumable, which is 'indeterminate'.
   //
-  // BUT (CodeRabbit): if a marker was ALREADY pending before this call, the just-installed marker supersedes
+  // BUT if a marker was ALREADY pending before this call, the just-installed marker supersedes
   // it — unlinking would delete a real, previously-scheduled reset and lie 'not-installed'. Keep the marker
   // (a reset is genuinely pending; only its durability is unproven) and report the honest uncertainty.
   if (hadPriorMarker) {

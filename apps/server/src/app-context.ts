@@ -1,4 +1,4 @@
-// The composition seam of the server (2026-09-04 split). `buildApp` builds ONE object of this shape —
+// The composition seam of the server. `buildApp` builds ONE object of this shape —
 // its remaining closure state (accessor-backed, so writes land on the live bindings), its domain helpers,
 // and the extracted subsystems — and hands it to every route/transport/realtime/kill-switch module.
 // The member list is generated from app.ts's declarations; keep it in step when a helper's signature
