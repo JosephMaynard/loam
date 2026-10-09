@@ -289,7 +289,7 @@ describe("a new node using its link code", () => {
   });
 
   it.skipIf(!LAN_ADDRESS)("drops a link answer that arrives after an admin removed the peer", async () => {
-    // Review 2026-10-03 #4: the answer used to install the removed peer's token into the saved config.
+    // The answer used to install the removed peer's token into the saved config.
     const existing = await lanNode({ sync: { enabled: false, peers: [], token: "mesh-secret-0123456789" } });
     const code = await mintCode(existing.app, await sessionCookie(existing.app));
     const joining = await lanNode({

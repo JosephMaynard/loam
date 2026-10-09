@@ -10,9 +10,9 @@ import { buildApp, type AppOptions, type LoamApp } from "./app.js";
 
 /**
  * The opportunistic-mesh transport bridge (`GET /api/mesh/outbound` + `POST /api/mesh/inbound`, docs/16
- * §5 / docs/17). Moved out of app.test.ts when the bridge started requiring the launcher's per-boot host
- * token on EVERY host (review 2026-09-25 #12): the only real caller is the Android launcher's courier,
- * which always sends `x-loam-host-token`, so these tests boot every node with a host token and drive the
+ * §5 / docs/17). The bridge requires the launcher's per-boot host token on EVERY host: the only real
+ * caller is the Android launcher's courier, which always sends `x-loam-host-token`, so these tests boot
+ * every node with a host token and drive the
  * bridge the way the courier does (see `asCourier`). The authorization rules themselves are pinned by the
  * "bridge authorization" block at the end.
  */
@@ -36,15 +36,15 @@ const BRIDGE_PATHS = new Set(["/api/mesh/outbound", "/api/mesh/inbound", "/api/h
  * sets `x-loam-host-token` itself (so authorization tests still control it explicitly). */
 function asCourier(app: LoamApp): LoamApp {
   const inject = app.server.inject.bind(app.server);
-  const patched = ((options: Parameters<typeof inject>[0]) => {
+  const patched = ((options: unknown) => {
     if (options && typeof options === "object" && BRIDGE_PATHS.has(String((options as { url?: unknown }).url))) {
       const opts = options as { headers?: Record<string, string> };
       if (!opts.headers || !("x-loam-host-token" in opts.headers)) {
         opts.headers = { ...opts.headers, "x-loam-host-token": HOST_TOKEN };
       }
     }
-    return inject(options);
-  }) as typeof app.server.inject;
+    return (inject as (opts: unknown) => unknown)(options);
+  }) as unknown as typeof app.server.inject;
   app.server.inject = patched;
   return app;
 }
@@ -220,8 +220,8 @@ describe("opportunistic mesh: transport bridge", () => {
       expect(await inbound(nodeB, messages)).toBe(0); // not ours, not relaying: dropped
       expect(nodeB.store.isSealedOfferSeen(messages[0]!.id, Date.now())).toBe(true);
 
-      // Handed the same blob again once relaying is on (after a restart), it stays dropped (review 2026-09-25
-      // #2): carrying it now would make "carried" vs "refused" depend on whether the first copy was delivered.
+      // Handed the same blob again once relaying is on (after a restart), it stays dropped:
+      // carrying it now would make "carried" vs "refused" depend on whether the first copy was delivered.
       writeFileSync(join(nodeB.dataDir, "config.json"), JSON.stringify({ mesh: MESH }));
       const relayB = await reopenApp(nodeB.app, nodeB.dataDir);
       expect(await inbound(relayB, messages)).toBe(0);
@@ -328,7 +328,7 @@ describe("opportunistic mesh: transport bridge", () => {
       const nodeC = await makeApp({ mesh: MESH });
       const alice = await adminOf(nodeA);
       const bob = await adminOf(nodeB);
-      const carol = await adminOf(nodeC);
+      await adminOf(nodeC);
 
       const bobCard = await meshCard(nodeB, bob.cookie);
       expect((await addContact(nodeA, alice.cookie, bobCard)).statusCode).toBe(200);
@@ -367,7 +367,7 @@ describe("opportunistic mesh: transport bridge", () => {
       // The in-process courier polls these endpoints over plain 127.0.0.1 with no transport session. In
       // `required` mode the general content gate would 401 an unsealed direct hit; the mesh bridge is
       // exempted (loopback-only, blobs already sealed at the mesh crypto layer) so turning transport
-      // encryption up can't silently stop the radio from moving mail (Fable review).
+      // encryption up can't silently stop the radio from moving mail.
       const app = await makeApp({ mesh: MESH, security: { profile: "custom", transportEncryption: "required" } });
       const out = await app.server.inject({ method: "GET", url: "/api/mesh/outbound" });
       expect(out.statusCode).toBe(200);
@@ -395,7 +395,7 @@ describe("opportunistic mesh: transport bridge", () => {
     });
   });
 
-  describe("the radio bridge reveals and risks nothing about delivery (verifier round, 2026-09-25)", () => {
+  describe("the radio bridge reveals and risks nothing about delivery", () => {
     /** One blob sealed on `sender` for the owner of `card` (added as a contact first). */
     async function sealedFor(sender: LoamApp, senderCookie: string, card: MeshIdentityCard): Promise<Record<string, unknown>> {
       expect((await addContact(sender, senderCookie, card)).statusCode).toBe(200);
@@ -482,7 +482,7 @@ describe("opportunistic mesh: transport bridge", () => {
     });
   });
 
-  describe("bridge authorization (review 2026-09-25 #12)", () => {
+  describe("bridge authorization", () => {
     it("404s on a host with NO launcher token even from loopback (desktop/Pi: a same-host proxy makes every LAN client loopback)", async () => {
       const app = await makeApp({ mesh: MESH }, { hostToken: undefined });
       for (const headers of [{}, { "x-loam-host-token": "" }, { "x-loam-host-token": HOST_TOKEN }]) {

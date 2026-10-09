@@ -65,6 +65,11 @@ jobs:
       - name: Android host typecheck
         run: pnpm --filter app typecheck
 
+      # The server build excludes its test files (and src/test-support/), and Vitest strips types without
+      # checking them, so typecheck the server's tests on their own.
+      - name: Server test typecheck
+        run: pnpm --filter @loam/server typecheck:test
+
       # The workspace suites never run the PUBLISHED CLI. Pack cli/, install the tarball as a user would
       # (catches files missing from `files` and an optional SQLCipher driver that won't install), and
       # drive the installed `loam`: default-port fallback, a taken --port, --encrypt + reopen.

@@ -15,9 +15,9 @@ import { openStore } from "./db.js";
 import type { AppOptions } from "./types.js";
 
 /**
- * Branch review 2026-09-25 (after cadf339): #2 — a peer bypassing the sealed-offer history (listing sealed
- * ids among PUBLIC messages, or re-advertising them with a later TTL once the first one lapsed) to learn
- * which blobs were delivered here; #3 — an in-flight sync edit undoing a moderator removal. Each test was
+ * Sealed-offer history and sync races: a peer must not bypass the sealed-offer history (listing sealed ids
+ * among PUBLIC messages, or re-advertising them with a later TTL once the first one lapsed) to learn which
+ * blobs were delivered here, and an in-flight sync edit must not undo a moderator removal. Each test was
  * mutation-checked: with its fix reverted, it fails.
  */
 
@@ -124,7 +124,7 @@ function replayKey(record: SealedRecord): string {
 }
 
 /**
- * The adversarial peer of review #2. `mode` picks what the next digest advertises: the records as sealed
+ * A peer probing the sealed-offer history. `mode` picks what the next digest advertises: the records as sealed
  * offers (optionally with a rewritten TTL), their ids — plus the replay keys — among PUBLIC messages, or
  * their ids as public channels. `/api/sync/messages` returns whatever was asked for.
  */
@@ -181,7 +181,7 @@ async function deliveredAndDropped(opts: Partial<AppOptions> = {}) {
   return { app, dataDir, cookie, peer, state, config, expiry };
 }
 
-describe("sealed-offer history can't be bypassed to find delivered mail (#2)", () => {
+describe("sealed-offer history can't be bypassed to find delivered mail", () => {
   it("sealed ids (and their replay keys) re-listed as PUBLIC messages are requested for neither outcome — also after a restart", async () => {
     const { app, dataDir, cookie, peer, state } = await deliveredAndDropped();
 
@@ -415,7 +415,7 @@ describe("the seen-offer record's bounds", () => {
   });
 });
 
-describe("an in-flight sync import can't undo a moderator removal (#3)", () => {
+describe("an in-flight sync import can't undo a moderator removal", () => {
   const peerAuthor = { id: "user.peer", type: "human", isAdmin: false, ephemeral: true, createdAt: 1, displayName: "Peer" };
   const attachment = { id: "att_0123456789abcdef", mimeType: "text/plain", size: 7, name: "file.txt" };
 
@@ -559,7 +559,7 @@ describe("an in-flight sync import can't undo a moderator removal (#3)", () => {
   });
 });
 
-describe("sealed mail is imported only after the round's last request (verifier round: timing)", () => {
+describe("sealed mail is imported only after the round's last request", () => {
   it("no request to any peer in the round follows a delivery", async () => {
     // Timing oracle: importing a sealed batch between fetches made the gap before the next request longer
     // exactly when the batch held mail for a local user. Here each peer notes, at every request it gets,
@@ -615,7 +615,7 @@ describe("sealed mail is imported only after the round's last request (verifier 
   });
 });
 
-describe("the same mail re-offered under fresh ids (verifier round: replay-key seen marks)", () => {
+describe("the same mail re-offered under fresh ids (replay-key seen marks)", () => {
   /** What this node would advertise and hold as carried mail. */
   async function carried(app: LoamApp): Promise<{ digest: string[]; held: string[] }> {
     const digest = (await app.server.inject({ method: "GET", url: "/api/sync/digest" })).json() as { sealed?: { id: string }[] };
