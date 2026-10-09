@@ -209,6 +209,29 @@ describe("openStore", () => {
     expect(store.getConfigValue("security.profile")).toBe("standard");
   });
 
+  it("wipeAll on a plaintext file leaves none of the deleted text in the database file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loam-secure-delete-"));
+    const path = join(dir, "loam.db");
+    const fileStore = openStore(path);
+    try {
+      const needle = "SECURE_DELETE_NEEDLE_7f3a";
+      for (let index = 0; index < 50; index += 1) {
+        fileStore.insertMessage({ ...makeChannelPost(`msg_${index}`), body: `${needle} ${index} ${"x".repeat(200)}` });
+      }
+      fileStore.upsertUser(makeUser("user.abc", { displayName: `${needle} name` }));
+      fileStore.checkpoint();
+      expect(readFileSync(path).includes(needle)).toBe(true);
+
+      fileStore.wipeAll();
+      fileStore.checkpoint();
+      const leftovers = [path, `${path}-wal`].filter((file) => existsSync(file) && readFileSync(file).includes(needle));
+      expect(leftovers).toEqual([]);
+    } finally {
+      fileStore.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("round-trips tombstones and prunes only those older than the cutoff", () => {
     store.addTombstone("msg_recent");
     store.addTombstone("msg_also_recent");

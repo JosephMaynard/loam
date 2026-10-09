@@ -783,6 +783,14 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
 
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA synchronous = NORMAL");
+  if (!pragma) {
+    // A plaintext store has only the logical wipe (`wipeAll`) for Emergency Reset, so have SQLite overwrite
+    // deleted content with zeros instead of leaving it in free pages and freed cell space, where a copy of
+    // the file would still give it up. Not secure erasure on flash (the device may keep the old blocks; see
+    // docs/02), but nothing readable is left in the database file itself once the wipe is checkpointed.
+    // A SQLCipher store's free pages are ciphertext already and its wipes delete the files.
+    db.exec("PRAGMA secure_delete = ON");
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,

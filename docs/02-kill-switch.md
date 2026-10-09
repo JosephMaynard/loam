@@ -4,7 +4,9 @@
 > panicToken? }` in the shared config schema; `POST /api/admin/kill-switch` (admin + enabled +
 > `{ "confirm": "wipe" }` when confirmation is on) and unauthenticated `POST /api/panic` (404
 > unless a token ≥16 chars is configured; rate-limited; the token is stored **scrypt-hashed**, so
-> a seized node's config does not reveal it). The wipe empties all tables via the DAL's `wipeAll()`,
+> a seized node's config does not reveal it). The wipe empties all tables via the DAL's `wipeAll()`
+> (on a plaintext store, which runs with `secure_delete` on, the deleted rows are zeroed in the file;
+> see "What the plaintext wipe does now" below),
 > deletes `avatars/` and `attachments/`, invalidates every session, broadcasts a `wipe` event, closes all sockets, and
 > re-seeds defaults — config survives so the switch can fire again. Clients purge IndexedDB,
 > localStorage, service worker + caches, and show a neutral "Disconnected" screen. Admin UI has a
@@ -121,6 +123,16 @@ SQLite leaves data in the main DB file, `-wal`, and `-journal`, and deleted rows
 recoverable by forensic tools on flash storage. A `DELETE FROM` is **not** secure erasure. The robust
 answer is **encryption at rest** (SQLCipher/libsql) where the wipe throws away the key. If encryption is
 out of scope, note the limitation in user-facing docs rather than overpromising.
+
+**What the plaintext wipe does now.** A plaintext store (`node:sqlite`, or plain `better-sqlite3` on the
+Android host) opens with `PRAGMA secure_delete = ON`, so SQLite overwrites deleted rows with zeros instead
+of leaving them in free pages and freed cell space. After `wipeAll()` the wipe checkpoints the write-ahead
+log into `loam.db` and truncates it, so a copy of the database file taken after the reset no longer holds
+the deleted text (a test checks the file bytes). That is still **not** secure erasure on flash: the zeros
+are written to new blocks, and the flash translation layer may keep the old ones until it reuses them, so
+someone who reads the raw chip can still find older copies, as with the WAL frames written before the
+reset. Encryption at rest is still the answer for that. The cost is small: the pragma only adds zeroing to
+deletes and rewrites, and the server test suite ran in about the same time with it (34.3 s against 33.9 s).
 
 ## UX decisions (confirm with owner — see [decisions.md](decisions.md))
 - **Speed vs. accident-prevention**: a raid wants one tap; normal ops want a confirm. Recommendation:
