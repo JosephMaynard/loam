@@ -56,8 +56,8 @@ class LoamHotspotModule : Module() {
     Name("LoamHotspot")
 
     // Fired when the SYSTEM tears the local-only hotspot down (the user enabled tethering — Android allows
-    // one or the other — Wi-Fi was toggled, an OEM power policy). Without it JS kept reporting "running"
-    // and showing a dead SSID/QR until the app was killed (review 2026-09-04).
+    // one or the other — Wi-Fi was toggled, an OEM power policy). Without it JS would keep reporting
+    // "running" and showing a dead SSID/QR until the app was killed.
     Events("onHotspotStopped")
 
     AsyncFunction("startHotspot") { promise: Promise ->

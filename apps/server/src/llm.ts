@@ -1,5 +1,5 @@
 // The optional LLM assistant: the bot user, Ollama / on-device streaming, and the DM-driven assistant
-// reply. Extracted verbatim from app.ts (2026-09-04 split) behind the shared `Runtime` view.
+// reply, behind the shared `Runtime` view.
 import { type LoamConfig, type Message, MessageSchema, type User, UserSchema } from "@loam/schema";
 import { isRecord } from "./config.js";
 import { MAX_LLM_CONTEXT_MESSAGES } from "./defaults.js";
@@ -175,7 +175,7 @@ export function createLlmLayer(rt: Runtime) {
     // silently drops the oldest tokens anyway). Keep the newest `MAX_LLM_CONTEXT_MESSAGES` and always keep
     // the system prompt. A message-count bound (not a token budget) is the same hardcoded-limit style as the
     // 5-minute Ollama timeout below; a token budget + summarisation is the documented fuller version
-    // (docs/25 P2). A single pathological message can still be large — that's the follow-up, not this fix.
+    // (docs/25 P2). A single pathological message can still be large; that is left to the fuller version.
     const messages = history.slice(-MAX_LLM_CONTEXT_MESSAGES);
 
     return rt.appConfig.llm.ollama.systemPrompt

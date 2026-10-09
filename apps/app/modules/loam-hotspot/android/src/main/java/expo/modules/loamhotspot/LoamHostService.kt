@@ -154,10 +154,9 @@ class LoamHostService : Service() {
   private fun acquireWakeLock() {
     // Only acquire when nothing is currently held — avoids stacking a duplicate acquisition on a
     // repeated `onStartCommand` (e.g. the system redelivering a start while already hosting). This is
-    // NOT how the 12h window gets reset — see `renewWakeLock` below for that (P1-6): a naive "guard on
-    // isHeld, else acquire" here would make the periodic renewal tick a no-op, since the lock is still
-    // genuinely held at the halfway point (it hasn't expired yet) — which is exactly the bug this
-    // split fixes.
+    // NOT how the 12h window gets reset — see `renewWakeLock` below for that: routing the renewal through
+    // this "guard on isHeld, else acquire" would make the periodic tick a no-op, since the lock is still
+    // genuinely held at the halfway point (it hasn't expired yet).
     if (wakeLock?.isHeld == true) {
       return
     }
@@ -175,11 +174,11 @@ class LoamHostService : Service() {
   }
 
   /** The renewal tick (fires at half the wake lock's own timeout, for as long as the service stays
-   * alive): explicitly RELEASE the current lock and ACQUIRE a fresh one, resetting the 12h window
-   * (P1-6). This is deliberately NOT just `acquireWakeLock()` — that guards on `isHeld` and no-ops when
-   * the lock is still held, which it always IS at this halfway-point tick (it hasn't expired yet); that
-   * guard made every renewal a no-op, so the original acquisition ran out at the full 12h mark with
-   * nothing having replaced it (a real gap/race in coverage, not just a missed optimization). */
+   * alive): explicitly RELEASE the current lock and ACQUIRE a fresh one, resetting the 12h window.
+   * This is deliberately NOT just `acquireWakeLock()` — that guards on `isHeld` and no-ops when the lock
+   * is still held, which it always IS at this halfway-point tick (it hasn't expired yet); every renewal
+   * would be a no-op, and the original acquisition would run out at the full 12h mark with nothing
+   * having replaced it. */
   private fun renewWakeLock() {
     wakeLock?.let { lock -> if (lock.isHeld) lock.release() }
     wakeLock = null

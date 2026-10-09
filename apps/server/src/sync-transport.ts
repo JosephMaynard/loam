@@ -315,7 +315,7 @@ async function attemptSealed(
   const fetchImpl = options.fetchImpl ?? fetch;
   const hasBody = options.body !== undefined;
   // Every sealed sync request is a POST carrying at least `{ s }` — so the RESPONSE can be bound to that
-  // authenticated sequence (docs/08 / Sol round-2 #1): a genuine peer seals its reply under `${method}
+  // authenticated sequence (docs/08): a genuine peer seals its reply under `${method}
   // ${path}#${s}`, so a captured response for one request can't be cross-fed to (or replayed against) a
   // later request on the same route. `b` (route body) and `tok` (the sync token, inside the AEAD, never a
   // header) are added when present.
@@ -377,7 +377,7 @@ async function attemptSealed(
     // `#${seq}`, so it won't open above. Try the base aad, but ONLY accept it as a NON-2xx: an early error
     // carries no sync data to cross-feed, whereas a 2xx MUST be sequence-bound (a base-aad 2xx is a
     // replay/downgrade — left to fail below). Without this a legitimate 429 would surface as a spurious
-    // "session expired" and churn a re-handshake (docs/08 / Sol round-3 P2).
+    // "session expired" and churn a re-handshake (docs/08).
     if (opened === null && !response.ok && typeof enc === "string") {
       const early = openTransport(key, enc, `${method} ${path}`);
       if (early !== null) {

@@ -139,7 +139,7 @@ export function Sidebar({
         <section className="nav-section">
           <h2 className="nav-heading">{t("sidebar.channels")}</h2>
           <nav aria-label={t("sidebar.channels")}>
-            {/* Pinned channels sort to the top (P13); archived (read-only) sink to the bottom; stable
+            {/* Pinned channels sort to the top; archived (read-only) sink to the bottom; stable
                 otherwise so the existing order is preserved. */}
             {[...channels]
               .sort((a, b) => Number(!!a.archived) - Number(!!b.archived) || Number(!!b.pinned) - Number(!!a.pinned))

@@ -250,7 +250,7 @@ export async function destroyDatabase(): Promise<void> {
 
 /**
  * Empty every object store while leaving the database itself usable (no wipe latch). Used when the
- * server-confirmed identity changed underneath this browser (pre-release review 2026-09-25): the cached
+ * server-confirmed identity changed underneath this browser: the cached
  * channels/DMs/users/read markers belonged to the previous identity and must not be shown to — or merged
  * into — the new one, but unlike a wipe the app carries straight on with the new identity.
  */

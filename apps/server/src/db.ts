@@ -71,10 +71,10 @@ export type IdentityTokenRecord = {
 
 /**
  * A work item recording that a peer's attachment file failed to copy during a node-to-node sync
- * import (docs/15 A6): the message itself still imported (best-effort), but without this record a
+ * import: the message itself still imported (best-effort), but without this record a
  * later sync digest would see the message id as already-known and never re-offer the attachment,
  * stranding it image-less forever. `attempts` counts retries (used for backoff — see
- * `retryMissingAttachments` in `app.ts`); `lastAttemptAt` (0 = never attempted) is what that backoff
+ * `retryMissingAttachments` in `sync.ts`); `lastAttemptAt` (0 = never attempted) is what that backoff
  * is measured from, so the reaper's 30s tick doesn't hammer an unreachable peer every cycle.
  */
 export type MissingAttachmentRecord = {
@@ -88,7 +88,7 @@ export type MissingAttachmentRecord = {
   /**
    * When this record next becomes eligible for a retry (epoch ms; 0 = due immediately — a fresh,
    * never-attempted record). Stamped by `bumpMissingAttachmentAttempts` from the caller's own backoff
-   * policy (P2-2, docs/15 A6/F1) and used by `loadDueMissingAttachments` to select — and fairly order
+   * policy (`missingAttachmentBackoffMs`) and used by `loadDueMissingAttachments` to select — and fairly order
    * — only the records actually eligible right now, rather than every record in creation order.
    */
   nextAttemptAt: number;
@@ -265,7 +265,7 @@ export interface LoamStore {
   upsertMeshContact(ownerUserId: string, meshId: string, data: string): void;
   loadMeshContacts(): { ownerUserId: string; meshId: string; data: string }[];
   /**
-   * Record that a peer attachment failed to copy during a sync import (docs/15 A6), starting its
+   * Record that a peer attachment failed to copy during a sync import, starting its
    * attempt counter at 0. A conflict (same message+attachment already tracked) is a no-op — it keeps
    * the original `attempts`/`createdAt` rather than resetting the retry clock.
    */
@@ -274,7 +274,7 @@ export interface LoamStore {
   ): void;
   loadMissingAttachments(): MissingAttachmentRecord[];
   /**
-   * Records currently due for a retry (P2-2, docs/15 A6/F1): `nextAttemptAt <= nowMs`, fairly ordered
+   * Records currently due for a retry: `nextAttemptAt <= nowMs`, fairly ordered
    * (earliest-due first) and capped at `limit`. Unlike `loadMissingAttachments` (every record, creation
    * order), this is what the retry pass itself should page through — it guarantees the per-pass cap
    * applies to records that are actually ELIGIBLE right now, so a block of records still in backoff can
@@ -310,7 +310,7 @@ export interface LoamStore {
   /** How many reports are still open (open or escalated): node-wide, or filed by one reporter. */
   countOpenReports(reporterUserId?: string): number;
   /**
-   * Record that a channel was IMPORTED from a sync peer (C1 provenance) — local-only, never exported.
+   * Record that a channel was IMPORTED from a sync peer (provenance) — local-only, never exported.
    * Only channels marked here are eligible for peer-driven metadata re-sync; a locally-created channel
    * (including the seeded defaults, which every node shares an id for) is never in this set, so a peer
    * can't clobber it. Idempotent. Wiped with everything else by the kill switch.
@@ -318,7 +318,7 @@ export interface LoamStore {
   markChannelSynced(channelId: string): void;
   /** Forget a channel's synced-origin mark (channel delete) — otherwise a restart re-hydrates the
    * mark and a later same-slug LOCAL channel would falsely count as synced-origin, letting a peer's
-   * metadata clobber it (C1 provenance inversion). */
+   * metadata clobber it. */
   unmarkChannelSynced(channelId: string): void;
   loadSyncedChannelIds(): string[];
   /**
@@ -338,7 +338,7 @@ export interface LoamStore {
   markUserSynced(userId: string): void;
   isUserSynced(userId: string): boolean;
   /**
-   * Pending join requests for private channels (P10). Idempotent add; per-channel load (the requester ids);
+   * Pending join requests for private channels. Idempotent add; per-channel load (the requester ids);
    * removal on approve/deny; bulk removal when a channel is deleted, and of a requester's rows when that user
    * is deleted (`deleteUser`). Wiped by the kill switch.
    */
@@ -391,23 +391,23 @@ export interface LoamStore {
    * DURABLE: under `synchronous = NORMAL` a WAL commit is never fsynced and a power cut can roll it back.
    *
    * Two callers, on every driver (`node:sqlite`, plain `better-sqlite3`, SQLCipher):
-   * - the passphrase key-migration in `openInitialStore` (P1-a, Sol round 6): the crash-atomic
+   * - the passphrase key-migration in `openInitialStore` (store-lifecycle.ts): the crash-atomic
    *   pre-migration backup is a raw copy of `loam.db` alone, which would otherwise MISS committed
    *   transactions still resident in the WAL; this makes the snapshot single-file-consistent first;
    * - the plaintext Emergency Reset, right after `wipeAll()`: the deletion must be in the main file before
    *   the wipe journal (its only recovery record) is durably removed.
    *
-   * Throws if the checkpoint comes back `busy` or with fewer frames folded than the WAL holds (RF6-e, Sol
-   * round 6): another connection held a lock, so the WAL wasn't fully folded and truncated, the file is NOT
+   * Throws if the checkpoint comes back `busy` or with fewer frames folded than the WAL holds: another
+   * connection held a lock, so the WAL wasn't fully folded and truncated, the file is NOT
    * a complete snapshot, and it must neither be copied as a backup nor be trusted to hold a commit. Never
    * logs any key material.
    */
   checkpoint(): void;
   /**
-   * Re-encrypt an already-open SQLCipher-backed store under `newKey`, via `PRAGMA rekey` (P1-1, Sol
-   * round 5 — the passphrase key-derivation migration: round 4 changed the passphrase KDF from
-   * `SHA256(passphrase)` to `SHA256(passphrase + ':' + deviceSecret)`, so an existing passphrase DB
-   * opens only under the OLD derivation; the caller — `openInitialStore` in `app.ts` — opens with that
+   * Re-encrypt an already-open SQLCipher-backed store under `newKey`, via `PRAGMA rekey` (the passphrase
+   * key-derivation migration: the passphrase key changed from `SHA256(passphrase)` to
+   * `SHA256(passphrase + ':' + deviceSecret)`, so an older passphrase DB opens only under the legacy
+   * derivation; the caller — `openInitialStore` in `store-lifecycle.ts` — opens with that
    * legacy key and calls this to re-key it in place under the current one, so every later boot uses the
    * current key directly). SQLCipher applies the new key to the existing (already-decrypted) pages in
    * place; the connection stays open and usable immediately afterward under the new key. Throws if this
@@ -583,11 +583,11 @@ export function openStore(path: string, options: OpenStoreOptions = {}): LoamSto
 
   try {
     // Only an encrypted (SQLCipher) connection exposes `.pragma()` — threaded through separately so
-    // `buildStore` can implement `rekey()` (P1-1, Sol round 5) without needing to know the driver.
+    // `buildStore` can implement `rekey()` without needing to know the driver.
     const pragma = options.encryptionKey ? (db as EncryptedDatabase).pragma.bind(db as EncryptedDatabase) : undefined;
     const store = buildStore(db, pragma);
     if (pragma) {
-      // Prove the codec engaged (pre-release review 2026-09-25): a build of the driver without the cipher
+      // Prove the codec engaged: a build of the driver without the cipher
       // compiled in accepts `PRAGMA key` as a silent no-op and writes an ordinary plaintext database. Fold
       // the schema writes from the WAL into the main file, then refuse the store if that file starts with
       // the plaintext SQLite header. A real SQLCipher file is ciphertext from byte 0.
@@ -716,7 +716,7 @@ function migrateReportsTargetColumns(db: SqliteConnection): void {
 
 /**
  * Backfill the `missing_attachments.last_attempt_at` column onto a database created before
- * retry-backoff existed (docs/15 A6 / F1). `0` (never attempted) is the correct backfill for
+ * retry-backoff existed. `0` (never attempted) is the correct backfill for
  * existing rows — the retry pass treats it as "due immediately", which is the same behaviour those
  * rows already had under the old no-backoff code.
  */
@@ -731,7 +731,7 @@ function migrateMissingAttachmentsLastAttempt(db: SqliteConnection): void {
 
 /**
  * Backfill the `missing_attachments.next_attempt_at` column onto a database created before
- * fair-ordered retry-due selection existed (docs/15 A6 / P2-2). `0` (due immediately) is the correct
+ * fair-ordered retry-due selection existed. `0` (due immediately) is the correct
  * backfill for existing rows: it's exactly the "never contacted yet" default new rows already get, so
  * every pre-existing record simply becomes eligible on the very next pass — nothing is starved worse
  * than it already was.
@@ -1411,7 +1411,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       // afterward. SQLCipher goes through its own `pragma()` as it always has; the plaintext drivers read the
       // same single result row through a prepared statement (`exec` would discard it).
       //
-      // RF6-e (Sol round 6): DON'T trust that silently. `wal_checkpoint(TRUNCATE)` returns a single
+      // DON'T trust that silently. `wal_checkpoint(TRUNCATE)` returns a single
       // `(busy, log, checkpointed)` row; `busy !== 0` means another connection held a lock and the WAL
       // was NOT fully folded/truncated, and `checkpointed < log` means frames were left behind. Either way
       // the sole-connection invariant is broken: the migration's raw file copy would MISS WAL-resident rows

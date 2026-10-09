@@ -623,7 +623,7 @@ export const en = {
   "moderation.reports.escalate": "Escalate",
   "moderation.reports.loadError": "Could not load reports",
 
-  // Channel pinning (P13) + per-channel retention (P12)
+  // Channel pinning + per-channel retention
   "admin.pin": "Pin",
   "admin.unpin": "Unpin",
   "admin.metaPinned": "Pinned",

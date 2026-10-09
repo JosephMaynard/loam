@@ -5,13 +5,13 @@
 // tokens back as `loam-llm-delta` / `loam-llm-end` / `loam-llm-error`, which the server turns into
 // the same `StreamEvent`s the laptop-Ollama path uses.
 //
-// ── The engine is a SINGLE ACTOR (Fable-round-7 rewrite) ─────────────────────────────────────────────
+// ── The engine is a SINGLE ACTOR ─────────────────────────────────────────────────────────────────────
 // llama.rn's native calls (`initLlama`, `completion`, `release`) are async, un-cancellable, can hang, and
 // carry hard invariants: only ONE native context may be resident at a time (a second `initLlama` while an
 // old context lives = multi-GB double-residency → OOM), only one completion runs per context, and a
-// model's file must not be unlinked while its context still maps it. Earlier rounds enforced these with
-// several overlapping mechanisms (a promise chain, an engine-status enum, load/release paths, and an
-// external "sync to active model" poke). Every review found a seam BETWEEN them.
+// model's file must not be unlinked while its context still maps it. Enforcing these with several
+// overlapping mechanisms (a promise chain, a status enum, separate load/release paths, an external "sync
+// to active model" poke) leaves seams BETWEEN them.
 //
 // This module instead funnels EVERYTHING through one serialized command queue processed by a single
 // `drain()` loop. The loop owns the native context and reconciles it toward one target: `desired`, the
@@ -132,7 +132,7 @@ let loadEpoch = 0;
  * `undefined` until a model has actually loaded once. */
 let lastAccelerationInfo: { gpu: boolean; reasonNoGPU: string; devices?: string[] } | undefined;
 /** Whether the one-shot `getBackendDevicesInfo()` diagnostic has been fired (after the first successful
- * load, so it can't race the first load's JSI install — CodeRabbit). */
+ * load, so it can't race the first load's JSI install). */
 let backendProbed = false;
 
 // ── The serialized command queue + drain loop ───────────────────────────────────────────────────────
@@ -320,14 +320,14 @@ function onLoadResolved(ctx: LlamaContext, myEpoch: number, target: string, op: 
     inFlightOp = null;
   }
   if (myEpoch === loadEpoch && !poisoned && !loaded) {
-    // Take OWNERSHIP first (P3): a throwing native proxy getter or diagnostic serialization must NEVER leave
+    // Take OWNERSHIP first: a throwing native proxy getter or diagnostic serialization must NEVER leave
     // this context untracked — that would leak it AND let a second `initLlama` start (double residency / OOM).
     // The acceleration read + log are best-effort and wrapped so they can't affect ownership or reject
     // `op.settled` (its never-reject contract).
     loaded = { path: target, ctx };
-    // Diagnostics probe (CodeRabbit): `getBackendDevicesInfo()` also drives llama.rn's `installJsi()`, whose
+    // Diagnostics probe: `getBackendDevicesInfo()` also drives llama.rn's `installJsi()`, whose
     // ready-guard is only set once its async install finishes — firing it ALONGSIDE the first `initLlama()`
-    // (as loadTarget used to) can race cold-start JSI setup. Run it once here, after a load has completed, so
+    // can race cold-start JSI setup. Run it once here, after a load has completed, so
     // JSI is guaranteed installed. Fire-and-forget; never awaited; failures are swallowed.
     if (!backendProbed) {
       backendProbed = true;
@@ -455,8 +455,8 @@ async function processInfer(messages: ChatMessage[], callbacks: InferenceCallbac
     // `target` is the durable-but-OPTIMISTIC `activeId` (a set-active/deactivate/delete writes it AHEAD of
     // its launcher-bridge confirmation); `desired` is the COMMITTED model (moved only by reconcileActiveModel,
     // AFTER the bridge outcome). When they DISAGREE we are inside a provisional transition window: neither
-    // build nor tear down any native context off optimistic state — that is exactly the failure where a
-    // still-committed, loaded A is released for a switch to B the bridge then rolls back (Sol P2). Report
+    // build nor tear down any native context off optimistic state, or a still-committed, loaded A could be
+    // released for a switch to B the bridge then rolls back. Report
     // recovering; the action layer commits the transition via reconcileActiveModel once the bridge settles.
     if (target !== desired) {
       callbacks.onError(ENGINE_RECOVERING_MESSAGE);
@@ -523,11 +523,11 @@ export function runInference(messages: ChatMessage[], callbacks: InferenceCallba
 }
 
 /**
- * Notify the engine of the DURABLE new active model (Fable-round-7) — call this AFTER every confirmed
+ * Notify the engine of the DURABLE new active model — call this AFTER every confirmed
  * activeId transition: a set-active whose bridge succeeded/timed-out (durable truth is the new model), a
  * deactivate (`null`), a rollback (the restored model), or a reconcile that cleared/changed the pointer.
  * Because it runs only once the outcome is known, a FAILED switch that rolls back to the previous model
- * synchronizes to that model and NEVER tears down the working context (Sol Fable-round-5 P2#2). Sets
+ * synchronizes to that model and NEVER tears down the working context. Sets
  * `desired`, synchronously abandons an in-flight load of a now-stale model, and enqueues a release of a
  * loaded context that is no longer the target (reclaiming RAM without waiting for the next inference). It
  * does NOT load — loading happens lazily on the next inference.
@@ -553,8 +553,7 @@ export function reconcileActiveModel(nextPath: string | null): void {
 }
 
 /**
- * Synchronously abandon an in-flight load whose path differs from `keepPath` (Fable-round-7 / Sol
- * Fable-round-5 P2#2) — call this the instant a new active model is durably persisted, BEFORE a fallible
+ * Synchronously abandon an in-flight load whose path differs from `keepPath` — call this the instant a new active model is durably persisted, BEFORE a fallible
  * launcher-bridge call. It prevents a load of the OLD model from publishing during the bridge window, but
  * does NOT release a loaded context: if the bridge then fails and the selection rolls back, the previously
  * working (still-loaded) model is untouched. `reconcileActiveModel` handles the release once the outcome is
@@ -568,7 +567,7 @@ export function invalidateStaleLoad(keepPath: string | null): void {
 }
 
 /**
- * The delete BARRIER (Fable-round-7): release `path`'s native context and CONFIRM its disposal before the
+ * The delete BARRIER: release `path`'s native context and CONFIRM its disposal before the
  * caller unlinks the file, so the GGUF is never removed while the native side may still map it. Returns:
  *   - `'released'`    — nothing maps `path` (never loaded/loading, or its release confirmed) → safe to unlink.
  *   - `'unconfirmed'` — still releasing/loading when the budget elapsed → keep the durable delete-pending and

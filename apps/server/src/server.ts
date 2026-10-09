@@ -52,7 +52,7 @@ const ephemeralDbKey = process.env.LOAM_DB_KEY === "ephemeral";
 // in config — same contract the embedded/Android launcher uses (embedded.ts). Unset = inferred from the key:
 // the `LOAM_DB_KEY === "ephemeral"` literal is `ephemeral`, any other key is a fixed `passphrase` key (so
 // the Emergency Reset journals its wipe), no key is no mode (resolveDbEncryptionMode).
-// Fail startup (CodeRabbit) rather than silently falling back on a garbled value or a contradiction: a typo
+// Fail startup rather than silently falling back on a garbled value or a contradiction: a typo
 // must not quietly disable encryption, and an ephemeral key paired with a non-ephemeral declared mode would
 // misreport the effective posture.
 const rawDbEncryptionMode = process.env.LOAM_DB_ENCRYPTION_MODE;
@@ -71,7 +71,7 @@ const app = await buildApp({
   clientDistDir: process.env.LOAM_CLIENT_DIST ?? join(rootDir, "apps/client/dist"),
   // An explicit override is passed through as-is (frozen for this boot); LAN address resolution here
   // is boot-time too — fine for the desktop/Pi CLI, whose network is up before this process starts
-  // (see docs/15 A7 for the embedded/Android host, which instead resolves at request time).
+  // (see `startEmbeddedServer` for the embedded/Android host, which instead resolves at request time).
   joinHost: process.env.LOAM_JOIN_HOST ?? resolveLanIPv4(),
   clientPort,
   dbEncryptionKey: ephemeralDbKey ? undefined : process.env.LOAM_DB_KEY,

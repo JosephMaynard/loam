@@ -1,9 +1,9 @@
-// Per-listener removal on the nodejs-mobile RN channel (pre-release review 2026-09-25).
+// Per-listener removal on the nodejs-mobile RN channel.
 //
-// The request/response round trips (db-encryption.ts, model-manager-bridge.ts) used to clean up with
-// `channel.removeAllListeners(resultEvent)`. With two overlapping round trips on the same result event,
-// the first to finish removed the SECOND one's listener too, so the second always timed out (failing
-// closed, but flaky). Each round trip must remove only its own listener.
+// The request/response round trips (db-encryption.ts, model-manager-bridge.ts) must each remove only
+// their own listener: with `channel.removeAllListeners(resultEvent)`, the first of two overlapping round
+// trips on the same result event to finish would remove the SECOND one's listener too, so the second
+// would always time out (failing closed, but flaky).
 //
 // The channel's `index.d.ts` types `addListener` as returning void and advertises a `removeListener` that
 // does NOT exist at runtime. What it really is: `EventChannel extends ChannelSuper extends` React Native's

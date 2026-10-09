@@ -435,7 +435,7 @@ export function createTransportIdentity(): TransportIdentity {
 
 /** Verify a persisted X25519 transport keypair is internally consistent — the public key is exactly the
  * one derived from the secret, and the secret is a valid 32-byte scalar. Guards against a corrupt or
- * mismatched stored record before it is trusted for a handshake (docs/20 #7). Returns false on any
+ * mismatched stored record before it is trusted for a handshake. Returns false on any
  * decode/derive error rather than throwing. */
 export function verifyTransportKeypair(publicKey: string, secretKey: string): boolean {
   try {

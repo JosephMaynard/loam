@@ -26,8 +26,9 @@ import {
 type DbEncryptionSettingsOverlayProps = {
   visible: boolean;
   onClose: () => void;
-  // The nodejs-mobile bridge channel (from index.tsx). Used only to write the mode-NAME hint
-  // transactionally with a selection (P1-b) — optional so the overlay still renders without it.
+  // The nodejs-mobile bridge channel (from index.tsx). Used to write the mode-NAME hint transactionally
+  // with a selection and to schedule the start-fresh an encrypted selection needs; optional so the
+  // overlay still renders without it (an encrypted selection is then refused).
   channel?: BridgeChannel;
   /** Opens Emergency reset (the network must be running); the section is hidden without it. */
   onEmergencyReset?: () => void;
@@ -50,10 +51,11 @@ function modeLabel(mode: DbEncryptionMode): string {
 const MODE_ORDER: readonly DbEncryptionMode[] = ['persistent', 'ephemeral', 'passphrase', 'off'];
 
 /**
- * The on-device DB-encryption mode picker (PR B — docs/01, docs/21): off / ephemeral / persistent /
- * passphrase, each with a one-line explanation. Purely a settings affordance — it only ever writes the
- * operator's choice (and, for passphrase mode, the passphrase itself) into `expo-secure-store`
- * (Keystore-backed); it never talks to the embedded server directly (same "never fetch an authenticated
+ * The on-device DB-encryption mode picker (docs/01, docs/21): off / ephemeral / persistent /
+ * passphrase, each with a one-line explanation. Purely a settings affordance: it writes the operator's
+ * choice (and, for passphrase mode, a one-time entry for the next start) into `expo-secure-store`
+ * (Keystore-backed) and asks the launcher over the bridge to record the mode hint or schedule a fresh
+ * database; it never talks to the embedded server directly (same "never fetch an authenticated
  * route from this process" rule as the model manager — see model-manager-bridge.ts). The choice takes
  * effect on the NEXT app (re)start, since main.js resolves the key once at boot
  * (nodejs-project-template/main.js's request/response handoff) and nodejs-mobile can't restart its
@@ -62,20 +64,20 @@ const MODE_ORDER: readonly DbEncryptionMode[] = ['persistent', 'ephemeral', 'pas
 export function DbEncryptionSettingsOverlay({ visible, onClose, channel, onEmergencyReset }: DbEncryptionSettingsOverlayProps) {
   const theme = useTheme();
   const [mode, setMode] = useState<DbEncryptionMode>('off');
-  // P1-3 (Sol round 7): TRI-STATE presence of a committed passphrase — `'error'` (a SecureStore read
-  // failure) must NEVER be shown as `'absent'`, which would expose the committed-overwrite entry path.
+  // TRI-STATE "does a passphrase govern this database?": `'error'` (a SecureStore read failure) must
+  // NEVER be shown as `'absent'`, which would offer the first-time entry path.
   const [passphrasePresence, setPassphrasePresence] = useState<PassphrasePresence>('absent');
-  // Whether an unverified passphrase CANDIDATE has been entered this session (P1-3, Sol round 7). The
-  // settings passphrase entry stores a candidate rather than committing, so `passphrasePresence` stays
-  // `'absent'` until a boot opens the DB under it — this flag lets the UI say "pending, applies on
-  // restart" instead of still showing a blank first-time-entry prompt.
+  // Whether an unverified passphrase CANDIDATE has been entered this session. The settings passphrase
+  // entry stores a candidate rather than committing, so `passphrasePresence` stays `'absent'` until a boot
+  // opens the DB under it; this flag lets the UI say "pending, applies on restart" instead of still
+  // showing a blank first-time-entry prompt.
   const [candidatePending, setCandidatePending] = useState(false);
   const [passphraseInput, setPassphraseInput] = useState('');
   const [statusMessage, setStatusMessage] = useState<string | undefined>();
   const [loaded, setLoaded] = useState(false);
-  // P1-3 (Sol round 8): a transition is in flight — drives the DISABLED state of every mode row.
+  // A transition is in flight: drives the DISABLED state of every mode row.
   const [transitioning, setTransitioning] = useState(false);
-  // P1-3 (Sol round 8): the SYNCHRONOUS in-flight guard. React `transitioning` state updates too late to
+  // The SYNCHRONOUS in-flight guard. React `transitioning` state updates too late to
   // block a second tap fired in the SAME tick (before the re-render disables the rows), so `handleSelect`
   // reads/sets this ref synchronously to reject any concurrent selection immediately. The underlying
   // `applyDbModeChange` also serializes the actual writes under a module-level mutex — this ref is the UI
@@ -94,8 +96,8 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel, onEmerg
     void (async () => {
       const [currentMode, passphraseSet] = await Promise.all([getDbEncryptionMode(), hasStoredPassphrase()]);
       if (!cancelled) {
-        // P1-3 (Sol round 5): a genuine SecureStore read failure (`DB_ENCRYPTION_MODE_READ_ERROR`) is
-        // NOT the same as "off selected" — showing 'off' here would misrepresent the operator's actual
+        // A genuine SecureStore read failure (`DB_ENCRYPTION_MODE_READ_ERROR`) is NOT the same as "off
+        // selected": showing 'off' here would misrepresent the operator's actual
         // (unknown, on this read) choice. Keep the last-known/default display and surface the failure
         // instead of silently overwriting it.
         if (currentMode === DB_ENCRYPTION_MODE_READ_ERROR) {
@@ -112,14 +114,14 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel, onEmerg
     };
   }, [visible]);
 
-  /** Actually persist the mode choice — the part `handleSelect` gates behind a destructive-action
-   * confirmation for the modes that can wipe or strand existing data (G4). Owns the in-flight guard
-   * lifecycle (P1-3, Sol round 8): sets it on entry, clears it (and the disabled UI state) in `finally`. */
+  /** Actually persist the mode choice: the part `handleSelect` gates behind a confirmation (a
+   * destructive-action one for the modes that can wipe or strand existing data). Owns the in-flight guard
+   * lifecycle: sets it on entry, clears it (and the disabled UI state) in `finally`. */
   const applyModeChange = async (next: DbEncryptionMode) => {
     transitionInFlight.current = true;
     setTransitioning(true);
     try {
-      // P1-3 (Sol round 8): `applyDbModeChange` runs the whole hint+mode transaction under a single-flight
+      // `applyDbModeChange` runs the whole hint+mode transaction under a single-flight
       // mutex and RE-READS the committed mode inside it, so the SecureStore mode and the mode-NAME hint can
       // never diverge into the dangerous state (SecureStore encrypted + hint 'off'/absent → a transient
       // boot-time key-request failure boots PLAINTEXT even WITH a DB) even under concurrent taps. For
@@ -146,20 +148,18 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel, onEmerg
         setStatusMessage(outcome.hintWarning ? t('encryption.offSavedHintWarning') : t('encryption.offSaved'));
         return;
       }
-      // P1-4-RN (Sol round 8): an encrypted mode can only apply to a FRESH database — there is no in-place
-      // conversion. EVERY confirmed destructive transition (any encrypted `next`, from ANY source mode)
+      // An encrypted mode can only apply to a FRESH database: there is no in-place conversion. EVERY
+      // confirmed transition to an encrypted `next`, from ANY source mode (encrypted→encrypted included),
       // must schedule the launcher's start-fresh, else the next boot surfaces a db_encryption boot error and
-      // drops the operator into the recovery screen unexpectedly (CodeRabbit MAJOR — previously this was
-      // gated on the source mode, so encrypted→encrypted and encrypted→ephemeral scheduled nothing).
+      // drops the operator into the recovery screen unexpectedly.
       //
-      // Sol P1 (release blocker): this is a DELIBERATE destructive mode change the operator explicitly
-      // confirmed, so the start-fresh request carries the `'delete'` intent. The server DELETES the existing
-      // database on the next boot (proving the old data is genuinely gone) rather than merely renaming it
-      // aside — the previous behaviour left an encrypted→encrypted source DB recoverable under the retained
-      // device secret even though the confirmation said "Delete & start fresh". The copy below now uniformly
-      // states the existing database is permanently deleted, matching what actually happens for BOTH the
-      // plaintext-source and encrypted-source cases. (The `'preserve'` intent — renaming the old ciphertext
-      // aside — is only for accidental wrong/lost-key lockout recovery, driven from the boot recovery screen.)
+      // This is a DELIBERATE destructive mode change the operator explicitly confirmed, so the start-fresh
+      // request carries the `'delete'` intent: the server DELETES the existing database on the next boot
+      // (proving the old data is genuinely gone) rather than renaming it aside, where an encrypted source DB
+      // would stay recoverable under the retained device secret. The confirmation copy states permanent
+      // deletion for both plaintext and encrypted sources, matching that. (The `'preserve'` intent, renaming
+      // the old ciphertext aside, is only for accidental wrong/lost-key lockout recovery, driven from the
+      // boot recovery screen.)
       let startFreshNote = '';
       if (channel) {
         const fresh = await requestDbStartFresh(channel, 'delete');
@@ -178,14 +178,14 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel, onEmerg
   };
 
   const handleSelect = (next: DbEncryptionMode) => {
-    // P1-3 (Sol round 8): reject a concurrent/same-tick selection IMMEDIATELY via the synchronous ref —
-    // the disabled UI state re-renders too late to stop a second tap fired before it lands.
+    // Reject a concurrent/same-tick selection IMMEDIATELY via the synchronous ref: the disabled UI state
+    // re-renders too late to stop a second tap fired before it lands.
     if (transitionInFlight.current) {
       return;
     }
-    // Re-selecting the ALREADY-active mode is a no-op — never run the destructive "delete & start fresh"
-    // flow for it (Fable review LOW-5): tapping the current encrypted row is a common "just checking" gesture,
-    // and it would otherwise invite an accidental deletion of a selection that changes nothing.
+    // Re-selecting the ALREADY-active mode is a no-op, never the destructive "delete & start fresh" flow:
+    // tapping the current encrypted row is a common "just checking" gesture, and it would otherwise invite
+    // an accidental deletion for a selection that changes nothing.
     if (next === mode) {
       setStatusMessage(t('encryption.alreadyActive', { mode: modeLabel(next) }));
       return;
@@ -212,11 +212,9 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel, onEmerg
     };
     Alert.alert(
       next === 'ephemeral' ? t('encryption.ephemeralConfirmTitle') : t('encryption.freshConfirmTitle'),
-      // Sol P1 (release blocker): a confirmed destructive mode change now DELETES the existing database
-      // server-side on the next restart (the start-fresh marker carries the `'delete'` intent), for BOTH a
-      // plaintext ('off') source and an encrypted source. The old copy told encrypted-source operators their
-      // data was only "set aside"/"no longer accessible" while the server retained the recoverable ciphertext
-      // under the kept device secret — so the confirmation now honestly states permanent deletion in every case.
+      // A confirmed destructive mode change DELETES the existing database server-side on the next restart
+      // (the start-fresh marker carries the `'delete'` intent), for BOTH a plaintext ('off') source and an
+      // encrypted source, so every variant of this copy states permanent deletion.
       next === 'ephemeral'
         ? t('encryption.ephemeralConfirmBody')
         : mode === 'off'
@@ -237,13 +235,12 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel, onEmerg
     );
   };
 
-  // P1-3 (Sol round 7): store the entry as an unverified CANDIDATE, never a direct committed overwrite.
-  // The settings overlay is reachable from the LOCKED boot screen, so "first-time entry ⇒ no encrypted DB
-  // exists" is NOT a valid invariant — a committed overwrite here could strand a DB encrypted under a
-  // different passphrase while it's under the OLD key. The candidate is tried at boot (`resolveDbKey`
-  // falls back to it when nothing is committed) and promoted to committed only once the server confirms
-  // the DB opened under it (`markPassphraseKeyMigrated`). A committed passphrase can therefore never be
-  // clobbered from here — and while one is committed, this entry isn't shown at all (see the render).
+  // Store the entry as an unverified one-time CANDIDATE, never a committed passphrase. The settings
+  // overlay is reachable from the LOCKED boot screen, so "first-time entry ⇒ no encrypted DB exists" is
+  // NOT a valid invariant: committing an entry here could strand a DB still encrypted under a different
+  // passphrase. The candidate is tried (and consumed) by the next boot's `resolveDbKey`; a wrong one simply
+  // fails to open the intact database and the operator is asked again. The passphrase itself is never
+  // committed; a confirmed open only records that one governs the DB (`markPassphraseKeyMigrated`).
   const handleSavePassphrase = async () => {
     const trimmed = passphraseInput;
     if (!trimmed) {
@@ -260,11 +257,9 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel, onEmerg
     setStatusMessage(t('encryption.passphraseEntered'));
   };
 
-  // P1-3 (Sol round 7): only report "forgotten" when the delete is CONFIRMED gone. The old best-effort
-  // clear always "succeeded", so a swallowed delete failure still flipped the UI to "no passphrase set" —
-  // re-exposing the entry path so a NEW passphrase could overwrite the still-committed old one while the
-  // DB was under the OLD key. On a failed/unverified clear, keep `passphrasePresence === 'present'` (so
-  // no first-time entry is offered) and surface the failure.
+  // Only report "forgotten" when the delete is CONFIRMED gone: a swallowed delete failure must not flip
+  // the UI to "no passphrase set" while the record still exists. On a failed/unverified clear, keep
+  // `passphrasePresence` as it was and surface the failure.
   const forgetPassphrase = async () => {
     const result = await clearStoredPassphrase();
     if (!result.ok) {
@@ -286,8 +281,8 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel, onEmerg
     ]);
   };
 
-  // P1-3 (Sol round 7): re-read passphrase presence after an `'error'` state (a transient SecureStore
-  // read failure). Until this comes back non-`'error'`, the UI refuses to show any entry/overwrite path.
+  // Re-read passphrase presence after an `'error'` state (a transient SecureStore read failure). Until
+  // this comes back non-`'error'`, the UI shows no entry path at all.
   const reloadPassphrasePresence = async () => {
     const presence = await hasStoredPassphrase();
     setPassphrasePresence(presence);
@@ -331,7 +326,7 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel, onEmerg
                     <Pressable
                       key={entry}
                       onPress={() => handleSelect(entry)}
-                      // P1-3 (Sol round 8): disable EVERY mode row while a transition is in flight, so a
+                      // Disable EVERY mode row while a transition is in flight, so a
                       // second selection can't start until the first fully commits/rolls back.
                       disabled={transitioning}
                       accessibilityRole="radio"
@@ -356,12 +351,12 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel, onEmerg
                 <ThemedView type="backgroundElement" style={styles.passphraseCard}>
                   <ThemedText type="smallBold">{t('encryption.passphraseHeading')}</ThemedText>
                   {passphrasePresence === 'present' ? (
-                    // P2-a (Sol round 6): a passphrase is already set — do NOT offer to REPLACE it here.
-                    // There is no in-place passphrase rekey, so overwriting the stored passphrase would
-                    // leave the existing database encrypted under the OLD key and unreadable. Changing a
-                    // passphrase must go through the explicit destructive start-fresh flow, which discards
-                    // the existing encrypted data. "Forget" disables passphrase mode (no key until a new
-                    // one is entered) and is likewise destructive to access of the existing DB.
+                    // A passphrase already governs this database. There is no in-place passphrase rekey, so
+                    // this screen can't CHANGE it: the entry here is only a one-time candidate for the next
+                    // start (a wrong one just fails to open and is asked for again). Changing a passphrase
+                    // goes through the explicit destructive start-fresh flow, which discards the existing
+                    // encrypted data. "Forget" only clears the "set" record and any pending entry; the
+                    // database still needs the same passphrase at the next start.
                     <>
                       <ThemedText type="small" themeColor="textSecondary">
                         {t('encryption.passphrasePresent')}
@@ -397,9 +392,9 @@ export function DbEncryptionSettingsOverlay({ visible, onClose, channel, onEmerg
                       </View>
                     </>
                   ) : passphrasePresence === 'error' ? (
-                    // P1-3 (Sol round 7): a SecureStore read failure — we do NOT know whether a passphrase
-                    // is committed, so we must NOT show the first-time-entry (committed-overwrite) path,
-                    // which could clobber an existing passphrase and strand the DB. Offer only a retry.
+                    // A SecureStore read failure: we do NOT know whether a passphrase governs this
+                    // database, so show no entry path at all (the presence-error copy promises that).
+                    // Offer only a retry.
                     <>
                       <ThemedText type="small" themeColor="textSecondary">
                         {t('encryption.presenceError')}

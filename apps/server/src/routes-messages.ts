@@ -1,5 +1,4 @@
-// Messages: DMs, search, create, edit, delete. Extracted verbatim from app.ts (2026-09-04 split) over the
-// shared AppContext.
+// Messages: DMs, search, create, edit, delete, registered over the shared AppContext.
 import { type DmInbox, type Message, MessageCreateRequestSchema, MessageEditRequestSchema, MessageSchema, SearchQuerySchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
@@ -75,8 +74,8 @@ export function registerMessageRoutes(ctx: AppContext): void {
       return reply.code(403).send(errorBody(accessError));
     }
 
-    // Validate the querystring shape: a repeated key (`?q=a&q=b`) arrives as an ARRAY, which used to reach
-    // `.trim()` and surface as a 500 echoing the TypeError.
+    // Validate the querystring shape: a repeated key (`?q=a&q=b`) arrives as an ARRAY, which must get a
+    // 400 here rather than reach `.trim()` and surface as a 500.
     const params = SearchQuerySchema.safeParse(request.query);
 
     if (!params.success) {

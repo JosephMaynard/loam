@@ -1,13 +1,12 @@
-// The activate / deactivate / delete transaction logic for the on-device model manager, EXTRACTED out
-// of `model-manager.tsx` (P2-2 round 5) so the full persist → bridge → rollback transaction is unit
-// testable and — critically — so it can be SERIALIZED as one indivisible operation.
+// The activate / deactivate / delete transaction logic for the on-device model manager, kept out of
+// `model-manager.tsx` so the full persist → bridge → rollback transaction is unit testable and —
+// critically — so it can be SERIALIZED as one indivisible operation.
 //
-// The bug this fixes: `model-manager.tsx` used to persist each state change through
-// `mutateModelManagerState` (which serializes individual state WRITES) but then `await`ed the bridge
-// call OUTSIDE that queue, and its rollback restored `activeId` UNCONDITIONALLY. So two operations
-// could interleave — activate A (persist A, await bridge) → activate B (persist B, bridge ok) → A's
-// bridge fails → A blindly rolls `activeId` back to its previous value, CLOBBERING B's newer, already
-// succeeded selection. Delete/deactivate had the same stale-rollback race.
+// The race it prevents: `mutateModelManagerState` serializes individual state WRITES, but the bridge
+// call happens between writes. Without transaction-level serialization two operations could interleave
+// — activate A (persist A, await bridge) → activate B (persist B, bridge ok) → A's bridge fails → A
+// rolls `activeId` back to its previous value, CLOBBERING B's newer, already succeeded selection.
+// Delete/deactivate have the same stale-rollback race.
 //
 // Two independent defenses close it, both implemented here:
 //   1. A global operation mutex (`runExclusive`): only ONE activate/deactivate/delete transaction runs
@@ -38,22 +37,22 @@ export interface ModelActionDeps {
   setActiveModel(request: SetActiveModelRequest): Promise<ActiveModelResult>;
   /** Clear the launcher's active pointer — the bridge's `clearActiveModel(channel)`. */
   clearActiveModel(): Promise<ActiveModelResult>;
-  /** Irreversibly delete a downloaded GGUF's bytes. MUST be a CHECKED delete (Finding 1) — it PROPAGATES
+  /** Irreversibly delete a downloaded GGUF's bytes. MUST be a CHECKED delete — it PROPAGATES
    * a filesystem failure and only resolves once the file is confirmed gone (bound to
    * `deleteModelFileChecked`, not the best-effort `safeDelete`). The transactions below rely on that: a
    * throw here keeps the durable delete-pending in place so reconciliation retries, rather than reporting
    * a model "deleted" while its multi-GB file silently remains on disk. */
   deleteModelFile(uri: string): Promise<void>;
-  /** Notify the single-actor engine of the DURABLE new active model (bound to `reconcileActiveModel`,
-   * Fable-round-7) — called after EVERY confirmed `activeId` outcome: a set-active whose bridge
+  /** Notify the single-actor engine of the DURABLE new active model (bound to `reconcileActiveModel`)
+   * — called after EVERY confirmed `activeId` outcome: a set-active whose bridge
    * succeeded/timed-out (durable truth is the new model), a deactivate (`null`), a rollback (the restored
    * model), or a reconcile that cleared/changed the pointer. Target-aware: releases a loaded context that is
    * no longer the target and abandons an in-flight load of a now-stale model, but LEAVES the target alone —
-   * so a failed switch that rolls back to the previous model never destroys its working context (Sol
-   * Fable-round-5 P2#2). Synchronous, never throws. `null` = nothing active. */
+   * so a failed switch that rolls back to the previous model never destroys its working context.
+   * Synchronous, never throws. `null` = nothing active. */
   reconcileActiveModel(nextPath: string | null): void;
   /** Synchronously abandon an in-flight load whose path differs from `keepPath` (bound to
-   * `invalidateStaleLoad`, Fable-round-7) — call this the instant a new active model is durably PERSISTED,
+   * `invalidateStaleLoad`) — call this the instant a new active model is durably PERSISTED,
    * BEFORE the fallible launcher bridge. It stops a load of the OLD model publishing during the bridge
    * window WITHOUT releasing a loaded context, so a bridge failure that rolls the selection back leaves the
    * previously working (loaded) model untouched. Synchronous, never throws. */
@@ -77,7 +76,7 @@ export type ContextReleaseOutcome = 'released' | 'unconfirmed' | 'poisoned';
  *   - `'rolled-back'`  — the launcher DEFINITELY failed (`ok:false`); the local change was cleanly and
  *                        conditionally reverted.
  *   - `'ambiguous'`    — the bridge timed out after retries (couldn't confirm); the local change was
- *                        LEFT in place (never wrongly rolled back — P2-1), to be reconciled later.
+ *                        LEFT in place (never wrongly rolled back), to be reconciled later.
  *   - `'persist-failed'` — the durable local write itself failed; nothing else was attempted.
  * `state` is the state the UI should adopt (absent only for `'persist-failed'`, where nothing changed). */
 export type ModelActionResult = {
@@ -115,7 +114,7 @@ export function runExclusive<T>(op: () => Promise<T>): Promise<T> {
 // ---------------------------------------------------------------------------
 
 /**
- * Set `model` active. WRITE-AHEAD intent journal (P2-1): persist `activeId = model.id` AND a durable
+ * Set `model` active. WRITE-AHEAD intent journal: persist `activeId = model.id` AND a durable
  * pending-`setActive` record in ONE atomic write, BEFORE the bridge call — so if the process dies at any
  * point after, reconciliation re-sends the (idempotent) launcher write and settles it, and the pending's
  * `modelPath` keeps the file sweep-protected. Only after a CONFIRMED bridge result do we durably clear
@@ -143,7 +142,7 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
     return { kind: 'persist-failed', message: PERSIST_FAILED_MESSAGE };
   }
 
-  // At PERSIST, before the fallible bridge (Fable-round-7 / Sol P2#2): synchronously abandon an in-flight load
+  // At PERSIST, before the fallible bridge: synchronously abandon an in-flight load
   // of the OLD model so it can't publish during the bridge window — but do NOT release a loaded context. If
   // the bridge then fails and we roll back, the previously working (loaded) model must be untouched.
   deps.invalidateStaleLoad(model.uri);
@@ -154,7 +153,7 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
     // NOW, after the bridge confirmed — never before it.
     deps.reconcileActiveModel(model.uri);
     // Confirmed. Durably CLEAR the write-ahead pending — but only report a clean `ok` once that clear is
-    // itself confirmed on disk (P2-1). If it fails to persist, the on-disk pending survives, so report
+    // itself confirmed on disk. If it fails to persist, the on-disk pending survives, so report
     // `ambiguous` and let the next reconcile finish it rather than claim a settled state that isn't.
     const cleared = await clearPendingEntry(deps, POINTER_PENDING_ID);
     if (!cleared.persisted) {
@@ -181,7 +180,7 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
           : `Couldn't set ${model.displayName} active, and the rollback also failed to save: local state and the host app's config may now disagree. Restart the LOAM host app.`,
     });
     // Definite failure → rolled back to the PREVIOUS model. Synchronize the engine to the DISK-CONFIRMED
-    // result (Sol P2#2): if B was still loaded/loading it is now released/abandoned; if the restored model is
+    // result: if B was still loaded/loading it is now released/abandoned; if the restored model is
     // what was loaded all along, it is left untouched (the reconcile is target-aware). This is why we did NOT
     // eagerly release the old model at persist time.
     const restoredUri =
@@ -208,7 +207,7 @@ export async function performSetActive(deps: ModelActionDeps, model: DownloadedM
  */
 export async function performDeactivate(deps: ModelActionDeps): Promise<ModelActionResult> {
   let previousActiveId: string | undefined;
-  // Write-ahead intent (P2-1): clear `activeId` AND record a durable pending-`clear` in one atomic write
+  // Write-ahead intent: clear `activeId` AND record a durable pending-`clear` in one atomic write
   // before the bridge call — same durability guarantee as `performSetActive`.
   const { state, persisted } = await deps.mutate((current) => {
     previousActiveId = current.activeId;
@@ -277,27 +276,28 @@ export async function performDeactivate(deps: ModelActionDeps): Promise<ModelAct
  *   1. Persist the metadata removal (drop from `downloaded`; clear `activeId` if it was active) AND — in
  *      the SAME atomic write — record a durable write-ahead `delete` pending whose `fileUri` keeps the
  *      bytes sweep-protected until the deletion is confirmed (recorded for BOTH the active and inactive
- *      cases now — Finding 1 — so a byte-deletion failure is durably retryable in either).
+ *      cases, so a byte-deletion failure is durably retryable in either).
  *   2. If it was active, clear the launcher's active pointer and CHECK the result.
  *   3. Only on a confirmed `'ok'` (or if there was nothing active to clear) do we perform the
- *      IRREVERSIBLE byte deletion — now a CHECKED delete (Finding 1) that throws if the file survives.
+ *      IRREVERSIBLE byte deletion — a CHECKED delete that throws if the file survives, after the
+ *      native-context release barrier (`confirmActiveModelReleased`) confirms nothing still maps it.
  *   4. Delete the bytes, THEN clear the pending. If the byte delete FAILS we keep the pending and report
  *      `ambiguous` (never a false "deleted"), so reconciliation retries the idempotent checked deletion.
  * A DEFINITE clear failure conditionally rolls the metadata back (re-add the model, restore `activeId`,
  * drop the write-ahead pending) and leaves the file on disk. A TIMEOUT is ambiguous: we still do NOT
  * delete the bytes (can't confirm the launcher released the file — a dangling pointer to MISSING bytes is
- * the one outcome to avoid), and — per P2-1 — do NOT roll back either (the clear may have landed); the
+ * the one outcome to avoid), and do NOT roll back either (the clear may have landed); the
  * metadata stays removed and the delete-pending drives the retry. Exposed for interleaving tests.
  */
 export async function performDelete(deps: ModelActionDeps, model: DownloadedModel): Promise<ModelActionResult> {
   const pendingId = `delete:${model.uri}`;
   let wasActive = false;
-  // Write-ahead intent (P2-1): remove the metadata AND record a durable pending-`delete` in ONE atomic
+  // Write-ahead intent: remove the metadata AND record a durable pending-`delete` in ONE atomic
   // write, BEFORE the bridge clear. The pending's `fileUri` keeps the bytes sweep-protected from the
   // moment the metadata is gone (closing the "restart finds metadata removed but no pending protection →
   // sweep deletes the file" window), and reconciliation re-sends the clear (if it was active) / retries
-  // the byte deletion if we die before confirming. This preserves any OTHER `pending` entries: the old
-  // reconstruction returned a bare `{ downloaded, activeId }`, silently DROPPING the whole pending array.
+  // the byte deletion if we die before confirming. Spreads `current` so any OTHER `pending` entries are
+  // preserved.
   const { state, persisted } = await deps.mutate((current) => {
     wasActive = current.activeId === model.id;
     const remaining = current.downloaded.filter((existing) => existing.id !== model.id);
@@ -319,7 +319,7 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
       };
     }
     // Inactive delete: leave `activeId` (and any launcher-pointer pending for ANOTHER model) untouched,
-    // and append the delete-pending as a pure byte-deletion journal (Finding 1) — superseding only an
+    // and append the delete-pending as a pure byte-deletion journal — superseding only an
     // existing same-file entry, never the pointer — so a failed byte delete is durably retryable. Records
     // `requiresLauncherClear: false` so reconciliation never issues a launcher clear the file never needed.
     return {
@@ -337,7 +337,7 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
 
   if (wasActive) {
     // Persist cleared activeId AHEAD of the bridge (write-ahead). Before the fallible bridge, abandon an
-    // in-flight load of the model being deleted (Sol P2) so a fresh A context can't publish and MAP a file
+    // in-flight load of the model being deleted so a fresh A context can't publish and MAP a file
     // we are about to unlink — invalidateStaleLoad only abandons an in-flight load, it never releases a
     // loaded context. The actor's `desired` stays A until an outcome-driven reconcileActiveModel below, so a
     // concurrent inference reads the optimistic activeId=null, sees it disagrees with `desired`, and reports
@@ -364,7 +364,7 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
           pending: dropPending(current.pending, pendingId),
         };
       });
-      // Rolled back to the disk-confirmed active model → commit the actor transition to it (Sol P2). Target-
+      // Rolled back to the disk-confirmed active model → commit the actor transition to it. Target-
       // aware: if that model is the loaded one, it is LEFT untouched; the delete never destroyed it.
       const restoredUri =
         rolled?.activeId !== undefined ? rolled.downloaded.find((m) => m.id === rolled.activeId)?.uri ?? null : null;
@@ -378,11 +378,11 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
       };
     }
     if (result.status === 'timeout') {
-      // Ambiguous: don't roll back (P2-1) and — critically — don't delete the bytes, since we can't
+      // Ambiguous: don't roll back and — critically — don't delete the bytes, since we can't
       // confirm the launcher released the file. The write-ahead delete-pending is ALREADY durable (its
-      // `fileUri` is a do-not-sweep reference guarding against the dangling-pointer bug), so there is
-      // nothing more to persist — reconciliation re-sends the clear and deletes the bytes once CONFIRMED.
-      // Durable truth is "no active model", so converge the actor to null now (Sol P2) — otherwise a loaded
+      // `fileUri` is a do-not-sweep reference, so config.json can never point at a swept file), so there
+      // is nothing more to persist — reconciliation re-sends the clear and deletes the bytes once CONFIRMED.
+      // Durable truth is "no active model", so converge the actor to null now — otherwise a loaded
       // A stays resident indefinitely until a later inference or manager reconcile.
       deps.reconcileActiveModel(null);
       return {
@@ -391,7 +391,7 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
         message: `Removed ${model.displayName} from the list, but couldn't confirm the host app released it (${result.error ?? 'no response'}), so its file was kept for now. It'll be reconciled next time you open the model manager or restart the host.`,
       };
     }
-    // Confirmed `ok` — the launcher released the file. Commit the actor to "no active model" FIRST (Sol P2:
+    // Confirmed `ok` — the launcher released the file. Commit the actor to "no active model" FIRST (this
     // updates `desired` to null and enqueues the release of a loaded A), THEN run the CONFIRMED-release
     // barrier in `commitByteDeletion` (path-aware, bounded) which confirms native disposal before the checked
     // byte delete, so the GGUF is never unlinked while the native context may still map it (queue ordering:
@@ -406,7 +406,7 @@ export async function performDelete(deps: ModelActionDeps, model: DownloadedMode
 }
 
 /**
- * Finish a delete transaction by performing the IRREVERSIBLE byte deletion, CHECKED (Finding 1), then
+ * Finish a delete transaction by performing the IRREVERSIBLE byte deletion, CHECKED, then
  * clearing the write-ahead delete-pending — in that order, so a delete that leaves the file on disk keeps
  * the durable pending for reconciliation to retry instead of ever reporting a false "deleted":
  *   - the checked `deps.deleteModelFile` THROWS if the file survives → keep the pending (its `fileUri`
@@ -421,7 +421,7 @@ async function commitByteDeletion(
   model: DownloadedModel,
   writeAheadState: ModelManagerState,
 ): Promise<ModelActionResult> {
-  // BARRIER (CodeRabbit): CONFIRM the native context is released (path-aware, bounded) BEFORE unlinking the
+  // BARRIER: CONFIRM the native context is released (path-aware, bounded) BEFORE unlinking the
   // GGUF, so the file is never removed while the native side may still map it. An unconfirmed/poisoned
   // release keeps the durable delete-pending and defers the byte delete to reconciliation — never blocking
   // the operation mutex on a release that may never settle. For an inactive (not-loaded) model this returns
@@ -460,9 +460,9 @@ async function commitByteDeletion(
 /**
  * Conditional (versioned) rollback of `activeId`: revert to `restoreTo` ONLY if the current `activeId`
  * still equals `expected` (what the failed op set). If a later op already changed it, this is a no-op,
- * so a stale rollback can never clobber a newer selection (the P2-2 clobber guard, belt-and-suspenders
- * with the mutex). When it DOES revert, it also drops the failed op's write-ahead `pendingId` in the
- * SAME atomic write (P2-1) — a definitively-failed action must not leave a stale pending that replays
+ * so a stale rollback can never clobber a newer selection (belt-and-suspenders with the mutex). When it
+ * DOES revert, it also drops the failed op's write-ahead `pendingId` in the SAME atomic write — a
+ * definitively-failed action must not leave a stale pending that replays
  * after restart. `persisted` is threaded into the message so a failed rollback-save is surfaced, never
  * assumed durable.
  */
@@ -488,7 +488,7 @@ async function rollbackActiveId(
 }
 
 // ---------------------------------------------------------------------------
-// Durable pending-action reconciliation (P2-b).
+// Durable pending-action reconciliation.
 // ---------------------------------------------------------------------------
 
 /** Outcome of a reconciliation pass. `settled` is true only when NO pending actions remain (every one
@@ -497,7 +497,7 @@ async function rollbackActiveId(
 export type ReconcileResult = {
   state: ModelManagerState;
   settled: boolean;
-  /** RF7-b: true when reconcile could NOT reliably READ the persisted state — its identity mutate refused
+  /** True when reconcile could NOT reliably READ the persisted state — its identity mutate refused
    * because `readModelManagerState()` errored (a transient I/O failure / corruption, NOT a clean absence).
    * The returned `state` is then an UNTRUSTED `EMPTY_STATE`: the component must NOT adopt it or run the
    * orphan sweep against it (doing so would delete every downloaded `.gguf`), and must block the
@@ -511,8 +511,8 @@ function dropPending(pending: PendingAction[] | undefined, id: string): PendingA
   return (pending ?? []).filter((entry) => entry.id !== id);
 }
 
-/** Drop pending entry `id`, returning the store's `MutateResult` so callers can CHECK `persisted`
- * (P2-1): a settled/ok outcome may only be reported when the drop is CONFIRMED on disk — otherwise the
+/** Drop pending entry `id`, returning the store's `MutateResult` so callers can CHECK `persisted`:
+ * a settled/ok outcome may only be reported when the drop is CONFIRMED on disk — otherwise the
  * on-disk pending survives and would replay after restart. */
 async function clearPendingEntry(deps: ModelActionDeps, id: string): Promise<MutateResult> {
   return deps.mutate((current) => ({ ...current, pending: dropPending(current.pending, id) }));
@@ -549,8 +549,8 @@ async function reconcileOne(
   }
 
   if (result.status === 'ok') {
-    // A confirmed `clear` means the launcher released the active model — converge the engine to null too
-    // (Finding 1), the same as a direct deactivate, so a clear that only settled on RECONCILIATION (e.g. it
+    // A confirmed `clear` means the launcher released the active model — converge the engine to null too,
+    // the same as a direct deactivate, so a clear that only settled on RECONCILIATION (e.g. it
     // timed out originally) still reclaims the context. `setActive` converges to the model below. Before drop.
     if (action.kind === 'clear') {
       deps.reconcileActiveModel(null);
@@ -558,7 +558,7 @@ async function reconcileOne(
       // Confirmed `setActive`: durable truth is now this model — converge the engine to it.
       deps.reconcileActiveModel(action.desired.modelPath ?? null);
     }
-    // Confirmed. Durably drop the pending and CHECK it landed (P2-1): only once the drop is on disk may
+    // Confirmed. Durably drop the pending and CHECK it landed: only once the drop is on disk may
     // we treat it settled. If the drop write fails, keep the pending in our view so the next pass retries;
     // never report settled off an in-memory assumption that isn't on disk.
     const cleared = await clearPendingEntry(deps, action.id);
@@ -581,7 +581,7 @@ async function reconcileOne(
     if (!persisted) {
       return state;
     }
-    // Sol round-6 P2#1: the mutate may have CLEARED `activeId` (the launcher never activated this model), or
+    // The mutate may have CLEARED `activeId` (the launcher never activated this model), or
     // left a newer selection in place. Either way, converge the engine to the disk-confirmed resulting target
     // — otherwise a load/loaded context for the model we just abandoned could still publish and run.
     const resultingUri =
@@ -589,7 +589,7 @@ async function reconcileOne(
     deps.reconcileActiveModel(resultingUri);
     return next;
   }
-  // A definite-failure `clear` (CodeRabbit): `clearActiveModel()` returned failed, so the launcher STILL
+  // A definite-failure `clear`: `clearActiveModel()` returned failed, so the launcher STILL
   // holds its old active pointer while local `activeId` is already unset — a divergence. Dropping the journal
   // here would stop retrying and leave that divergence permanent (the launcher keeps feeding the LLM the old
   // model). KEEP the pending untouched so a later reconcile pass re-sends the clear until it confirms.
@@ -597,10 +597,10 @@ async function reconcileOne(
 }
 
 /**
- * Reconcile ONE durable `delete` pending (P2-b + Finding 1). Ordered CHECKED-delete-then-clear, and
+ * Reconcile ONE durable `delete` pending. Ordered CHECKED-delete-then-clear, and
  * gated so it never wrongly touches the launcher pointer:
  *   - It clears the launcher's active pointer ONLY when this delete recorded `requiresLauncherClear` (the
- *     deleted model WAS active — CodeRabbit) AND local truth (`state.activeId`) still says nothing should be
+ *     deleted model WAS active) AND local truth (`state.activeId`) still says nothing should be
  *     active. An INACTIVE delete (`requiresLauncherClear: false`) never touches the launcher — the file was
  *     never referenced, so it goes straight to the byte deletion and can't be wrongly blocked by a launcher
  *     hiccup. A legacy entry with the field ABSENT defaults to `true` (those were only ever active deletes).
@@ -628,7 +628,7 @@ async function reconcileDelete(
     }
   }
   if (action.fileUri) {
-    // CONFIRMED-release barrier before the unlink (CodeRabbit): reconciling a delete that only settled this
+    // CONFIRMED-release barrier before the unlink: reconciling a delete that only settled this
     // pass still reclaims the context AND never unlinks a still-mapped file. PATH-AWARE, so an OLD delete for
     // model A never releases a newly-loaded B (returns 'released' immediately when A isn't loaded). An
     // unconfirmed/poisoned release keeps the pending for the next pass rather than unlinking a mapped file.
@@ -647,14 +647,14 @@ async function reconcileDelete(
 }
 
 /**
- * Reconcile the durable pending set (P2-b): re-send each unconfirmed launcher write and settle it. Runs
+ * Reconcile the durable pending set: re-send each unconfirmed launcher write and settle it. Runs
  * under the global operation mutex so it can't interleave with an activate/deactivate/delete, and reads
  * the FRESHLY-persisted pending set (via a `mutate` identity read) so it picks up entries written by a
  * previous process. The manager calls this on open BEFORE enabling controls or running the orphan sweep.
  */
 export function reconcilePendingActions(deps: ModelActionDeps): Promise<ReconcileResult> {
   return runExclusive(async () => {
-    // RF7-b: CHECK `persisted` on the identity read. `mutateModelManagerState` REFUSES (returns
+    // CHECK `persisted` on the identity read. `mutateModelManagerState` REFUSES (returns
     // `{ state: EMPTY_STATE, persisted: false }`) when `readModelManagerState()` errors — a transient
     // I/O failure or corruption that is NOT a clean absence. If we trusted that EMPTY_STATE here, reconcile
     // would see `pending: []`, report `settled: true`, and the component would adopt an empty model list

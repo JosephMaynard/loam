@@ -220,8 +220,8 @@ function promptHidden(question) {
 }
 
 /**
- * Resolve the `--encrypt` key WITHOUT putting a passphrase in argv where avoidable (pre-release review
- * 2026-09-25): an argv passphrase is readable by every local user via `ps` and lands in shell history.
+ * Resolve the `--encrypt` key WITHOUT putting a passphrase in argv where avoidable: an argv
+ * passphrase is readable by every local user via `ps` and lands in shell history.
  * Order: `--encrypt <value>` (warned; `ephemeral` is not a secret) → $LOAM_DB_KEY → an interactive no-echo
  * prompt (confirmed twice when no database exists yet, so a typo can't lock a brand-new DB) → ephemeral.
  * An empty answer means ephemeral only for a NEW database: a fresh RAM-only key can never open an existing

@@ -1,4 +1,4 @@
-// Incoming-URL policy for the host app (pre-release review 2026-09-25).
+// Incoming-URL policy for the host app.
 //
 // app.json keeps `scheme: "loam"` because Expo Router needs one: on Android it resolves its root URL
 // through `Linking.createURL('/')`, which THROWS in a release build when no scheme is configured. That

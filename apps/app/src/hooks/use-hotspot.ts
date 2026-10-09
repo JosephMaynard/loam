@@ -343,11 +343,11 @@ function publishAddress(
 let systemStopSubscribed = false;
 
 /**
- * Reflect a SYSTEM-initiated hotspot stop (review 2026-09-04): Android tears a LocalOnlyHotspot down
- * when the user enables the phone's own tethering (Android permits one or the other), toggles Wi-Fi, or
- * an OEM power policy fires. Previously nothing reached JS, so the phase stayed `running` forever — the
- * share screen kept showing the dead SSID/password QR and the hotspot-gateway join URL, and
- * `ensureHotspot` no-op'd on every reopen. Now the phase becomes an `error` with the reason: the panel
+ * Reflect a SYSTEM-initiated hotspot stop: Android tears a LocalOnlyHotspot down when the user enables
+ * the phone's own tethering (Android permits one or the other), toggles Wi-Fi, or an OEM power policy
+ * fires. Without this the phase would stay `running` forever — the share screen showing the dead
+ * SSID/password QR and the hotspot-gateway join URL, and `ensureHotspot` no-op'ing on every reopen.
+ * Instead the phase becomes an `error` with the reason: the panel
  * shows the LAN join addresses again, and reopening the share screen (which calls `ensureHotspot`, which
  * retries from `error`) starts a fresh hotspot. Deliberately NOT an automatic restart — the stop is
  * usually the operator's own doing (tethering), and fighting it would loop.

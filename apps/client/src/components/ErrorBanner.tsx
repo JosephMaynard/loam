@@ -18,10 +18,9 @@ export interface ErrorBannerProps {
 }
 
 /**
- * The app-level error notice (pre-release review 2026-09-25). It used to be a fixed box over the
- * bottom-right corner — exactly where the composer's send button sits — that nothing could dismiss.
- * Now it sits at the top of the viewport (clear of the composer on every layout, inside the safe area),
- * has a dismiss button, and transient errors clear themselves. `role="alert"` so it's announced.
+ * The app-level error notice. It sits at the top of the viewport (clear of the composer's send button on
+ * every layout, inside the safe area), has a dismiss button, and transient errors clear themselves.
+ * `role="alert"` so it's announced.
  * Callers key it per error occurrence so a repeat of the same message restarts the timer.
  */
 export function ErrorBanner({ message, transient, onDismiss }: ErrorBannerProps) {

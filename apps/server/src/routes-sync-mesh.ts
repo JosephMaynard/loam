@@ -1,6 +1,6 @@
 // Node-to-node sync endpoints (token-authed public data) and the opportunistic-mesh endpoints (identity
-// cards, contacts, sealed send/broadcast, the loopback transport bridge, admin sync). Extracted verbatim
-// from app.ts (2026-09-04 split) over the shared AppContext.
+// cards, contacts, sealed send/broadcast, the loopback transport bridge, admin sync), registered over the
+// shared AppContext.
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { MeshBroadcastRequestSchema, type MeshContact, MeshIdentityCardSchema, MeshInboundRequestSchema, type MeshInboundResponse, MeshSendRequestSchema, type SealedMessage, SyncAttachmentRequestSchema, type SyncLinkCodeResponse, SyncLinkRequestSchema, type SyncLinkResponse, SyncMessagesRequestSchema } from "@loam/schema";
@@ -106,7 +106,7 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
       try {
         const bytes = await readFile(join(ctx.attachmentsDir, attachmentFileName(attachment)));
         // A `.bin` (non-image) file name carries no MIME, so report the one recorded on the owning message
-        // — an undefined `mimeType` used to drop out of the JSON and fail the puller's schema check.
+        // — an undefined `mimeType` would drop out of the JSON and fail the puller's schema check.
         const entry =
           owningMessage.type !== "reaction" && owningMessage.type !== "sealed"
             ? owningMessage.attachments?.find((candidate) => candidate.id === attachment.id)

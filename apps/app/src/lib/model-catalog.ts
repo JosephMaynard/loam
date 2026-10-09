@@ -22,7 +22,7 @@
 // and read `.size` / `.lfs.oid`. A stale hash only ever causes a download to fail verification and
 // get deleted (see `model-download.ts`) — never a silent corruption.
 //
-// Hardware acceleration (Sol P2-5): every entry below is Q4_K_M. Android's OpenCL backend in
+// Hardware acceleration: every entry below is Q4_K_M. Android's OpenCL backend in
 // llama.rn/llama.cpp only accelerates a handful of quant formats — Q4_0 and Q6_K, notably, NOT
 // Q4_K_M — so a Q4_K_M download here most likely runs on CPU even on a phone with a usable GPU
 // backend (Hexagon/HTP offload is a separate, model-independent path — see on-device-llm.ts).
@@ -47,7 +47,7 @@ export type ModelCatalogEntry = {
    *
    * Every entry below IS pinned, and `model-download.ts` DOES verify it: hashing streams the file
    * through an incremental SHA-256 in fixed-size chunks (never holding more than one chunk in memory
-   * at once), so there's no size cap that skips the check for a large file any more — a mismatch, or
+   * at once), so no size cap skips the check for a large file — a mismatch, or
    * a hashing failure of any kind, fails closed (the file is deleted and the download rejected). See
    * `model-download.ts`'s "streaming SHA-256" section for the implementation, and its still-open
    * device-verification gate: hashing multi-GB files this way on a phone's JS thread has not yet been

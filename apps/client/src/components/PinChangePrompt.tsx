@@ -16,7 +16,7 @@ export interface PinChangePromptProps {
 
 /**
  * Asks the user before trusting a join link whose `#k=` key differs from the one this browser already
- * pinned for the node (pre-release review 2026-09-25). Shown only once the pinned key has stopped working
+ * pinned for the node. Shown only once the pinned key has stopped working
  * (the node's handshake reported another key), which is legitimate after an Emergency Reset or a restart
  * rotated the node's key and the user rescanned the new QR in person. Shows both fingerprints so the user can
  * compare with the one on the host's screen. When the link's key isn't even the node's (`matchesNode` false:

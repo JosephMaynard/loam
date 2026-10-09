@@ -20,11 +20,11 @@ import type { StoreDriver } from "./db.js";
  *   boot) so `buildApp` re-resolves the current best non-internal IPv4 on every request instead of
  *   freezing whatever was up (or nothing) at `startEmbeddedServer` time — the Android hotspot
  *   interface comes up *after* this process starts, so a boot-time scan can miss it entirely or
- *   capture a stale earlier address (docs/04, docs/15 A7). Set it to pin an explicit host instead.
+ *   capture a stale earlier address (docs/04). Set it to pin an explicit host instead.
  * - `LOAM_DB_DRIVER`  — plaintext SQLite backend: `better-sqlite3` (the Android host, whose Node 18
  *   lacks `node:sqlite`) or `node-sqlite` (default). Ignored when `LOAM_DB_KEY` enables encryption.
- * - `LOAM_DB_KEY_MIGRATE_FROM` — a prior (pre-round-4) passphrase key derivation to retry `openInitialStore`
- *   with if `LOAM_DB_KEY` can't open the database (P1-1, docs/15, Sol round 5); on success the database is
+ * - `LOAM_DB_KEY_MIGRATE_FROM` — the legacy passphrase key derivation (`SHA256(passphrase)` alone) to retry
+ *   `openInitialStore` with if `LOAM_DB_KEY` can't open the database; on success the database is
  *   `PRAGMA rekey`'d to `LOAM_DB_KEY` in place. Never set except by a launcher offering an unmigrated
  *   passphrase DB's legacy key. Never logged.
  * - `LOAM_DB_ENCRYPTION_MODE` — the launcher's declared at-rest key strategy (`off`/`ephemeral`/
@@ -32,9 +32,8 @@ import type { StoreDriver } from "./db.js";
  *   as `dbEncryptionMode` so the reported posture (`networkConfig.dbEncryption`) reflects what the
  *   launcher actually did with the key, not just the admin's declarative config axis, and so
  *   `executeKillSwitch` can tell a fixed (`persistent`/`passphrase`) key apart from a rotatable
- *   (`ephemeral`) one (P1-2). It does **not** drive `ephemeralDbKey` (P1-3, Sol round 3) — that comes
- *   ONLY from the literal `LOAM_DB_KEY==="ephemeral"` contract; see the note on `resolveEphemeralDbKey`
- *   below for why the mode used to also feed that decision, and why that was a bug.
+ *   (`ephemeral`) one. It does **not** drive `ephemeralDbKey`: that comes ONLY from the literal
+ *   `LOAM_DB_KEY==="ephemeral"` contract; see `resolveEphemeralDbKey` below.
  */
 export { resolveLanIPv4 as firstLanIPv4 } from "./net.js";
 
@@ -68,10 +67,9 @@ export function parseDbEncryptionMode(value: string | undefined): DbEncryptionMo
 /**
  * The at-rest key mode `buildApp` is told about. A declared mode wins. Without one, the key itself says what
  * it is: the `"ephemeral"` literal is a per-boot random key, and any other key is a fixed one this process
- * cannot replace, so it is reported and treated as `passphrase`. Before this, a fixed key with no declared
- * mode (the `loamnet --encrypt` CLI never sets `LOAM_DB_ENCRYPTION_MODE`) took the Emergency Reset's
- * unjournaled ephemeral branch, so a crash mid-wipe left media and no record of the interrupted wipe; the
- * fixed-key branch journals the wipe and resumes it on the next boot (docs/02). No key means no mode.
+ * cannot replace, so it is reported and treated as `passphrase`. This matters for the `loamnet --encrypt` CLI,
+ * which never sets `LOAM_DB_ENCRYPTION_MODE`: its fixed key must take the Emergency Reset's fixed-key branch,
+ * which journals the wipe and resumes it on the next boot (docs/02). No key means no mode.
  */
 export function resolveDbEncryptionMode(
   declared: DbEncryptionMode | undefined,
@@ -87,22 +85,15 @@ export function resolveDbEncryptionMode(
 }
 
 /**
- * Resolve whether the server should generate its own RAM-only ephemeral key (P1-3, docs/15, Sol round
- * 3). Honours ONLY the literal `LOAM_DB_KEY === "ephemeral"` contract — main.js's `ephemeral` branch
- * always sets exactly this literal (never a real hex key) before requiring the server bundle, so the
- * literal alone is a complete and authoritative signal.
+ * Resolve whether the server should generate its own RAM-only ephemeral key. Honours ONLY the literal
+ * `LOAM_DB_KEY === "ephemeral"` contract: the launcher's `ephemeral` boot always sets exactly this literal
+ * (never a real hex key) before requiring the server bundle, so the literal alone is a complete and
+ * authoritative signal.
  *
- * A previous version ALSO treated `mode === "ephemeral"` as ephemeral (P1-1), reasoning that a real
- * ephemeral session might one day pass a real hex key alongside the mode. That never happens in
- * practice (see main.js), and the extra clause created a WORSE bug (P1-3): when main.js downgrades to
- * the plaintext driver because the encrypted native module isn't available, it used to leave
- * `LOAM_DB_ENCRYPTION_MODE` at `"ephemeral"` while never setting `LOAM_DB_KEY` at all — so this
- * function still returned `true` (mode alone was enough), `ephemeralDbKey` got set, a random key was
- * generated, and `openStore` then tried to `require("better-sqlite3-multiple-ciphers")` — the exact
- * module main.js had just determined was MISSING — crash-looping boot instead of degrading. Checking
- * only the literal fixes this: an absent/unset `LOAM_DB_KEY` (main.js's downgrade branch also now sets
- * `LOAM_DB_ENCRYPTION_MODE="off"`, see main.js) can never resolve to ephemeral. `mode` is still THREADED
- * through to `buildApp` (see below) — it just no longer feeds this decision, only the reported posture.
+ * `LOAM_DB_ENCRYPTION_MODE` must not feed this decision. A boot that carries a mode but no key (an unset
+ * `LOAM_DB_KEY`) has to stay keyless: treating the mode alone as ephemeral would generate a random key and
+ * make `openStore` require the SQLCipher module on a boot that never selected it. The mode is still passed
+ * to `buildApp` (see below), only for the reported posture and the kill switch's branch choice.
  */
 export function resolveEphemeralDbKey(dbKeyEnv: string | undefined): boolean {
   return dbKeyEnv === "ephemeral";
@@ -141,7 +132,7 @@ export async function startEmbeddedServer(launcher: EmbeddedServerOptions = {}):
 
   // A declared mode wins; a real key with none declared is a fixed key (`passphrase`), see resolveDbEncryptionMode.
   const dbEncryptionMode = resolveDbEncryptionMode(parseDbEncryptionMode(process.env.LOAM_DB_ENCRYPTION_MODE), process.env.LOAM_DB_KEY);
-  // See `resolveEphemeralDbKey` (P1-3): the literal LOAM_DB_KEY="ephemeral" contract only. Any other
+  // See `resolveEphemeralDbKey`: the literal LOAM_DB_KEY="ephemeral" contract only. Any other
   // LOAM_DB_KEY value → passphrase/persistent key; unset → no encryption. `dbEncryptionMode` is passed
   // to `buildApp` below for posture reporting and the kill switch's fixed-key branch; it never feeds this
   // decision. See docs/02-kill-switch.md.
@@ -156,14 +147,14 @@ export async function startEmbeddedServer(launcher: EmbeddedServerOptions = {}):
     joinHost: process.env.LOAM_JOIN_HOST,
     clientPort,
     dbEncryptionKey: ephemeralDbKey ? undefined : process.env.LOAM_DB_KEY,
-    // P1-1 (Sol round 5): a prior (pre-round-4) passphrase key derivation, offered by main.js only when
+    // The legacy passphrase key derivation, offered by main.js only when
     // it hasn't recorded a confirmed migration yet (db-encryption.ts). `undefined` (never an empty
     // string) when main.js has nothing to offer — see `openInitialStore`'s migration attempt. Never
     // logged.
     dbEncryptionMigrateFromKey: process.env.LOAM_DB_KEY_MIGRATE_FROM || undefined,
     ephemeralDbKey,
     dbEncryptionMode,
-    // The launcher's immutable per-boot key-handoff id (Sol Fable-round-2 P1-B), captured ONCE here so the
+    // The launcher's immutable per-boot key-handoff id, captured ONCE here so the
     // passphrase-migration ack this boot emits is correlated to the exact attempt that opened the DB — never
     // a mutable launcher global a later/duplicate unlock overwrote. `undefined` when unset (non-passphrase
     // boots, non-launcher hosts).

@@ -1,5 +1,5 @@
 // Shared server types: the socket/session shapes, the in-memory data mirror, the client event union,
-// and the public `buildApp` option/handle types. Extracted from app.ts (2026-09-04 split).
+// and the public `buildApp` option/handle types.
 import type { FastifyInstance } from "fastify";
 import type { Channel, DbEncryptionMode, HostApi, Message, NetworkConfig, User } from "@loam/schema";
 
@@ -78,7 +78,7 @@ export type ClientEvent =
       onlineUserIds: string[];
     }
   | {
-      // Ephemeral "someone is composing" signal (P14). Never persisted. `channelId` set for channel typing;
+      // Ephemeral "someone is composing" signal. Never persisted. `channelId` set for channel typing;
       // `dmUserId` (the OTHER participant) set for DM typing. Scoped to the conversation audience, minus
       // the typist, by socketCanReceiveEvent.
       type: "typing";
@@ -122,9 +122,9 @@ export type AppOptions = {
    * Host used in the join URL returned by /api/bootstrap and /api/config. When set, it's used
    * verbatim on every response (the desktop/Pi CLI resolves its LAN address once at boot and passes
    * it here — fine, since that address is up before the process starts). When left unset, the join
-   * host is instead re-resolved via `resolveLanAddress` on every request (docs/15 A7) — the embedded
+   * host is instead re-resolved via `resolveLanAddress` on every request — the embedded
    * Android host needs this because its Wi-Fi hotspot interface comes up *after* boot, so a
-   * boot-frozen address served a stale (or missing) host to a QR generated once the hotspot is live.
+   * boot-frozen address would serve a stale (or missing) host to a QR generated once the hotspot is live.
    */
   joinHost?: string;
   /**
@@ -138,10 +138,10 @@ export type AppOptions = {
   /** When set, encrypt the database at rest (SQLCipher). Requires a real data dir, not in-memory. */
   dbEncryptionKey?: string;
   /**
-   * A PRIOR key derivation to fall back to if `dbEncryptionKey` can't open the database on boot (P1-1,
-   * Sol round 5): the Android launcher's passphrase-mode key derivation changed from `SHA256(passphrase)`
-   * (pre-round-4) to `SHA256(passphrase + ':' + deviceSecret)` (round 4+), so an existing passphrase DB
-   * only opens under the OLD derivation. `embedded.ts` threads its `LOAM_DB_KEY_MIGRATE_FROM` env
+   * A PRIOR key derivation to fall back to if `dbEncryptionKey` can't open the database on boot: the
+   * Android launcher's passphrase-mode key derivation changed from `SHA256(passphrase)` (older builds) to
+   * `SHA256(passphrase + ':' + deviceSecret)` (current), so a passphrase DB an older build wrote only
+   * opens under the OLD derivation. `embedded.ts` threads its `LOAM_DB_KEY_MIGRATE_FROM` env
    * through here. `openInitialStore` tries `dbEncryptionKey` first; only on failure, and only when this
    * is set, does it retry with this key — and on THAT success, `PRAGMA rekey`s the database to
    * `dbEncryptionKey` in place (see `LoamStore.rekey`) so every later boot uses the current key
@@ -156,17 +156,18 @@ export type AppOptions = {
    */
   ephemeralDbKey?: boolean;
   /**
-   * The caller's declared at-rest key strategy (P1-1/P2-1, docs/15) — the Android launcher threads its
-   * `LOAM_DB_ENCRYPTION_MODE` env through here (`embedded.ts`). This is the AUTHORITATIVE mode for
+   * The caller's declared at-rest key strategy — both entry points (`embedded.ts`, `server.ts`) pass
+   * `LOAM_DB_ENCRYPTION_MODE` through `resolveDbEncryptionMode`, which also treats an undeclared real
+   * `LOAM_DB_KEY` as `passphrase`. This is the AUTHORITATIVE mode for
    * `networkConfig.dbEncryption` reporting when present: unlike `appConfig.security.dbEncryption` (a
    * declarative admin-config axis that a headless launcher never PATCHes to match reality), this is
-   * what the caller actually did with the key. When absent (desktop/Pi CLI, most tests), reporting
-   * falls back to the declarative config axis as before. Never changes what encryption is actually
+   * what the caller actually did with the key. When absent (no key, most tests), reporting
+   * falls back to the declarative config axis. Never changes what encryption is actually
    * used — only `dbEncryptionKey`/`ephemeralDbKey` do that.
    */
   dbEncryptionMode?: DbEncryptionMode;
   /**
-   * The launcher's IMMUTABLE per-boot key-handoff request id (Sol Fable-round-2 P1-B) — `embedded.ts`
+   * The launcher's IMMUTABLE per-boot key-handoff request id — `embedded.ts`
    * reads it from `LOAM_DB_KEY_REQUEST_ID` once at boot. Captured here at buildApp time and forwarded in
    * the passphrase-migration ack ({@link reportDbKeyMigrated}) so the RN side promotes only the candidate
    * bound to the attempt that actually opened THIS DB, never a mutable global a later attempt overwrote.
@@ -219,14 +220,15 @@ export type AppOptions = {
    */
   tombstoneHorizonMs?: number;
   /**
-   * A per-boot secret proving a caller IS the host process (review 2026-09-04). Set by the Android
-   * launcher (`LOAM_HOST_TOKEN`, minted fresh every boot in `main.js` and handed only to the host's own
-   * WebView + courier). When present it (1) forces the effective admin bootstrap to `hostDevice` — see
-   * `effectiveAdminBootstrap` — so admin is claimable ONLY by presenting this token, never by being the
-   * first LAN session; and (2) is REQUIRED (header `x-loam-host-token`) on the loopback mesh bridge
+   * A per-boot secret proving a caller IS the host process. Set by the Android launcher
+   * (`LOAM_HOST_TOKEN`, minted fresh every boot in `main.js` and handed only to the host's own
+   * WebView + courier) and by the `loamnet` CLI (`cli/bin/loam.js`, which never hands it out). When
+   * present it (1) forces the effective admin bootstrap to `hostDevice` — see `effectiveAdminBootstrap` —
+   * so admin comes only from the host (this token, or a host-issued one-time claim code), never from being
+   * the first LAN session; and (2) is REQUIRED (header `x-loam-host-token`) on the loopback mesh bridge
    * routes, since on Android loopback is reachable by every installed app, not just the launcher.
-   * Unset on the desktop/Pi CLI and in tests, where the configured strategy applies unchanged — and
-   * without it the mesh bridge does not exist at all (review 2026-09-25).
+   * Unset by the plain `server.ts` entry and in most tests, where the configured strategy applies
+   * unchanged — and without it the mesh bridge does not exist at all.
    */
   hostToken?: string;
   /**
@@ -259,8 +261,8 @@ export type LoamApp = {
   reapOrphanedAttachments(): Promise<void>;
   /** Delete avatar image files no user references now (also runs once at boot). */
   reapOrphanedAvatars(): Promise<void>;
-  /** Retry attachments that failed to copy during a sync import now (also runs on the reaper timer;
-   * docs/15 A6) — re-fetches missing files from their source peer without re-importing the message. */
+  /** Retry attachments that failed to copy during a sync import now (also runs on the reaper timer)
+   * — re-fetches missing files from their source peer without re-importing the message. */
   retryMissingAttachments(): Promise<void>;
   /** Drop expired per-IP rate-limit entries (identity budget + claim/panic attempt limiters) now
    * (also runs on the reaper timer) so the maps stay bounded to the IPs active within a window. */

@@ -2,15 +2,15 @@
  * The last identity the SERVER confirmed for this browser (not the pre-hydration placeholder id), kept so
  * a boot can tell when the node handed back a different identity — its session was reset (Emergency
  * Reset, an expired cookie, a revoked token) while this browser was away and missed the `wipe` event.
- * The locally cached content then belongs to someone else and is purged (pre-release review 2026-09-25).
+ * The locally cached content then belongs to someone else and is purged.
  */
 export const CONFIRMED_USER_KEY = "loam.confirmedUserId";
 
 /**
  * Record `userId` as the server-confirmed identity. Returns `true` when a DIFFERENT identity had been
  * confirmed before. The first-ever confirmation (nothing stored) is not a change. Storage failures read as
- * "no change". The boot flow compares with {@link readConfirmedIdentity} FIRST, purges the cached content,
- * and records only afterwards — the record is what tells sibling tabs to reload (`listenForIdentityChange`),
+ * "no change". The boot flow ({@link confirmIdentity}) compares with the stored identity FIRST, purges the
+ * cached content, and records only afterwards — the record is what tells sibling tabs to reload (`listenForIdentityChange`),
  * so it must land on an already-cleared cache, and a crash mid-purge must leave the old identity in place
  * so the next boot purges again.
  */
@@ -29,7 +29,7 @@ export function recordConfirmedIdentity(userId: string): boolean {
  * The identity the server last confirmed for this browser, if any. Storage failures read as none — right
  * for the callers that only tag or filter by it (the tab identity, the cached block list). The purge
  * decision must NOT use this: `confirmIdentity` reads storage itself and treats a failure as "unknown",
- * which purges (CodeRabbit, PR #130) — never as "unrecorded", which would skip the purge.
+ * which purges — never as "unrecorded", which would skip the purge.
  */
 export function readConfirmedIdentity(): string | undefined {
   try {
@@ -40,7 +40,7 @@ export function readConfirmedIdentity(): string | undefined {
 }
 
 /**
- * Watch for ANOTHER tab confirming a different identity (pre-release review 2026-09-25). Tabs share
+ * Watch for ANOTHER tab confirming a different identity. Tabs share
  * IndexedDB and localStorage: when one of them learns the node reset this browser's identity, it purges the
  * shared cache — but a sibling tab still holds the previous identity's content in memory (and may have
  * hydrated it just before the purge). `mine()` is the identity this tab's content belongs to (`undefined`

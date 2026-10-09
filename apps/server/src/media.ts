@@ -1,5 +1,4 @@
-// Avatar/attachment file naming, size caps, and magic-byte checks. Extracted from app.ts
-// (2026-09-04 split).
+// Avatar/attachment file naming, size caps, and magic-byte checks.
 import { randomUUID } from "node:crypto";
 
 import type { AvatarImageMimeType, MessageAttachment } from "@loam/schema";
@@ -123,10 +122,9 @@ export function isAcceptableAttachmentBytes(bytes: Buffer, mimeType: MessageAtta
 
 export const attachmentFileMaxBytes = 1024 * 1024; // non-image file cap (no downscale) — modest for an off-grid LAN
 
-// Retry policy for a missing-attachment work item (docs/15 A6, F1). `retryMissingAttachments` runs on
-// the 30s reaper tick, but it must NOT actually contact the peer on every tick — that burned through
-// `attempts` in ~10 minutes with no backoff, making `missingAttachmentMaxAgeMs` (a days-scale bound)
-// dead: it could never be reached before attempts exhausted first. Instead, `attempts` only drives a
+// Retry policy for a missing-attachment work item. `retryMissingAttachments` runs on the 30s reaper
+// tick, but it must NOT contact the peer on every tick: without backoff the attempts would run out in
+// minutes, long before the days-scale `missingAttachmentMaxAgeMs` could apply. So `attempts` only drives a
 // growing backoff (`missingAttachmentBackoffMs`) between actual fetch attempts, and the age bound
 // below is the sole thing that governs giving up — deliberately generous, so a peer flapping in and
 // out over several hours or even days still converges.
@@ -136,7 +134,7 @@ export const missingAttachmentRetryBaseMs = 60_000; // first backoff step: 1 min
 
 export const missingAttachmentRetryMaxIntervalMs = 6 * 3_600_000; // cap: retry at most every 6 hours
 
-// SF3, docs/15: without a per-pass cap, a node with many stuck records could have each one consume up
+// Without a per-pass cap, a node with many stuck records could have each one consume up
 // to the full 10s peer-fetch timeout in a single pass, so a handful of unreachable records already
 // outlasts the 30s reaper tick on its own. Capping how many work items one pass even LOOKS at bounds
 // that worst case regardless of how many records are queued; the rest are simply due again on the next

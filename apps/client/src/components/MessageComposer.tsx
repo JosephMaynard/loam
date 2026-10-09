@@ -15,7 +15,7 @@ interface MessageComposerProps {
   disabledReason?: string;
   label: string;
   onSend: (body: string, attachments?: MessageAttachment[], location?: MessageLocation) => Promise<void>;
-  /** Fired (throttled by the caller) as the user types, to emit an ephemeral "typing…" signal (P14). */
+  /** Fired (throttled by the caller) as the user types, to emit an ephemeral "typing…" signal. */
   onTyping?: () => void;
   /** When present, the composer offers image attachments (resized on-device before upload). */
   onUploadAttachment?: (file: File) => Promise<MessageAttachment>;

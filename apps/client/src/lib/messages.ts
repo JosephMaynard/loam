@@ -370,8 +370,8 @@ export function messageConversationKey(message: Message, currentUserId: string):
  * snapshot in. The ONLY guard against pruning a legitimate message is `preFetchIds` — a message sent or
  * received while the request was in flight was not held when it started, so it is never prunable. A
  * message held before the request began and absent from the full snapshot IS a deletion, however new it
- * is: an earlier "never prune anything newer than the snapshot's newest entry" guard kept a deleted
- * NEWEST message alive forever (review 2026-09-09).
+ * is. (A "never prune anything newer than the snapshot's newest entry" guard would keep a deleted
+ * NEWEST message alive forever.)
  *
  * @param previous - Every cached message (all conversations).
  * @param conversation - The conversation the snapshot covers.
@@ -411,7 +411,7 @@ export function reconcileConversationSnapshot(
   }
 
   // The snapshot was taken when the request was served; a live `messageDeleted`/`messageUpdated` that
-  // arrived while it was in flight is NEWER than it (pre-release review 2026-09-25). Never resurrect a
+  // arrived while it was in flight is NEWER than it. Never resurrect a
   // message deleted since the fetch began, and keep a live edit/stream update over the snapshot's copy
   // unless the snapshot carries a strictly newer edit.
   const applied: Message[] = [];
@@ -499,8 +499,8 @@ export class LiveChangeJournal {
 /**
  * The newest `createdAt` among a conversation's messages (reactions excluded — they never count as
  * unread) — the conversation's read marker once it has been on screen. Server-assigned timestamps, so
- * unlike the client's own clock it compares correctly with the `createdAt` of later messages (pre-release
- * review 2026-09-25: a `Date.now()` marker from a clock running ahead hid genuinely new messages).
+ * unlike the client's own clock it compares correctly with the `createdAt` of later messages (a
+ * `Date.now()` marker from a clock running ahead would hide genuinely new messages).
  */
 export function newestMessageTimestamp(messages: Message[]): number | undefined {
   let newest: number | undefined;

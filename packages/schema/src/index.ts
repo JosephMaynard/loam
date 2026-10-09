@@ -31,7 +31,7 @@ export const AvatarImageMimeTypeSchema = z.enum(["image/png", "image/jpeg", "ima
 export type AvatarImageMimeType = z.infer<typeof AvatarImageMimeTypeSchema>;
 
 /**
- * Non-image file attachments (P11). A deliberately small allowlist of common, non-executable document types
+ * Non-image file attachments. A deliberately small allowlist of common, non-executable document types
  * — and deliberately WITHOUT `text/html`, `image/svg+xml`, or `application/xml`, which are script-execution
  * / XSS vectors if a browser ever rendered them. As defence-in-depth the server ALSO serves every non-image
  * attachment as `application/octet-stream` with `Content-Disposition: attachment`, so nothing uploaded is
@@ -285,14 +285,14 @@ export const ChannelSchema = z.object({
   /**
    * When the channel's metadata (name/description/archived/posting policy/etc.) last changed. Absent on
    * channels created before this field existed; consumers fall back to `createdAt`. Node-to-node sync uses
-   * it for newer-wins re-sync of channels this node IMPORTED from a peer (C1) — never local/default ones.
+   * it for newer-wins re-sync of channels this node IMPORTED from a peer — never local/default ones.
    */
   updatedAt: TimestampSchema.optional(),
   archived: z.boolean().optional(),
   /** Pinned channels sort to the top of the client's channel list. Owner/admin toggled. */
   pinned: z.boolean().optional(),
   /**
-   * For a PRIVATE channel: accept join requests from non-members who have the channel id (P10). Opt-in and
+   * For a PRIVATE channel: accept join requests from non-members who have the channel id. Opt-in and
    * off by default, so a strictly invite-only channel is unchanged. It does NOT make the channel
    * discoverable — a requester must already know the id (shared out-of-band, like an invite); the request
    * endpoint 404s identically to an unknown channel when this is off, so existence never leaks.
@@ -856,7 +856,7 @@ export const MessageRemoveRequestSchema = z.object({
 });
 export type MessageRemoveRequest = z.infer<typeof MessageRemoveRequestSchema>;
 
-/** Ephemeral "I'm typing" ping (P14): exactly one of a channel or a DM recipient. Never persisted. */
+/** Ephemeral "I'm typing" ping: exactly one of a channel or a DM recipient. Never persisted. */
 export const TypingRequestSchema = z
   .object({
     channelId: IdSchema.optional(),

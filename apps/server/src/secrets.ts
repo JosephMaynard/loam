@@ -1,4 +1,4 @@
-// scrypt-hashed secret storage + constant-time comparison. Extracted from app.ts (2026-09-04 split).
+// scrypt-hashed secret storage + constant-time comparison.
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
 export const secretHashPrefix = "scrypt:";

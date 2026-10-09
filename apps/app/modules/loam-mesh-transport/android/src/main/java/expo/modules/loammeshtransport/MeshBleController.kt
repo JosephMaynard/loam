@@ -53,7 +53,7 @@ internal class MeshBleController(
   private val lastSeen = ConcurrentHashMap<String, Long>()
 
   // Opaque session-local token → BLE MAC address. The token is what crosses to JS / the Node launcher —
-  // the MAC (privacy-sensitive, even though modern Android rotates it) never leaves this class (P1-3),
+  // the MAC (privacy-sensitive, even though modern Android rotates it) never leaves this class,
   // mirroring the Wi-Fi Aware PeerHandle mapping. Bounded LRU so rotating addresses can't grow it.
   private val blePeers = object : LinkedHashMap<String, String>(16, 0.75f, true) {
     override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>): Boolean =
@@ -215,7 +215,7 @@ internal class MeshBleController(
     lastSeen[address] = now
 
     // The JS peerId is an OPAQUE session-local token, never the MAC — the courier round-trips the token
-    // back to `sendBlob`, and only this class maps it to the device address (P1-3).
+    // back to `sendBlob`, and only this class maps it to the device address.
     val peerId = tokenForAddress(address)
     listener.onPeerDiscovered(peerId, advert.haveMail, advert.meshHintHex(), result.rssi)
   }

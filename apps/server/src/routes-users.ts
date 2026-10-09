@@ -1,5 +1,5 @@
 // Users, profiles + avatars, roles, moderation + reports, join approval, typing, and attachment
-// upload/serve. Extracted verbatim from app.ts (2026-09-04 split) over the shared AppContext.
+// upload/serve, registered over the shared AppContext.
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { AttachmentUploadRequestSchema, MEMBER_RULES_VERSION, RulesAcceptRequestSchema, AvatarImageUploadRequestSchema, InviteRedeemRequestSchema, MODERATION_TIMEOUT_MAX_MS, type Message, type MessageAttachment, MessageRemoveRequestSchema, MessageSchema, ModerationUpdateRequestSchema, type Report, type ModerationReport, REPORTED_MESSAGE_BODY_MAX_LENGTH, ReportCreateRequestSchema, ReportResolveRequestSchema, ReportSchema, type ReportedMessage, RolesUpdateRequestSchema, TypingRequestSchema, type User, type UserBlockList, UserSchema, UserUpdateRequestSchema } from "@loam/schema";
@@ -48,7 +48,7 @@ export function registerUserRoutes(ctx: AppContext): void {
     }
 
     // A profile edit broadcasts to the whole roster (`userUpserted`), so a moderator timeout blocks
-    // it like every other content-publishing surface — matching avatar-image uploads (Sol round 4).
+    // it like every other content-publishing surface — matching avatar-image uploads.
     const profileTimeoutError = ctx.timeoutError(user);
 
     if (profileTimeoutError) {
@@ -674,7 +674,7 @@ export function registerUserRoutes(ctx: AppContext): void {
     },
   );
 
-  // Ephemeral typing ping (P14): broadcast "userId is typing" to the conversation audience (minus the
+  // Ephemeral typing ping: broadcast "userId is typing" to the conversation audience (minus the
   // typist). Never persisted. Silently no-ops (204) for a banned/pending/timed-out sender, a channel the
   // sender can't access, or an unknown DM recipient — so a stale "typing…" can't be spoofed at someone who
   // can't see the conversation. The client throttles these; the per-route cap is the server-side backstop.
@@ -698,8 +698,8 @@ export function registerUserRoutes(ctx: AppContext): void {
         const channel = ctx.ensureChannel(body.data.channelId);
         // A typing signal is only meaningful where the user could actually post: not in an archived
         // channel (read-only), and not for a member the channel's posting policy excludes (owner-only /
-        // admins-only) — otherwise a non-poster broadcasts "X is typing…" to every reader at 120/min
-        // (review 2026-09-04). `channelPostingError` is the same gate `createMessage` applies.
+        // admins-only) — otherwise a non-poster broadcasts "X is typing…" to every reader at 120/min.
+        // `channelPostingError` is the same gate `createMessage` applies.
         if (
           channel &&
           ctx.canAccessChannel(channel, currentUser.id) &&

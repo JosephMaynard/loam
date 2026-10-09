@@ -1,4 +1,4 @@
-// Typed boot/identity errors and the stable wire error-code table. Extracted from app.ts (2026-09-04 split).
+// Typed boot/identity errors and the stable wire error-code table.
 import type { ServerErrorCode } from "@loam/schema";
 
 /**
@@ -14,7 +14,7 @@ export class IdentityLimitError extends Error {
 }
 
 /**
- * Thrown by `openInitialStore` (P1-1, docs/15) when a database is genuinely unopenable (wrong/lost
+ * Thrown by `openInitialStore` (store-lifecycle.ts) when a database is genuinely unopenable (wrong/lost
  * key, or an unreadable file) and no start-fresh confirmation was present for THIS boot attempt. The
  * typed `.code` lets `embedded-main.ts` tell this specific, recoverable-without-a-process-restart
  * failure apart from every other boot error — see its `hasStayAliveBootErrorCode` — without
@@ -29,7 +29,7 @@ export class DbEncryptionUnreadableError extends Error {
 }
 
 /**
- * Thrown by `openInitialStore` (P1-4-server, Sol round 8) when an EXISTING PLAINTEXT database is found
+ * Thrown by `openInitialStore` when an EXISTING PLAINTEXT database is found
  * while an encrypted mode is configured (a `dbKey` is set): the keyed open failed but a plaintext open
  * succeeds. Serving that plaintext file while the persisted mode/hint say encrypted is a silent
  * confidentiality downgrade, so instead of falling through to a plaintext boot the store open LOCKS with
@@ -107,7 +107,7 @@ export class DbEphemeralMarkerUnremovableError extends Error {
 }
 
 /**
- * Thrown by `buildApp`'s boot-time wipe-phase resume (P1-1, Sol round 8) after it has re-run (and, on a
+ * Thrown by the boot-time wipe-phase resume (`resumeWipePhaseThenOpenStore`, store-lifecycle.ts) after it has re-run (and, on a
  * `delete-pending` phase, RETRIED) the fixed-key kill-switch artifact deletion BEFORE opening a serving
  * store. It never opens the real store — either the wipe is not yet safe to complete (deletion still
  * unverifiable → stay `delete-pending`, do not signal), or deletion is now proven complete and the
@@ -246,7 +246,7 @@ export const ERROR_CODES: Record<string, ServerErrorCode> = {
   "Internal server error": "internal_error",
   // A request whose `Host` names something this node doesn't serve (DNS rebinding): 421.
   "This address isn't served by this LOAM node": "host_not_allowed",
-  // Strings that used to reach the client without a code (so a 15-locale client showed English). Several
+  // Every other refusal string needs a code too, or a 15-locale client shows English. Several
   // share a code on purpose: the member sees one translated sentence, the log keeps the precise text.
   "Attachment is empty or too large": "attachment_too_large",
   "That user cannot be added": "channel_member_unavailable",

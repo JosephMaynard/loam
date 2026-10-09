@@ -78,8 +78,8 @@ const MC_PREBUILD_SHA256 = "40976b009278d0b1da04b8f6d34b0badf60469d7b26df68471ee
 // The JS packages the embedded server loads at runtime: both drivers' wrappers and the two dependencies
 // they share (wrapper → bindings → file-uri-to-path). Each is an `npm pack` tarball VENDORED at
 // apps/app/native-prebuilds/npm/ and pinned by sha256 here: this code runs inside the process that holds
-// the DB key, so a build must not take whatever the registry serves that day (review 2026-09-04 pinned the
-// versions; vendoring pins the bytes). The wrappers' other dependency, prebuild-install, only runs at
+// the DB key, so a build must not take whatever the registry serves that day (a version pin alone doesn't
+// fix the bytes; the vendored tarball does). The wrappers' other dependency, prebuild-install, only runs at
 // install time and isn't needed. Keep in lockstep with apps/app/native-prebuilds/npm/README.md, and bump
 // deliberately, together with the driver versions above.
 const NPM_TARBALLS = {
