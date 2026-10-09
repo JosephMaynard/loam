@@ -261,7 +261,6 @@ export const ERROR_CODES: Record<string, ServerErrorCode> = {
   "Logout requires an encrypted session": "encrypted_session_required",
   "Tunnel requires an encrypted session": "encrypted_session_required",
   "Resume an identity before tunnelling content": "encrypted_session_required",
-  "You are timed out by a moderator and cannot post right now": "timed_out",
 };
 
 /** All stable error codes actually in use, exported so tests can assert client-catalog coverage. */
