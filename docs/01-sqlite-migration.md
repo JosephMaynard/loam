@@ -243,7 +243,10 @@ launcher side) talk over the existing `nodejs.channel` bridge, mirroring the req
    `loam.db-shm` files in `dataDir` (best-effort, `ENOENT` ignored) *before* requiring the server —
    because the key is fresh every launch, a DB encrypted under a previous launch's key can never be
    opened again, so the old files would otherwise just make `openStore()` fail with a confusing
-   "file is not a database" error.
+   "file is not a database" error. The server does the same itself since 0.6.x (`prepareEphemeralDataDir`
+   in `store-lifecycle.ts`, keyed on the same `.loam-db-ephemeral` marker, also dropping `avatars/` and
+   `attachments/`), so a desktop `LOAM_DB_KEY=ephemeral` node or a `loamnet --encrypt` service restarts
+   cleanly too; a `loam.db` with no marker is a persistent database and is refused, never deleted.
 6. If a key **is** set: `process.env.LOAM_DB_KEY = key`, and `LOAM_DB_DRIVER` is left unset —
    `openStore()`'s `encryptionKey` path takes precedence over the driver env var (see `db.ts`).
 

@@ -61,6 +61,22 @@ export class DbEncryptionDriverMissingError extends Error {
 }
 
 /**
+ * Thrown by `openInitialStore` when an ephemeral (random, per-boot) key is configured but the data dir
+ * holds a `loam.db` that no ephemeral boot wrote: the `.loam-db-ephemeral` marker every ephemeral boot
+ * leaves behind is absent, so the file is a persistent database (passphrase-encrypted or plaintext) that a
+ * fresh random key can never open. The server refuses to start rather than delete it; the message names the
+ * directory and the two ways out (another data dir, or the database's own passphrase). Distinct from
+ * `DbEncryptionUnreadableError` on purpose: nothing about the key is wrong or lost.
+ */
+export class DbEphemeralExistingDatabaseError extends Error {
+  readonly code = "db_ephemeral_existing_database" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "DbEphemeralExistingDatabaseError";
+  }
+}
+
+/**
  * Thrown by `buildApp`'s boot-time wipe-phase resume (P1-1, Sol round 8) after it has re-run (and, on a
  * `delete-pending` phase, RETRIED) the fixed-key kill-switch artifact deletion BEFORE opening a serving
  * store. It never opens the real store — either the wipe is not yet safe to complete (deletion still

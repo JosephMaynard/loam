@@ -259,7 +259,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     messages: [],
   };
 
-  await mkdir(dataDir, { recursive: true });
+  // Private to the node's user when this call creates it (an existing dir keeps its mode): the database
+  // inside holds every message and the raw session tokens.
+  await mkdir(dataDir, { recursive: true, mode: 0o700 });
 
   const lifecycle = createStoreLifecycle({
     dataDir,

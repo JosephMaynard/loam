@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createLineBuffer } from "./line-buffer.js";
+import { SUPPORTED_NODE_RANGE, nodeVersionProblem } from "./node-version.js";
 import { findFreePort, isPortFree } from "./port.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -85,11 +86,23 @@ Requires Node.js 22.14+ (or 23.6+).`);
   process.exit(0);
 }
 
+// Refuse an unsupported Node before anything else runs. `npx` never enforces `engines`, and the server
+// bundle loads the built-in `node:sqlite` (Node 22.13+) lazily, inside the database open, so on Node 18 or
+// 20 the failure used to come out as a wrong or lost database key. The encrypt path keeps its own Node-API
+// check further down: the native driver segfaults on an old Node rather than failing cleanly.
+const nodeProblem = nodeVersionProblem(process.versions.node, SUPPORTED_NODE_RANGE);
+if (nodeProblem) {
+  console.error(nodeProblem);
+  process.exit(1);
+}
+
 const defaultDataDir = process.env.XDG_DATA_HOME
   ? join(process.env.XDG_DATA_HOME, "loam")
   : join(homedir(), ".loam");
 const dataDir = requiredValue("--data-dir") ?? process.env.LOAM_DATA_DIR ?? defaultDataDir;
-mkdirSync(dataDir, { recursive: true });
+// Private to this user: the database holds every message and the raw session tokens (0700 applies only when
+// this call creates the directory; an existing one keeps the mode its owner gave it).
+mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 
 const bundlePath = join(pkgRoot, "dist/loam-server.js");
 if (!existsSync(bundlePath)) {
@@ -244,7 +257,10 @@ async function resolveEncryptionKey() {
     return process.env.LOAM_DB_KEY;
   }
   if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== "function") {
-    console.warn("--encrypt: no $LOAM_DB_KEY and no terminal to prompt on, so using an ephemeral RAM-only key.");
+    console.warn(
+      "--encrypt: no $LOAM_DB_KEY and no terminal to prompt on, so using an ephemeral RAM-only key. The database\n" +
+        "is wiped on every restart. Set LOAM_DB_KEY to a passphrase for one that survives a restart.",
+    );
     return "ephemeral";
   }
   const databasePath = join(dataDir, "loam.db");
@@ -406,6 +422,12 @@ try {
   // The port was free when probed above, but another program can take it before the server binds.
   if (error?.code === "EADDRINUSE") {
     printPortInUse(port);
+    process.exit(1);
+  }
+  // A persistent database under an ephemeral key: the server refused rather than delete it. Its message
+  // already says which directory and what to do; a stack trace would add nothing.
+  if (error?.code === "db_ephemeral_existing_database") {
+    console.error(`\n${error.message}`);
     process.exit(1);
   }
   throw error;

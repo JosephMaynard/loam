@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildApp } from "./app.js";
-import { parseDbEncryptionMode } from "./embedded.js";
+import { parseDbEncryptionMode, parsePort } from "./embedded.js";
 import { resolveLanIPv4 } from "./net.js";
 
 const rootDir = fileURLToPath(new URL("../../..", import.meta.url));
@@ -38,7 +38,10 @@ function resolveVersion(): string {
   return "dev";
 }
 const port = Number.parseInt(process.env.PORT ?? "3000", 10);
-const clientPort = Number.parseInt(process.env.CLIENT_PORT ?? "3000", 10);
+// The port joiners are sent to. In production the server serves the client itself, so it is the listen
+// port unless `CLIENT_PORT` says otherwise (`scripts/dev.ts` sets both: Vite on 3000, the API on 3001);
+// defaulting it to a fixed 3000 put the wrong port in the join QR whenever `PORT` was anything else.
+const clientPort = parsePort(process.env.CLIENT_PORT, port);
 const host = process.env.HOST ?? "0.0.0.0";
 
 // LOAM_DB_KEY: a passphrase encrypts at rest; the literal "ephemeral" uses a random RAM-only key

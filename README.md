@@ -166,7 +166,7 @@ computer, the same settings live in the admin area as **security profiles**
 
 - **Nothing to collect.** No accounts, no analytics, no advertising, no crash reporting. Messages stay
   on the host and on the phones that received them. That also means LOAM never tells us when something
-  goes wrong, so if you find a problem, please
+  goes wrong, so if you find a problem, or would like to ask for a feature, please
   [open an issue](https://github.com/MagicZebraLtd/loam/issues) or email Magic Zebra Ltd at
   opensource@magiczebra.co.uk.
 - **Encrypted connections.** Joining by the code sets up an encrypted connection to the host (an X25519
@@ -262,7 +262,7 @@ and the build says so. A debug-signed APK can't update a release-signed install.
 | [`cli`](cli) | The `loamnet` npm package. |
 | [`packages/*`](packages) | The shared schemas, names, avatars, QR codes and crypto. |
 
-[`CLAUDE.md`](CLAUDE.md) is the fastest way into the codebase, for people and AI agents alike. CI checks
+[`ARCHITECTURE.md`](ARCHITECTURE.md) is the fastest way into the codebase for people; AI agents start at [`CLAUDE.md`](CLAUDE.md). CI checks
 that every package version agrees, then builds, tests, type-checks the Android app and smoke-tests the
 packed CLI on every push and pull request to `master`.
 

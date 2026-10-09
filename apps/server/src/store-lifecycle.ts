@@ -3,7 +3,7 @@
 // operator-confirmed start-fresh marker), the durable wipe journal, and the boot-time resume of an
 // interrupted emergency wipe. Extracted verbatim from app.ts (2026-09-04 split) behind an explicit
 // dependency object; `buildApp` composes it and owns the live `store` binding.
-import { closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 
@@ -17,6 +17,7 @@ import {
   DbEncryptionDriverMissingError,
   DbEncryptionPlaintextUnconvertedError,
   DbEncryptionUnreadableError,
+  DbEphemeralExistingDatabaseError,
   WipeResumeInProgressError,
 } from "./errors.js";
 import type { AppOptions } from "./types.js";
@@ -64,8 +65,36 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   // `appConfig.security.dbEncryption` — so the wire never claims encryption that isn't active (F5).
   state.encryptionEnabled = state.dbKey !== undefined;
 
-  const openLoamStore = (): LoamStore =>
-    openStore(dbPath, { encryptionKey: state.dbKey, driver: options.dbDriver });
+  const openLoamStore = (): LoamStore => {
+    const store = openStore(dbPath, { encryptionKey: state.dbKey, driver: options.dbDriver });
+    restrictDbFilePermissions();
+    return store;
+  };
+
+  /**
+   * Keep the database files readable by the node's own user only. SQLite creates `loam.db` with the
+   * process umask (0644 under the usual 022), which on a shared computer lets every local account read
+   * every message and the raw session tokens in the `sessions` table. Run after every open: a fresh
+   * `loam.db` gets 0600 before anything is written, and the `-wal`/`-shm` files inherit the main file's
+   * mode when SQLite recreates them. Best-effort: a file that isn't there yet (`ENOENT`), a filesystem
+   * that refuses (`EPERM`, a mount without POSIX modes) or Windows, where modes mean nothing, is left as
+   * is and never fails the open.
+   */
+  function restrictDbFilePermissions(): void {
+    if (process.platform === "win32") {
+      return;
+    }
+    for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+      try {
+        chmodSync(path, 0o600);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "EPERM" && code !== "ENOTSUP") {
+          log.warn(error, `Could not restrict permissions on ${path}`);
+        }
+      }
+    }
+  }
 
   /**
    * EVERY on-disk artifact of the SQLite/SQLCipher database (P1-2, Sol round 7) — the single source of
@@ -418,6 +447,81 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   // for it (Sol's design review: an automatic replace on every unopenable DB is wrong).
   const dbStartFreshMarkerPath = join(dataDir, ".loam-db-start-fresh");
 
+  // Records that the LAST boot ran under an ephemeral key. Same file name and contents (a millisecond
+  // timestamp) as the Android launcher's `EPHEMERAL_MARKER_PATH` in `nodejs-project-template/main.js`, so
+  // a data dir may pass between the two without either misreading the other: the launcher deletes the
+  // stale database and writes this marker BEFORE booting the server, and `prepareEphemeralDataDir` below
+  // then finds nothing left to delete and simply refreshes it.
+  const dbEphemeralMarkerPath = join(dataDir, ".loam-db-ephemeral");
+
+  /**
+   * Make the data dir fit the key mode BEFORE the database is opened. An ephemeral key is minted fresh
+   * every boot, so a `loam.db` encrypted under the previous boot's key can never be opened again: left in
+   * place, the keyed open would fail and the boot stop on a misleading "wrong or lost key" error (the bare
+   * desktop server and a `loamnet --encrypt` service used to die on their second start this way; only the
+   * Android launcher cleaned up). Under an ephemeral key:
+   *   - the marker is present: the files are last boot's leftovers. Delete `loam.db` (+ `-wal`/`-shm`/
+   *     `-journal`) and the `avatars/` and `attachments/` dirs (that media is content of the dead key's
+   *     network and would otherwise outlive every restart, docs/02), then write the marker for the next boot.
+   *   - no marker but a `loam.db`: a PERSISTENT database (passphrase-encrypted or plaintext) that nobody
+   *     chose to lose. Refuse to start with {@link DbEphemeralExistingDatabaseError}, leaving every file
+   *     untouched; the operator picks another data dir or supplies the database's passphrase.
+   *   - neither: a fresh data dir. Write the marker.
+   * A fixed-key or plaintext boot clears the marker (as the launcher does), so a database it writes is never
+   * later mistaken for ephemeral leftovers. Media removal is best-effort (the boot sweeps are the backstop);
+   * a database file that will not go away is fatal, since the open would fail anyway.
+   */
+  function prepareEphemeralDataDir(): void {
+    if (!ephemeralDbKey) {
+      try {
+        rmSync(dbEphemeralMarkerPath, { force: true });
+      } catch (error) {
+        log.warn(error, `Could not remove the stale ephemeral-key marker ${dbEphemeralMarkerPath}`);
+      }
+      return;
+    }
+
+    const lastBootWasEphemeral = existsSync(dbEphemeralMarkerPath);
+    if (!lastBootWasEphemeral && existsSync(dbPath)) {
+      const message =
+        `The data directory ${dataDir} holds a persistent database (loam.db) that was not written under an ` +
+        "ephemeral key, and an ephemeral key can never open it. Refusing to start so it is not destroyed. " +
+        "Use a different data directory for the ephemeral node (--data-dir, or LOAM_DATA_DIR), or start " +
+        "with that database's own passphrase (LOAM_DB_KEY) instead of an ephemeral key.";
+      log.error(message);
+      reportBootNotice(message, "db_ephemeral_existing_database");
+      throw new DbEphemeralExistingDatabaseError(message);
+    }
+
+    if (lastBootWasEphemeral) {
+      for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, `${dbPath}-journal`]) {
+        try {
+          rmSync(path, { force: true });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `Could not remove ${path}, left by the previous ephemeral-key boot and unreadable under this boot's ` +
+              `key (${detail}). Remove it by hand, or use a different data directory.`,
+          );
+        }
+      }
+      for (const dir of [avatarsDir, attachmentsDir]) {
+        try {
+          rmSync(dir, { recursive: true, force: true });
+        } catch (error) {
+          log.warn(error, `Could not remove the previous ephemeral boot's media directory ${dir}`);
+        }
+      }
+      log.info("Ephemeral key: removed the previous boot's database and uploaded media (unreadable under this boot's key)");
+    }
+
+    try {
+      writeFileSync(dbEphemeralMarkerPath, String(Date.now()), { encoding: "utf8", mode: 0o600 });
+    } catch (error) {
+      log.warn(error, `Could not write the ephemeral-key marker ${dbEphemeralMarkerPath}; the next ephemeral boot will refuse to start over this database`);
+    }
+  }
+
   // Durable ANCHOR for a RESUMABLE preserve recovery (P1, Sol round-12). A `preserve` start-fresh moves the
   // whole unopenable DB set + media into a unique `.loam-recovery-<suffix>/` snapshot. The moves are not one
   // atomic op, so this state file (written BEFORE any move, cleared only after the move is durable) records
@@ -453,6 +557,15 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
    * filesystems legitimately reject directory fsync with EINVAL; a caller may choose to tolerate that, but
    * the wipe/config paths here do not (correctness over availability on those platforms).
    */
+  /** The permission bits of an existing file, or undefined when there is none (or they can't be read). */
+  function existingFileMode(filePath: string): number | undefined {
+    try {
+      return statSync(filePath).mode & 0o777;
+    } catch {
+      return undefined;
+    }
+  }
+
   function fsyncDir(dir: string): boolean {
     try {
       const dirFd = openSync(dir, "r");
@@ -479,12 +592,16 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
    * fallback: a failure returns `false` so the caller fails closed rather than proceeding on an unflushed
    * write it believes is durable. The staged bytes are written by PATH (a single interceptable call); the
    * file fsync then reopens the temp read-only purely to flush it (fsync flushes the inode, reachable via
-   * any fd, regardless of that fd's mode).
+   * any fd, regardless of that fd's mode). The staging file is created with the target's current mode when
+   * the target exists (so a rewrite never widens an operator's 0600 `config.json` to the umask default) and
+   * 0600 otherwise (`.loam-wipe-phase` carries the config snapshot, which only this user should read).
    */
   function durableWriteFileSync(filePath: string, contents: string): boolean {
     const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
     try {
-      writeFileSync(tmpPath, contents, "utf8");
+      const mode = existingFileMode(filePath) ?? 0o600;
+      writeFileSync(tmpPath, contents, { encoding: "utf8", mode });
+      chmodSync(tmpPath, mode); // exact, whatever the process umask took off at creation
       const fd = openSync(tmpPath, "r");
       try {
         fsyncSync(fd);
@@ -710,6 +827,10 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     // marker or opening the store — so a fresh DB is never opened over a half-moved (incoherent) DB set. A
     // no-op when no recovery is pending; throws (locks) on an unverifiable/incomplete resume.
     resumePreserveRecovery();
+
+    // Then fit the data dir to the key mode: under an ephemeral key, drop last boot's unreadable database
+    // (marker present) or refuse to destroy a persistent one (marker absent); otherwise clear the marker.
+    prepareEphemeralDataDir();
 
     const keyWasResolved = state.dbKey !== undefined;
 
@@ -1077,6 +1198,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
         // behind is harmless: the next boot's Step-0b probe finds the live DB opens under the current key
         // and discards it (RF6-b). NEVER let a cleanup failure fail this boot.
         state.encryptionEnabled = true;
+        restrictDbFilePermissions();
         const message = "Migrated an existing passphrase-encrypted database to the current key derivation.";
         log.warn(message);
         reportDbKeyMigrated(options.dbKeyRequestId);
