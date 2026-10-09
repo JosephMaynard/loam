@@ -111,10 +111,10 @@ const result = await build({
   // at runtime from nodejs-project/node_modules (see docs/04):
   // - node:sqlite: a Node ≥22 builtin absent on the device's Node 18 (docs/01). External so the
   //   desktop smoke test (Node ≥22) still resolves it and the device fails loudly if it's reached.
-  // - better-sqlite3: the native .node the device actually uses (LOAM_DB_DRIVER=better-sqlite3,
-  //   unencrypted for now) — ships as an ABI-108 android-arm64 prebuild, resolved at runtime.
-  // - better-sqlite3-multiple-ciphers: the encrypted driver, loaded only when a DB key is set
-  //   (the on-device encrypted path is a follow-up — docs/01).
+  // - better-sqlite3: the plain driver (LOAM_DB_DRIVER=better-sqlite3, for a node whose encryption mode
+  //   is off) — ships as an ABI-108 android-arm64 prebuild, resolved at runtime.
+  // - better-sqlite3-multiple-ciphers: the SQLCipher driver, loaded when a DB key is set — the default
+  //   for a new network (every encrypted mode, docs/01); vendored under native-prebuilds/ like the plain one.
   external: ["node:sqlite", "better-sqlite3", "better-sqlite3-multiple-ciphers"],
   // `import.meta.url` is empty in CJS output, which would make db.ts's `createRequire(import.meta.url)`
   // throw on-device. Define it to a __filename-derived file URL so the native driver resolves against

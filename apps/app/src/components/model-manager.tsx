@@ -7,6 +7,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { t } from '@/lib/i18n';
 import {
   formatBytes,
   probeDeviceCapabilities,
@@ -285,9 +286,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
           // reopen whose reconciliation SUCCEEDS resets it (see the success path above) and restores the
           // ready state.
           setPendingUnsettled(true);
-          setStatusMessage(
-            `Could not fully prepare the model manager: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          setStatusMessage(t('model.prepareFailed', { error: error instanceof Error ? error.message : String(error) }));
         }
       } finally {
         if (!cancelled) {
@@ -417,7 +416,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       if (persisted) {
         setManagerState(state);
       } else {
-        setStatusMessage("Couldn't save that change to the model list: it may not survive an app restart. Try again.");
+        setStatusMessage(t('model.persistFailed'));
       }
     }
     return persisted;
@@ -499,9 +498,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
           setCapabilities(caps);
         }
         if (storageFit(caps, sizeForStorageCheck) === 'insufficient') {
-          setStatusMessageIfMounted(
-            `Not enough free storage to download a model (only ${formatBytes(caps.freeStorageBytes)} free).`,
-          );
+          setStatusMessageIfMounted(t('model.noStorage', { free: formatBytes(caps.freeStorageBytes) }));
           return;
         }
         // Bound the download by the free space that must remain AFTER the required headroom (Finding B):
@@ -515,7 +512,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         } catch (err) {
           // A thrown download/persist (network stack error, storage failure, a rename throw) must surface a
           // failure status rather than silently reject and leave the row stuck. Aborts route through here too.
-          setStatusMessageIfMounted(`Model download failed: ${err instanceof Error ? err.message : String(err)}`);
+          setStatusMessageIfMounted(t('model.downloadFailed', { error: err instanceof Error ? err.message : String(err) }));
         } finally {
           clearModelProgress(id);
           setBusy(id, false);
@@ -531,9 +528,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       return;
     }
     if (outcome.status === 'orphan-blocked') {
-      setStatusMessageIfMounted(
-        `A previous download left a file that still can't be removed (${outcome.error}). Restart the app to clear it before downloading another model.`,
-      );
+      setStatusMessageIfMounted(t('model.orphanBlocked', { error: outcome.error }));
     }
   };
 
@@ -549,7 +544,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       // for consistency with the pasted-URL path and as defense in depth (see model-download.ts).
       const fileName = sanitizeModelFileName(`${entry.id}.gguf`);
       if (!fileName) {
-        setStatusMessageIfMounted(`${entry.displayName}: invalid catalog file name.`);
+        setStatusMessageIfMounted(t('model.invalidFileName', { name: entry.displayName }));
         return;
       }
       setModelProgress(entry.id, 0, entry.sizeBytes, 'download');
@@ -568,7 +563,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         maxBytes,
       );
       if (!outcome.ok) {
-        setStatusMessageIfMounted(`${entry.displayName}: download failed: ${outcome.error}`);
+        setStatusMessageIfMounted(t('model.entryDownloadFailed', { name: entry.displayName, error: outcome.error }));
         return;
       }
       const model: DownloadedModel = {
@@ -586,7 +581,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         downloaded: [...current.downloaded.filter((existing) => existing.id !== entry.id), model],
       }));
       if (persisted) {
-        setStatusMessageIfMounted(`${entry.displayName} downloaded.`);
+        setStatusMessageIfMounted(t('model.downloaded', { name: entry.displayName }));
         return;
       }
       // Registration failed and the one-per-process orphan sweep already ran, so the just-downloaded file is
@@ -594,11 +589,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       // fails, its URI is retained for the next attempt to clean first (Finding 2) — this closes the gap
       // where a catalog persist-failure did no cleanup and retained nothing, orphaning the file.
       const discard = await discardUnregisteredDownload(outcome.uri);
-      setStatusMessageIfMounted(
-        discard.removed
-          ? `${entry.displayName} downloaded but couldn't be saved to the model list: the file was removed. Try again.`
-          : `${entry.displayName} downloaded but couldn't be saved to the model list, and removing the leftover file also failed (${discard.error}). It'll be cleared on your next attempt, or restart the app to clear it.`,
-      );
+      setStatusMessageIfMounted(unregisteredMessage(entry.displayName, discard));
     });
 
   /** Download a user-pasted URL — no size/hash to verify against, so it's always best-effort + warned.
@@ -635,7 +626,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         maxBytes,
       );
       if (!outcome.ok) {
-        setStatusMessageIfMounted(`Custom model download failed: ${outcome.error}`);
+        setStatusMessageIfMounted(t('model.customDownloadFailed', { error: outcome.error }));
         return;
       }
       const model: DownloadedModel = {
@@ -656,18 +647,14 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         if (mountedRef.current) {
           setCustomUrl('');
         }
-        setStatusMessageIfMounted(`${prepared.displayName} downloaded.`);
+        setStatusMessageIfMounted(t('model.downloaded', { name: prepared.displayName }));
         return;
       }
       // Registration failed: discard the orphaned final `.gguf` (CHECKED) BEFORE offering retry so no
       // unreferenced model accumulates; if the checked cleanup itself fails the URI is retained to block
       // (and be cleaned first by) the next download (Finding 2).
       const discard = await discardUnregisteredDownload(outcome.uri);
-      setStatusMessageIfMounted(
-        discard.removed
-          ? `${prepared.displayName} downloaded but couldn't be saved to the model list: the file was removed. Try again.`
-          : `${prepared.displayName} downloaded but couldn't be saved to the model list, and removing the leftover file also failed (${discard.error}). It'll be cleared on your next attempt, or restart the app to clear it.`,
-      );
+      setStatusMessageIfMounted(unregisteredMessage(prepared.displayName, discard));
     });
   };
 
@@ -730,24 +717,24 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         <ThemedView style={styles.container}>
           <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
             <ThemedView style={styles.header}>
-              <ThemedText type="subtitle">On-device model</ThemedText>
+              <ThemedText type="subtitle">{t('model.title')}</ThemedText>
               <Pressable onPress={onClose} accessibilityRole="button" hitSlop={Spacing.two}>
-                <ThemedText type="link">Done</ThemedText>
+                <ThemedText type="link">{t('share.done')}</ThemedText>
               </Pressable>
             </ThemedView>
             <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
               <ThemedText type="small" themeColor="textSecondary">
-                Optional and off by default. Download a small model to run LOAM&apos;s assistant fully
-                on this phone, with no internet and no laptop needed. Everything below runs and stays
-                on-device.
+                {t('model.intro')}
               </ThemedText>
 
               {capabilities ? (
                 <ThemedView type="backgroundElement" style={styles.capabilityCard}>
-                  <ThemedText type="smallBold">This device</ThemedText>
+                  <ThemedText type="smallBold">{t('model.thisDevice')}</ThemedText>
                   <ThemedText type="small" themeColor="textSecondary">
-                    RAM: {formatBytes(capabilities.totalRamBytes)} · Free storage:{' '}
-                    {formatBytes(capabilities.freeStorageBytes)}
+                    {t('model.deviceStats', {
+                      ram: formatBytes(capabilities.totalRamBytes),
+                      free: formatBytes(capabilities.freeStorageBytes),
+                    })}
                   </ThemedText>
                   <ThemedText type="small" themeColor="textSecondary">
                     {capabilities.acceleratorNote}
@@ -764,29 +751,32 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
               {managerState.activeId ? (
                 <ThemedView type="backgroundElement" style={styles.capabilityCard}>
                   <ThemedText type="smallBold">
-                    Active: {managerState.downloaded.find((m) => m.id === managerState.activeId)?.displayName ?? managerState.activeId}
+                    {t('model.activeName', {
+                      name: managerState.downloaded.find((m) => m.id === managerState.activeId)?.displayName ?? managerState.activeId,
+                    })}
                   </ThemedText>
                   <Pressable
                     onPress={() => void handleDeactivate()}
                     disabled={actionsBlocked}
                     accessibilityRole="button"
                     style={actionsBlocked ? styles.buttonDisabled : undefined}>
-                    <ThemedText type="link">Deactivate</ThemedText>
+                    <ThemedText type="link">{t('model.deactivate')}</ThemedText>
                   </Pressable>
                 </ThemedView>
               ) : null}
 
               <ThemedText type="smallBold" style={styles.sectionTitle}>
-                Catalog
+                {t('model.catalog')}
               </ThemedText>
               <ThemedText type="small" themeColor="textSecondary">
-                Models are large downloads ({formatBytes(Math.min(...MODEL_CATALOG.map((e) => e.sizeBytes)))}–
-                {formatBytes(Math.max(...MODEL_CATALOG.map((e) => e.sizeBytes)))}). Use Wi-Fi: on mobile data
-                they can use much of your allowance.
+                {t('model.catalogNote', {
+                  min: formatBytes(Math.min(...MODEL_CATALOG.map((e) => e.sizeBytes))),
+                  max: formatBytes(Math.max(...MODEL_CATALOG.map((e) => e.sizeBytes))),
+                })}
               </ThemedText>
               {!sweepReady ? (
                 <ThemedText type="small" themeColor="textSecondary">
-                  Preparing model storage…
+                  {t('model.preparing')}
                 </ThemedText>
               ) : null}
               {MODEL_CATALOG.map((entry) => (
@@ -809,11 +799,10 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
               ))}
 
               <ThemedText type="smallBold" style={styles.sectionTitle}>
-                Add a model by URL
+                {t('model.addByUrl')}
               </ThemedText>
               <ThemedText type="small" themeColor="textSecondary">
-                Unverified model: may not download, load, or run correctly. Use a direct link to a
-                `.gguf` file.
+                {t('model.addByUrlNote')}
               </ThemedText>
               <TextInput
                 value={customUrl}
@@ -834,14 +823,14 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
                   (!customUrl.trim() || !sweepReady || actionsBlocked || downloadInFlight) && styles.buttonDisabled,
                 ]}>
                 <ThemedText type="smallBold" style={styles.buttonLabel}>
-                  {downloadInFlight ? 'Downloading…' : 'Add & download'}
+                  {downloadInFlight ? t('model.downloading') : t('model.addAndDownload')}
                 </ThemedText>
               </Pressable>
 
               {customModels.length > 0 ? (
                 <>
                   <ThemedText type="smallBold" style={styles.sectionTitle}>
-                    Custom models
+                    {t('model.customModels')}
                   </ThemedText>
                   {customModels.map((model) => (
                     <DownloadedRow
@@ -905,7 +894,7 @@ function CatalogRow({
         <ThemedText type="smallBold">{entry.displayName}</ThemedText>
         {isActive ? (
           <ThemedView type="backgroundSelected" style={styles.badge}>
-            <ThemedText type="small">Active</ThemedText>
+            <ThemedText type="small">{t('model.activeBadge')}</ThemedText>
           </ThemedView>
         ) : null}
       </View>
@@ -919,13 +908,12 @@ function CatalogRow({
       ) : null}
       {ramVerdict === 'insufficient' ? (
         <ThemedText type="small" themeColor="textSecondary">
-          Needs at least {formatBytes(entry.minRamBytes)} of RAM: this device likely doesn&apos;t
-          have enough.
+          {t('model.ramInsufficient', { ram: formatBytes(entry.minRamBytes) })}
         </ThemedText>
       ) : null}
       {storageVerdict === 'insufficient' ? (
         <ThemedText type="small" themeColor="textSecondary">
-          Not enough free storage to download this model.
+          {t('model.storageInsufficient')}
         </ThemedText>
       ) : null}
 
@@ -943,7 +931,7 @@ function CatalogRow({
                 accessibilityRole="button"
                 style={[styles.button, (isBusy || opInFlight) && styles.buttonDisabled]}>
                 <ThemedText type="smallBold" style={styles.buttonLabel}>
-                  Set active
+                  {t('model.setActive')}
                 </ThemedText>
               </Pressable>
             ) : null}
@@ -952,7 +940,7 @@ function CatalogRow({
               disabled={isBusy || opInFlight}
               accessibilityRole="button"
               style={[styles.buttonSecondary, (isBusy || opInFlight) && styles.buttonDisabled]}>
-              <ThemedText type="smallBold">Delete</ThemedText>
+              <ThemedText type="smallBold">{t('model.delete')}</ThemedText>
             </Pressable>
           </>
         ) : (
@@ -962,13 +950,23 @@ function CatalogRow({
             accessibilityRole="button"
             style={[styles.button, (isBusy || blocked || downloadDisabled) && styles.buttonDisabled]}>
             <ThemedText type="smallBold" style={styles.buttonLabel}>
-              {isBusy ? 'Downloading…' : 'Download'}
+              {isBusy ? t('model.downloading') : t('model.download')}
             </ThemedText>
           </Pressable>
         )}
       </View>
     </ThemedView>
   );
+}
+
+/**
+ * The status after a download whose registration in the model list failed: the file was removed, or
+ * removing it failed too and it stays retained for the next attempt to clear first.
+ */
+function unregisteredMessage(name: string, discard: { removed: boolean; error?: string }): string {
+  return discard.removed
+    ? t('model.unregisteredRemoved', { name })
+    : t('model.unregisteredKept', { name, error: discard.error ?? t('common.unknownError') });
 }
 
 /** One already-downloaded custom (pasted-URL) model row — same actions as a catalog row, no fit gate. */
@@ -995,12 +993,12 @@ function DownloadedRow({
         <ThemedText type="smallBold">{model.displayName}</ThemedText>
         {isActive ? (
           <ThemedView type="backgroundSelected" style={styles.badge}>
-            <ThemedText type="small">Active</ThemedText>
+            <ThemedText type="small">{t('model.activeBadge')}</ThemedText>
           </ThemedView>
         ) : null}
       </View>
       <ThemedText type="small" themeColor="textSecondary">
-        {formatBytes(model.sizeBytes)} · unverified custom model
+        {t('model.customSize', { size: formatBytes(model.sizeBytes) })}
       </ThemedText>
       <View style={styles.rowActions}>
         {!isActive ? (
@@ -1010,7 +1008,7 @@ function DownloadedRow({
             accessibilityRole="button"
             style={[styles.button, (isBusy || opInFlight) && styles.buttonDisabled]}>
             <ThemedText type="smallBold" style={styles.buttonLabel}>
-              Set active
+              {t('model.setActive')}
             </ThemedText>
           </Pressable>
         ) : null}
@@ -1019,7 +1017,7 @@ function DownloadedRow({
           disabled={isBusy || opInFlight}
           accessibilityRole="button"
           style={[styles.buttonSecondary, (isBusy || opInFlight) && styles.buttonDisabled]}>
-          <ThemedText type="smallBold">Delete</ThemedText>
+          <ThemedText type="smallBold">{t('model.delete')}</ThemedText>
         </Pressable>
       </View>
     </ThemedView>
@@ -1039,12 +1037,12 @@ function ProgressBar({
   phase?: 'download' | 'verify';
 }) {
   const pct = total > 0 ? Math.min(100, Math.round((written / total) * 100)) : 0;
-  const label = phase === 'verify' ? 'Verifying' : 'Downloading';
+  const label = phase === 'verify' ? t('model.verifying') : t('model.downloadingLabel');
   return (
     <View style={styles.progressTrack}>
       <View style={[styles.progressFill, { width: `${pct}%` }]} />
       <ThemedText type="small" themeColor="textSecondary" style={styles.progressLabel}>
-        {label}: {formatBytes(written)} / {total > 0 ? formatBytes(total) : '?'} ({pct}%)
+        {t('model.progress', { label, written: formatBytes(written), total: total > 0 ? formatBytes(total) : '?', pct })}
       </ThemedText>
     </View>
   );

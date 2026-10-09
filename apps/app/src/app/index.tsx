@@ -71,21 +71,6 @@ const STARTUP_TIMEOUT_MS = 150_000;
 // the host's own WebView briefly flashes a blocked/error page before the reload carrying the key. The
 // fetch is a loopback call to the just-booted server, so it normally resolves in well under this.
 const BOOTSTRAP_KEY_TIMEOUT_MS = 2000;
-// Boot-status error codes (from the server via embedded-main.ts's boot-error bridge, or from main.js
-// itself) that point at the on-device DB-encryption feature specifically — an operator hitting one of
-// these is very likely locked out because of an unopenable/undecryptable encrypted DB, so the fix is
-// "open Encryption settings and switch back to Off", not "close and reopen the app" (G2). Kept as a
-// defensive fallback for the terminal error screen below — in the normal case these codes now arrive
-// as the non-fatal `notice` status handled by `onStatus` (see `BootNotice`/AF2), not `error`.
-const DB_ENCRYPTION_ERROR_CODES = new Set([
-  'db_encryption_open_failed',
-  'db_encryption_unreadable',
-  'db_encryption_unavailable',
-  'db_encryption_no_key',
-  'db_encryption_locked',
-  DB_ENCRYPTION_DRIVER_MISSING_CODE,
-  DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE,
-]);
 
 // The one DB-encryption code with a dedicated recovery action (AF8/design#1, docs/01, docs/15): an
 // existing encrypted database the current key can't open. Unlike the other DB-encryption codes (which
@@ -127,43 +112,6 @@ function isLoamUrl(url: string | undefined): boolean {
   }
 }
 
-/**
- * Classify a message posted from the WebView's web content (the LOAM client) back to this native
- * screen, then act on the ones this screen recognises. Extracted (and exported) as a pure,
- * dependency-free function so the native side-effect policy for each message type lives in one
- * obvious, unit-testable place.
- *
- * `loam-wipe` (posted by the client's `wipe` WS-event handler when the SERVER announces a node reset)
- * is deliberately a NATIVE NO-OP here. Two reasons:
- *   1. The client-side purge (IndexedDB/localStorage/service-worker caches) happens inside the WebView
- *      itself; nothing on the native side is required for it.
- *   2. Rotating a FIXED on-device database key (persistent/passphrase modes) is driven EXCLUSIVELY by
- *      the acknowledged launcher protocol — the server posts `loam-wipe-restart` only AFTER it has
- *      deleted the orphaned ciphertext and advanced its durable `.loam-wipe-phase` marker to
- *      `key-clear-ready`, at which point `attemptWipeKeyClear` performs a verified clear and acks with
- *      `loam-wipe-complete`. Clearing the key straight from this unauthenticated WebView-origin message
- *      would bypass that phase gate and could destroy the key while a deletion survivor still exists.
- * Ephemeral/off nodes hold no stored key to rotate here either (ephemeral keys are RAM-only and rotated
- * server-side; off has no key). A malformed or foreign message is simply ignored.
- */
-export function handleClientWebViewMessage(data: string): void {
-  let type: unknown;
-  try {
-    ({ type } = JSON.parse(data) as { type?: unknown });
-  } catch {
-    // not a message this screen understands — ignore.
-    return;
-  }
-  switch (type) {
-    case 'loam-wipe':
-      // Intentional native no-op — see this function's doc comment. Left as an explicit branch so the
-      // reasoning is visible at the call site and future message types have an obvious home.
-      break;
-    default:
-      break;
-  }
-}
-
 /** Outcome of {@link clearWipeKeyAndAck} — the ack is sent to the launcher ONLY on a verified clear. */
 export type WipeKeyClearOutcome = { ok: boolean; error?: string };
 
@@ -186,7 +134,7 @@ export async function clearWipeKeyAndAck(
     // durable, RETRYABLE wipe failure — never an ack. Acknowledging a clear that didn't happen would let
     // the wipe be reported complete while the device key survives, so treat the throw as a failure outcome
     // and fall through WITHOUT posting the completion ack (the launcher keeps its marker for a retry).
-    return { ok: false, error: error instanceof Error ? error.message : 'Failed to clear the device encryption key.' };
+    return { ok: false, error: error instanceof Error ? error.message : t('boot.keyClearThrew') };
   }
   if (!result.ok) {
     return { ok: false, error: result.error };
@@ -268,7 +216,7 @@ export default function HostRoot() {
 }
 
 /**
- * The LOAM Android host screen. Boots the embeddedde server on first mount, waits for its
+ * The LOAM Android host screen. Boots the embedded Node server on first mount, waits for its
  * readiness signal (posted by main.js once /api/config answers), then loads the served LOAM client
  * in a WebView with cookies + WebSocket enabled. Shows a "starting host…" state until then, since
  * cold start can take ~80s (docs/04).
@@ -278,9 +226,9 @@ function HostScreen() {
   // doesn't get stuck showing "starting" (the runtime won't re-emit).
   const [status, setStatus] = useState<HostStatus>(() => nodeStatus);
   const [errorMessage, setErrorMessage] = useState<string | undefined>();
-  // The boot-status error `code` (if any) from the last `loam-status` payload — see
-  // `DB_ENCRYPTION_ERROR_CODES` above. Used to surface the Encryption-settings action prominently when
-  // the failure looks DB-encryption-related (G2), rather than making the operator guess.
+  // The boot-status error `code` (if any) from the last `loam-status` payload. Selects the recovery block
+  // the error screen shows (`DB_UNREADABLE_CODE`, `DB_LOCKED_CODE` and the two codes
+  // `dbEncryptionRecoveryForCode` classifies), rather than making the operator guess.
   const [errorCode, setErrorCode] = useState<string | undefined>();
   // The persistent boot notice (AF2/P1-4) — see `BootNotice`. Independent of `status`: it survives a
   // later `ready`, and is only cleared by the operator dismissing it (`noticeDismissed`) below.
@@ -335,7 +283,7 @@ function HostScreen() {
   const [hostInvite, setHostInvite] = useState<string>();
   // The `#k=<transportPublicKey>` URL fragment, learned from GET /api/bootstrap once the host is
   // ready. Empty when transport encryption is off (or the fetch hasn't resolved yet) — plain URLs,
-  // today's behaviour.n-empty in `optional`/`required` mode, so both the host's own WebView and
+  // today's behaviour. Non-empty in `optional`/`required` mode, so both the host's own WebView and
   // the join QR carry the key a `required`-mode handshake needs (docs/08).
   const [transportKeyFragment, setTransportKeyFragment] = useState('');
   // See `nodeHostToken` — the per-boot host token the WebView hands to the LOAM client to claim admin.
@@ -453,7 +401,7 @@ function HostScreen() {
     setWipeClearBusy(false);
 
     if (!result.ok) {
-      setWipeClearFailure(result.error ?? 'Unknown error clearing the device encryption key.');
+      setWipeClearFailure(result.error ?? t('boot.keyClearUnknown'));
       return;
     }
 
@@ -493,7 +441,7 @@ function HostScreen() {
       if (nodeStatus === 'starting') {
         nodeStatus = 'error';
         setStatus('error');
-        setErrorMessage('The embedded server is taking too long to start. Close and reopen the app.');
+        setErrorMessage(t('boot.startupTimeout'));
       }
     }, STARTUP_TIMEOUT_MS);
 
@@ -532,7 +480,7 @@ function HostScreen() {
         // same tick; the share-open effect below says where the prompt is offered instead.
         void ensureHostService({ prompt: false });
       } else if (payload?.status === 'notice') {
-        //n-fatal (main.js only ever sends this for DB-encryption boot degradations — see its
+        // Non-fatal (main.js only ever sends this for DB-encryption boot degradations — see its
         // `DB_ENCRYPTION_NOTICE_CODES`) — never touches `status`/`nodeStatus`, so it can't regress a
         // 'ready' host back to a spinner/error screen, and it persists past a later 'ready' (see above).
         if (payload.code) {
@@ -603,13 +551,13 @@ function HostScreen() {
     // P1-2 (Sol round 3/4): the server's kill switch posts this when a `persistent`/`passphrase`-
     // encrypted node is wiped — its key is FIXED (Keystore-held), so the server deleted the now-orphaned
     // ciphertext and handed off HERE to clear the key material and restart. Unlike the P1-1
-    // `db_encryption_unreadable` recovery above (which retries boot in the SAME still-alivede runtime
+    // `db_encryption_unreadable` recovery above (which retries boot in the SAME still-alive Node runtime
     // — a plain JS function call inside that process), this genuinely needs a NEW OS process: the OLD
     // embedded server is still bound to port 3000 with its store already closed, and nodejs-mobile's
     // native module only starts its runtime ONCE per process (`_startedNodeAlready` — a second
     // `nodejs.start()` call is a silent no-op, not an error, so it can never be trusted to have actually
-    // restarted anything). The only reliable recovery is the operator closing and reopening the app; the
-    // `nodejs.start()` call inside `attemptWipeKeyClear` is a forward-compatible best-effort attempt only.
+    // restarted anything). So after a verified clear `attemptWipeKeyClear` closes LOAM completely
+    // (`closeAfterReset` → the native `closeApp`); the next launch is a clean start on the setup screens.
     //
     // main.js also re-fires this SAME event at ITS OWN boot time if its durable `.loam-wipe-phase`
     // file still reads `key-clear-ready` (P1-2b) — i.e. an earlier clear attempt never got far enough to
@@ -786,7 +734,7 @@ function HostScreen() {
   // "start hosting" moment, so (re)start the foreground service then too (idempotent).
   useEffect(() => {
     if (shareOpen && status === 'ready') {
-      // notification prompt here, nor on the launcher's `ready` above: in Hotspot mode the overlay is
+      // No notification prompt here, nor on the launcher's `ready` above: in Hotspot mode the overlay is
       // about to ask for the hotspot's location/nearby-Wi-Fi permissions (and right after setup it is
       // already open when `ready` lands, so both moments coincide with that request), and two overlapping
       // permission dialogs can auto-deny one. The overlay re-asserts (with the prompt) once the hotspot is
@@ -814,7 +762,7 @@ function HostScreen() {
   // by BOTH the `db_encryption_unreadable` "Preserve old database & start fresh" button and the
   // `db_encryption_plaintext_unconverted` "Delete existing data & start encrypted" button — the marker
   // intent is derived from the active `errorCode` below (Sol P1) so it matches the pressed button. As of
-  // Sol round 3 this ALSO makes main.js retry boot immediately, in the SAME still-alivede runtime (see
+  // Sol round 3 this ALSO makes main.js retry boot immediately, in the SAME still-alive Node runtime (see
   // its `loam-db-start-fresh` listener) — no app restart needed any more. `onStatus`'s `'ready'` branch
   // clears the active fatal block automatically once that retry succeeds (and resets this busy/message
   // state); if it fails again, a fresh `'error'` status simply replaces this one.
@@ -839,7 +787,7 @@ function HostScreen() {
       // was cancelled). Either way re-tapping just re-writes a same-intent, idempotent marker, so we let the
       // operator retry — but we show the launcher's exact wording rather than a blanket "failed".
       setStartFreshBusy(false);
-      setStartFreshMessage(`Couldn't confirm: ${result.error ?? 'unknown error'}.`);
+      setStartFreshMessage(t('boot.confirmFailed', { error: result.error ?? t('common.unknownError') }));
       return;
     }
     // RF2: main.js's `loam-db-start-fresh` listener retries boot immediately after this ack. Leave
@@ -848,11 +796,7 @@ function HostScreen() {
     // reset it). Otherwise the button re-enables while the retry is still mid-flight and a second tap
     // could race a second in-process reboot attempt against the first — main.js and embedded-main.ts
     // both now also guard against that directly, but the UI should never even offer the chance.
-    setStartFreshMessage(
-      intent === 'delete'
-        ? 'Confirmed: the existing data will be deleted and a fresh encrypted database is starting now…'
-        : 'Confirmed: the old database is preserved on disk and a fresh one is starting now…',
-    );
+    setStartFreshMessage(intent === 'delete' ? t('boot.freshDeleteConfirmed') : t('boot.freshPreserveConfirmed'));
   };
 
   // `db_encryption_locked` recovery (P1-1, Sol round 4): store the entered passphrase, then ask main.js
@@ -878,7 +822,9 @@ function HostScreen() {
       await setPassphraseCandidate(trimmed);
     } catch (error) {
       setUnlockBusy(false);
-      setUnlockMessage(`Couldn't save the passphrase: ${error instanceof Error ? error.message : 'unknown error'}. You can try again.`);
+      setUnlockMessage(
+        t('boot.passphraseSaveFailed', { error: error instanceof Error ? error.message : t('common.unknownError') }),
+      );
       return;
     }
     // P1-b (Sol round 6): transactionally record the mode-name hint so a later transient key-request
@@ -889,12 +835,12 @@ function HostScreen() {
     const result = await requestDbUnlock(nodejs.channel);
     if (!result.ok) {
       setUnlockBusy(false);
-      setUnlockMessage(`Couldn't confirm: ${result.error ?? 'unknown error'}. You can try again.`);
+      setUnlockMessage(t('boot.confirmFailedRetry', { error: result.error ?? t('common.unknownError') }));
       return;
     }
     // The retry's OUTCOME (ready / still locked / a different boot error) arrives the normal way, via
     // `loam-status` — see `onStatus`'s `'ready'`/`'error'` branches, both of which reset `unlockBusy`.
-    setUnlockMessage('Retrying with the new passphrase…');
+    setUnlockMessage(t('boot.retryingPassphrase'));
   };
 
   // Persistent-mode `db_encryption_locked` recovery (e.g. after a transient Keystore hiccup) — no
@@ -912,10 +858,10 @@ function HostScreen() {
     });
     if (!result.ok) {
       setUnlockBusy(false);
-      setUnlockMessage(`Couldn't confirm: ${result.error ?? 'unknown error'}. You can try again.`);
+      setUnlockMessage(t('boot.confirmFailedRetry', { error: result.error ?? t('common.unknownError') }));
       return;
     }
-    setUnlockMessage('Retrying…');
+    setUnlockMessage(t('boot.retrying'));
   };
 
   // `db_encryption_plaintext_unconverted` recovery (P1-4-RN, Sol round 8): the operator selected an
@@ -938,14 +884,14 @@ function HostScreen() {
       setRevertBusy(false);
       setRevertMessage(
         outcome.failed === 'mode'
-          ? `Couldn't switch encryption off: ${outcome.error}. You can try again.`
-          : `Couldn't retry: ${outcome.error}. You can try again.`,
+          ? t('boot.switchOffFailed', { error: outcome.error })
+          : t('boot.retryFailed', { error: outcome.error }),
       );
       return;
     }
     // The retry's OUTCOME (ready / a different boot error) arrives via `loam-status` — see onStatus's
     // 'ready'/'error' branches, both of which reset `revertBusy`.
-    setRevertMessage('Switching encryption off and restarting…');
+    setRevertMessage(t('boot.switchingOff'));
   };
 
   // `db_encryption_driver_missing` recovery (pre-release review 2026-09-25): the SQLCipher module didn't
@@ -958,12 +904,14 @@ function HostScreen() {
 
   // Bridge from the WebView's web content (the LOAM client) back to this native screen. The client's
   // `wipe` WS-event handler (apps/client/src/app.tsx) posts `{"type":"loam-wipe"}` via
-  // `window.ReactNativeWebView.postMessage` when the SERVER announces a node reset, and future message
-  // types may be added. All routing/policy lives in the exported, unit-testable
-  // `handleClientWebViewMessage`; crucially, `loam-wipe` is a native NO-OP there — the device key is NOT
-  // cleared from this unauthenticated WebView-origin message. Fixed-key rotation happens EXCLUSIVELY via
-  // the acknowledged, phase-gated `loam-wipe-restart` -> verified clear -> `loam-wipe-complete` protocol
-  // (`attemptWipeKeyClear`); see `handleClientWebViewMessage`'s doc comment for the full rationale.
+  // `window.ReactNativeWebView.postMessage` when the SERVER announces a node reset. Crucially, no message
+  // from here touches the device key: the client-side purge (IndexedDB/localStorage/service-worker caches)
+  // happens inside the WebView itself, and rotating a FIXED on-device database key (persistent/passphrase
+  // modes) happens EXCLUSIVELY via the acknowledged, phase-gated `loam-wipe-restart` -> verified clear ->
+  // `loam-wipe-complete` protocol (`attemptWipeKeyClear`): the server posts `loam-wipe-restart` only AFTER
+  // it has deleted the orphaned ciphertext and advanced its durable `.loam-wipe-phase` marker. Clearing the
+  // key on this unauthenticated WebView-origin message would bypass that gate and could destroy the key
+  // while a deletion survivor still exists. A malformed or foreign message is ignored.
   const handleWebViewMessage = (event: { nativeEvent: { data: string } }) => {
     const raw = event.nativeEvent.data;
     // The web client's "Invite someone" can ask the native host to open the share/invite overlay — that
@@ -994,7 +942,7 @@ function HostScreen() {
         // A shared file's cached copy must not outlive the reset.
         void clearSharedFiles();
         // Give the client's own local purge a moment, then rejoin under the node's NEW transport key (see
-        // `webViewKey`). Still a native no-op for key material — that stays with the acked protocol below.
+        // `webViewKey`). Still a native no-op for key material — that stays with the acked protocol above.
         setTimeout(() => {
           remountAfterBootstrapRef.current = true;
           // Gate the WebView again while the re-bootstrap runs: if that attempt fails, `gate()` surfaces the
@@ -1005,17 +953,16 @@ function HostScreen() {
         }, 1500);
       }
     } catch {
-      //t JSON / not ours — fall through to the wipe-protocol classifier.
+      // Not JSON / not ours: ignored.
     }
-    handleClientWebViewMessage(raw);
   };
 
   if (Platform.OS !== 'android') {
     return (
       <ThemedView style={styles.center}>
-        <ThemedText type="subtitle">LOAM host</ThemedText>
+        <ThemedText type="subtitle">{t('host.title')}</ThemedText>
         <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-          The embedded host runs on Android. Build and install the APK on a device to run it.
+          {t('boot.notAndroid')}
         </ThemedText>
       </ThemedView>
     );
@@ -1095,14 +1042,14 @@ function HostScreen() {
         {notice && !noticeDismissed ? (
           <ThemedView type="backgroundSelected" style={styles.noticeBanner}>
             <ThemedText type="small" style={styles.noticeBannerText}>
-              {notice.message ?? 'A database-encryption setting was downgraded during startup.'}
+              {notice.message ?? t('boot.noticeDowngraded')}
             </ThemedText>
             <ThemedView style={styles.noticeBannerActions}>
               <Pressable onPress={() => setDbEncryptionOpen(true)} accessibilityRole="button">
-                <ThemedText type="link">Encryption settings</ThemedText>
+                <ThemedText type="link">{t('boot.encryptionSettings')}</ThemedText>
               </Pressable>
               <Pressable onPress={() => setNoticeDismissed(true)} accessibilityRole="button" hitSlop={Spacing.two}>
-                <ThemedText type="link">Dismiss</ThemedText>
+                <ThemedText type="link">{t('common.dismiss')}</ThemedText>
               </Pressable>
             </ThemedView>
           </ThemedView>
@@ -1114,11 +1061,11 @@ function HostScreen() {
         {wipeClearFailure ? (
           <ThemedView type="backgroundSelected" style={styles.noticeBanner}>
             <ThemedText type="small" style={styles.noticeBannerText}>
-              Couldn't clear the device encryption key: {wipeClearFailure}
+              {t('boot.keyClearFailedWith', { error: wipeClearFailure })}
             </ThemedText>
             <ThemedView style={styles.noticeBannerActions}>
               <Pressable onPress={() => void attemptWipeKeyClear()} disabled={wipeClearBusy} accessibilityRole="button">
-                <ThemedText type="link">{wipeClearBusy ? 'Retrying…' : 'Retry'}</ThemedText>
+                <ThemedText type="link">{wipeClearBusy ? t('boot.retrying') : t('common.retry')}</ThemedText>
               </Pressable>
             </ThemedView>
           </ThemedView>
@@ -1135,7 +1082,7 @@ function HostScreen() {
             the screen edge, so its padding is (keyboard height − insets.bottom) and padding + strip is
             exactly the keyboard height — the strip never adds to the keyboard's padding. The Expo keyboard
             guide suggests `behavior={undefined}` on Android; that relies on the window resizing, which
-            edge-to-edge takes away, hence `padding`.t yet verified on a device. */}
+            edge-to-edge takes away, hence `padding`. Not yet verified on a device. */}
         <KeyboardAvoidingView behavior="padding" style={styles.flex}>
         {webViewReady ? (
           <WebView
@@ -1161,7 +1108,8 @@ function HostScreen() {
               ' true;'
             }
             // The LOAM client relies on the loam_session cookie, localStorage/IndexedDB, and a
-            // WebSocket — enable all of them, and allow the cleartext localhost origin.
+            // WebSocket — enable all of them. The cleartext localhost origin is allowed by the app's
+            // network security config (plugins/with-loam-host.js), loopback only.
             javaScriptEnabled
             domStorageEnabled
             thirdPartyCookiesEnabled
@@ -1189,17 +1137,16 @@ function HostScreen() {
               }
               return false;
             }}
-            mixedContentMode="always"
             onError={({ nativeEvent }) => {
               console.warn('LOAM WebView error', nativeEvent.description);
-              failWebView(nativeEvent.description || 'The LOAM page failed to load.');
+              failWebView(nativeEvent.description || t('boot.pageFailed'));
             }}
             onHttpError={({ nativeEvent }) => {
               console.warn('LOAM WebView HTTP error', nativeEvent.statusCode, nativeEvent.url);
               // Any HTTP error from the LOAM origin is fatal (on Android onHttpError is the main frame);
               // compare origins so a redirect to /channels or a trailing slash still matches.
               if (isLoamUrl(nativeEvent.url)) {
-                failWebView(`The LOAM server returned HTTP ${nativeEvent.statusCode}.`);
+                failWebView(t('boot.httpError', { status: nativeEvent.statusCode }));
               }
             }}
           />
@@ -1209,14 +1156,13 @@ function HostScreen() {
           // otherwise up (`status === 'ready'`), so a re-attempt against the loopback server normally
           // succeeds immediately.
           <ThemedView style={styles.webViewLoading}>
-            <ThemedText type="subtitle">Couldn’t finish starting LOAM</ThemedText>
+            <ThemedText type="subtitle">{t('boot.bootstrapFailedTitle')}</ThemedText>
             <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-              The host started, but couldn’t confirm its secure-connection settings. Retry to finish
-              loading.
+              {t('boot.bootstrapFailedBody')}
             </ThemedText>
             <Pressable onPress={retryBootstrap} accessibilityRole="button">
               <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">Retry</ThemedText>
+                <ThemedText type="link">{t('common.retry')}</ThemedText>
               </ThemedView>
             </Pressable>
           </ThemedView>
@@ -1274,19 +1220,6 @@ function HostScreen() {
     );
   }
 
-  // A boot failure that looks DB-encryption-related (G2): the operator needs a way to switch back to
-  // Off and restart even though the host never became ready — surfaced below regardless of whether
-  // this is the plain "starting" spinner or the error screen. Excludes `DB_UNREADABLE_CODE`/
-  // `DB_LOCKED_CODE`: both get their own dedicated, more specific fatal block (below) rather than this
-  // generic fallback one.
-  const dbEncryptionSuspect =
-    status === 'error' &&
-    errorCode !== undefined &&
-    errorCode !== DB_UNREADABLE_CODE &&
-    errorCode !== DB_LOCKED_CODE &&
-    errorCode !== DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE &&
-    errorCode !== DB_ENCRYPTION_DRIVER_MISSING_CODE &&
-    DB_ENCRYPTION_ERROR_CODES.has(errorCode);
   // FATAL db_encryption_unreadable (P1-1, Sol round 3, AF8/design#1): boot genuinely failed and the
   // embedded runtime stayed alive specifically so this recovery can work — see DB_UNREADABLE_CODE's
   // comment. `status` can only be `'error'` while this is active (never `'ready'`), and a subsequent
@@ -1304,20 +1237,20 @@ function HostScreen() {
 
   return (
     <ThemedView style={styles.center}>
-      <ThemedText type="title">LOAM host</ThemedText>
+      <ThemedText type="title">{t('host.title')}</ThemedText>
       {/* Persistent boot notice (AF2/P1-4), shown here too so it's visible even while still "starting"
           or on the generic timeout/error screen — independent of `status`. Never carries
           `DB_UNREADABLE_CODE` any more (P1-1) — that gets the dedicated FATAL block below instead,
           since (unlike every other notice code) it means boot did NOT keep running. */}
       {notice && !noticeDismissed ? (
         <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">A database-encryption setting was downgraded during startup.</ThemedText>
+          <ThemedText type="smallBold">{t('boot.noticeDowngraded')}</ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {notice.message ?? 'See Encryption settings below for details.'}
+            {notice.message ?? t('boot.seeEncryptionSettings')}
           </ThemedText>
           <ThemedView style={styles.noticeBannerActions}>
             <Pressable onPress={() => setNoticeDismissed(true)} accessibilityRole="button" hitSlop={Spacing.two}>
-              <ThemedText type="link">Dismiss</ThemedText>
+              <ThemedText type="link">{t('common.dismiss')}</ThemedText>
             </Pressable>
           </ThemedView>
         </ThemedView>
@@ -1328,13 +1261,12 @@ function HostScreen() {
           short of reinstalling; a subsequent `ready` (the in-process retry succeeding) clears this. */}
       {dbUnreadable ? (
         <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">The on-device database couldn't be opened with the current key.</ThemedText>
+          <ThemedText type="smallBold">{t('boot.unreadableTitle')}</ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {errorMessage ?? 'See Encryption settings below for details.'}
+            {errorMessage ?? t('boot.seeEncryptionSettings')}
           </ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            The old database is never deleted automatically. Preserve it and start a fresh one below, or
-            open Encryption settings to change the mode back.
+            {t('boot.unreadableBody')}
           </ThemedText>
           {lockedMode === 'passphrase' ? (
             // A wrong passphrase is the common cause here now that it is asked for at EVERY start (review
@@ -1342,12 +1274,12 @@ function HostScreen() {
             // tried on the intact database, never committed, and nothing is deleted.
             <>
               <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-                Mistyped the passphrase? Enter it again to retry with the existing database.
+                {t('boot.unreadablePassphraseHint')}
               </ThemedText>
               <TextInput
                 value={unlockPassphraseInput}
                 onChangeText={setUnlockPassphraseInput}
-                placeholder="Enter the passphrase"
+                placeholder={t('boot.passphrasePlaceholder')}
                 placeholderTextColor={theme.textSecondary}
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -1360,7 +1292,7 @@ function HostScreen() {
                   disabled={unlockBusy || startFreshBusy || !unlockPassphraseInput}
                   accessibilityRole="button">
                   <ThemedView type="backgroundElement" style={styles.retry}>
-                    <ThemedText type="link">{unlockBusy ? 'Retrying…' : 'Retry with this passphrase'}</ThemedText>
+                    <ThemedText type="link">{unlockBusy ? t('boot.retrying') : t('boot.retryWithPassphrase')}</ThemedText>
                   </ThemedView>
                 </Pressable>
               </ThemedView>
@@ -1375,7 +1307,7 @@ function HostScreen() {
             <Pressable onPress={() => void handleStartFresh()} disabled={startFreshBusy} accessibilityRole="button">
               <ThemedView type="backgroundElement" style={styles.retry}>
                 <ThemedText type="link">
-                  {startFreshBusy ? 'Confirming…' : 'Preserve old database & start fresh'}
+                  {startFreshBusy ? t('boot.confirming') : t('boot.preserveStartFresh')}
                 </ThemedText>
               </ThemedView>
             </Pressable>
@@ -1394,19 +1326,19 @@ function HostScreen() {
           clears this the same way it clears `dbUnreadable` above. */}
       {dbLocked ? (
         <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">On-device encryption is locked.</ThemedText>
+          <ThemedText type="smallBold">{t('boot.lockedTitle')}</ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {errorMessage ?? 'The selected encryption mode has no usable key yet.'}
+            {errorMessage ?? t('boot.lockedBody')}
           </ThemedText>
           {lockedMode === 'passphrase' ? (
             <>
               <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-                Enter the passphrase to unlock and start the database.
+                {t('boot.lockedPassphraseHint')}
               </ThemedText>
               <TextInput
                 value={unlockPassphraseInput}
                 onChangeText={setUnlockPassphraseInput}
-                placeholder="Enter the passphrase"
+                placeholder={t('boot.passphrasePlaceholder')}
                 placeholderTextColor={theme.textSecondary}
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -1419,7 +1351,7 @@ function HostScreen() {
                   disabled={unlockBusy || !unlockPassphraseInput}
                   accessibilityRole="button">
                   <ThemedView type="backgroundElement" style={styles.retry}>
-                    <ThemedText type="link">{unlockBusy ? 'Unlocking…' : 'Unlock'}</ThemedText>
+                    <ThemedText type="link">{unlockBusy ? t('boot.unlocking') : t('boot.unlock')}</ThemedText>
                   </ThemedView>
                 </Pressable>
               </ThemedView>
@@ -1428,7 +1360,7 @@ function HostScreen() {
           <ThemedView style={styles.noticeBannerActions}>
             <Pressable onPress={() => void handleRetryUnlock()} disabled={unlockBusy} accessibilityRole="button">
               <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">{unlockBusy ? 'Retrying…' : 'Retry'}</ThemedText>
+                <ThemedText type="link">{unlockBusy ? t('boot.retrying') : t('common.retry')}</ThemedText>
               </ThemedView>
             </Pressable>
           </ThemedView>
@@ -1446,27 +1378,24 @@ function HostScreen() {
           back off to keep the existing unencrypted data. A subsequent `ready` clears this (onStatus). */}
       {dbPlaintextUnconverted ? (
         <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">Encryption is on, but the existing database is unencrypted.</ThemedText>
+          <ThemedText type="smallBold">{t('boot.plaintextTitle')}</ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {errorMessage ??
-              'The selected encrypted mode can only apply to a fresh database: an existing plaintext database cannot be converted in place.'}
+            {errorMessage ?? t('boot.plaintextBody')}
           </ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            Delete the existing data and start a fresh encrypted database, or switch encryption back off to
-            keep the existing (unencrypted) data. In-place conversion is a future enhancement: not yet
-            available.
+            {t('boot.plaintextChoices')}
           </ThemedText>
           <ThemedView style={styles.noticeBannerActions}>
             <Pressable onPress={() => void handleStartFresh()} disabled={startFreshBusy || revertBusy} accessibilityRole="button">
               <ThemedView type="backgroundElement" style={styles.retry}>
                 <ThemedText type="link">
-                  {startFreshBusy ? 'Starting…' : 'Delete existing data & start encrypted'}
+                  {startFreshBusy ? t('setup.starting') : t('boot.deleteStartEncrypted')}
                 </ThemedText>
               </ThemedView>
             </Pressable>
             <Pressable onPress={() => void handleRevertToOff()} disabled={startFreshBusy || revertBusy} accessibilityRole="button">
               <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">{revertBusy ? 'Switching…' : 'Switch encryption back off'}</ThemedText>
+                <ThemedText type="link">{revertBusy ? t('boot.switching') : t('boot.switchBackOff')}</ThemedText>
               </ThemedView>
             </Pressable>
           </ThemedView>
@@ -1487,23 +1416,22 @@ function HostScreen() {
           is the only way to plaintext, behind a confirmation. A subsequent `ready` clears this (onStatus). */}
       {dbDriverMissing ? (
         <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">Encrypted storage is unavailable: the host did not start.</ThemedText>
+          <ThemedText type="smallBold">{t('boot.driverMissingTitle')}</ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {errorMessage ?? 'The encrypted-storage module failed to load on this device.'}
+            {errorMessage ?? t('boot.driverMissingBody')}
           </ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-           thing was stored unencrypted. Retry, or switch encryption off to run this host WITHOUT
-            encryption.
+            {t('boot.driverMissingChoices')}
           </ThemedText>
           <ThemedView style={styles.noticeBannerActions}>
             <Pressable onPress={() => void handleRetryUnlock()} disabled={unlockBusy || revertBusy} accessibilityRole="button">
               <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">{unlockBusy ? 'Retrying…' : 'Retry'}</ThemedText>
+                <ThemedText type="link">{unlockBusy ? t('boot.retrying') : t('common.retry')}</ThemedText>
               </ThemedView>
             </Pressable>
             <Pressable onPress={handleStartUnencryptedPress} disabled={unlockBusy || revertBusy} accessibilityRole="button">
               <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">{revertBusy ? 'Switching…' : 'Start without encryption'}</ThemedText>
+                <ThemedText type="link">{revertBusy ? t('boot.switching') : t('boot.startUnencrypted')}</ThemedText>
               </ThemedView>
             </Pressable>
           </ThemedView>
@@ -1525,18 +1453,17 @@ function HostScreen() {
           wipe-restart signal can arrive at any time. */}
       {wipeClearFailure ? (
         <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">Couldn't clear the device encryption key.</ThemedText>
+          <ThemedText type="smallBold">{t('boot.keyClearTitle')}</ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
             {wipeClearFailure}
           </ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            The old encrypted database was already deleted, but the emergency-reset key itself is still
-            on this device until this succeeds.
+            {t('boot.keyClearBody')}
           </ThemedText>
           <ThemedView style={styles.noticeBannerActions}>
             <Pressable onPress={() => void attemptWipeKeyClear()} disabled={wipeClearBusy} accessibilityRole="button">
               <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">{wipeClearBusy ? 'Retrying…' : 'Retry'}</ThemedText>
+                <ThemedText type="link">{wipeClearBusy ? t('boot.retrying') : t('common.retry')}</ThemedText>
               </ThemedView>
             </Pressable>
           </ThemedView>
@@ -1545,28 +1472,19 @@ function HostScreen() {
       {status === 'starting' ? (
         <>
           <ActivityIndicator size="large" style={styles.spinner} />
-          <ThemedText type="subtitle">Starting host…</ThemedText>
+          <ThemedText type="subtitle">{t('host.starting')}</ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            Booting the embedded server. First launch can take up to a minute.
+            {t('boot.startingBody')}
           </ThemedText>
         </>
       ) : (
         <>
           <ThemedText type="subtitle">
-            {nodeStatus === 'ready' ? 'Couldn’t load LOAM' : 'Host failed to start'}
+            {nodeStatus === 'ready' ? t('boot.loadFailedTitle') : t('boot.startFailedTitle')}
           </ThemedText>
           <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {errorMessage ?? 'The embedded server did not become ready.'}
+            {errorMessage ?? t('boot.notReady')}
           </ThemedText>
-          {dbEncryptionSuspect ? (
-            <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-              <ThemedText type="smallBold">This looks like a database-encryption problem.</ThemedText>
-              <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-                Open Encryption settings below, switch the mode back to Off, then close and reopen the
-                app.
-              </ThemedText>
-            </ThemedView>
-          ) : null}
           {nodeStatus === 'ready' ? (
             // The server is up; a Retry just remounts the WebView for a fresh load.
             <Pressable
@@ -1575,7 +1493,7 @@ function HostScreen() {
                 setStatus('ready');
               }}>
               <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">Retry</ThemedText>
+                <ThemedText type="link">{t('common.retry')}</ThemedText>
               </ThemedView>
             </Pressable>
           ) : dbUnreadable || dbLocked || dbPlaintextUnconverted || dbDriverMissing ? null : (
@@ -1586,7 +1504,7 @@ function HostScreen() {
             // first would just hit the identical failure again (nothing changed), so this generic
             // instruction would be actively misleading.
             <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-              Close and reopen the app to try again.
+              {t('boot.closeReopen')}
             </ThemedText>
           )}
         </>
@@ -1596,9 +1514,9 @@ function HostScreen() {
       <Pressable
         onPress={() => setDbEncryptionOpen(true)}
         accessibilityRole="button"
-        accessibilityLabel="On-device encryption settings">
+        accessibilityLabel={t('boot.encryptionSettingsA11y')}>
         <ThemedView type="backgroundElement" style={styles.retry}>
-          <ThemedText type="link">Encryption settings</ThemedText>
+          <ThemedText type="link">{t('boot.encryptionSettings')}</ThemedText>
         </ThemedView>
       </Pressable>
       {/* P1-1 (Sol round 7, hole 4): pass the bridge `channel` here too. Without it, a mode change made

@@ -17,7 +17,7 @@ import {
   snapshotStoredDbKeys,
   setPendingNewNetwork,
 } from '@/lib/db-encryption';
-import type { AppLocale } from '@/lib/i18n';
+import { t, type AppLocale } from '@/lib/i18n';
 import {
   hasContinuableNetwork,
   parseSetupRecord,
@@ -103,7 +103,7 @@ export type PrepareResult = { ok: true } | { ok: false; error: string };
 export async function prepareNewNetwork(record: SetupRecord, locale: AppLocale): Promise<PrepareResult> {
   const current = await getDbEncryptionMode();
   if (current === DB_ENCRYPTION_MODE_READ_ERROR) {
-    return { ok: false, error: "Couldn't read this phone's storage settings." };
+    return { ok: false, error: t('newNetwork.readSettingsFailed') };
   }
   // "Choose every setting myself" keeps an encrypted mode already chosen, and otherwise encrypts like
   // Community: an unset mode reads as 'off' (that's how installs from before encryption read), and a new
@@ -111,7 +111,7 @@ export async function prepareNewNetwork(record: SetupRecord, locale: AppLocale):
   const target = presetDbMode(record.preset) ?? (current === 'off' ? 'persistent' : current);
   const keys = await snapshotStoredDbKeys();
   if (!keys) {
-    return { ok: false, error: "Couldn't read this phone's storage keys." };
+    return { ok: false, error: t('newNetwork.readKeysFailed') };
   }
   /** Undo everything done so far; the error says whether the previous network was fully put back. */
   const rollBack = async (error: string, keysTouched: boolean): Promise<PrepareResult> => {
@@ -120,20 +120,20 @@ export async function prepareNewNetwork(record: SetupRecord, locale: AppLocale):
     const hintBack = await writeModeHint(current);
     return keysBack && modeBack && hintBack
       ? { ok: false, error }
-      : { ok: false, error: `${error} The previous network's storage settings couldn't all be put back.` };
+      : { ok: false, error: t('newNetwork.rollbackIncomplete', { error }) };
   };
   if (target !== current) {
     const set = await setDbEncryptionMode(target);
     if (!set.ok) {
-      return { ok: false, error: set.error ?? "Couldn't save the storage setting." };
+      return { ok: false, error: set.error ?? t('newNetwork.saveModeFailed') };
     }
   }
   if (!(await writeModeHint(target))) {
-    return rollBack("Couldn't save the storage setting where the network reads it.", false);
+    return rollBack(t('newNetwork.saveHintFailed'), false);
   }
   const cleared = await clearStoredDbKeys();
   if (!cleared.ok) {
-    return rollBack(cleared.error ?? "Couldn't clear the previous network's keys.", true);
+    return rollBack(cleared.error ?? t('newNetwork.clearKeysFailed'), true);
   }
   if (current === 'passphrase' && target !== 'passphrase') {
     await clearStoredPassphrase();

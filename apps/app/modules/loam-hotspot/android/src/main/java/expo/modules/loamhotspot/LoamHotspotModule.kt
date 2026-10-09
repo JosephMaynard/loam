@@ -84,18 +84,19 @@ class LoamHotspotModule : Module() {
     // Best-effort: a failure is logged and leaves the app in its normal foreground-only state. Returns
     // whether the start call went through — API 31+ throws ForegroundServiceStartNotAllowedException when
     // the app is in the background, so JS re-calls this whenever the app is foregrounded (idempotent: a
-    // repeat start re-posts the same notification and the wake lock is guarded).
-    Function("startHostService") {
+    // repeat start re-posts the notification and the wake lock is guarded). `labels` is the notification's
+    // text in the app's language (`HostServiceLabels` on the JS side); omitted = the service's English.
+    Function("startHostService") { labels: Map<String, Any?>? ->
       val context = appContext.reactContext?.applicationContext
       if (context == null) {
-        android.util.Log.w("LoamHotspot", "startHostService failed: no application context")
+        Log.w(TAG, "startHostService failed: no application context")
         false
       } else {
         try {
-          LoamHostService.start(context)
+          LoamHostService.start(context, labels)
           true
         } catch (error: Throwable) {
-          android.util.Log.w("LoamHotspot", "startHostService failed", error)
+          Log.w(TAG, "startHostService failed", error)
           false
         }
       }
@@ -104,12 +105,12 @@ class LoamHotspotModule : Module() {
     Function("stopHostService") {
       val context = appContext.reactContext?.applicationContext
       if (context == null) {
-        android.util.Log.w("LoamHotspot", "stopHostService failed: no application context")
+        Log.w(TAG, "stopHostService failed: no application context")
       } else {
         try {
           LoamHostService.stop(context)
         } catch (error: Throwable) {
-          android.util.Log.w("LoamHotspot", "stopHostService failed", error)
+          Log.w(TAG, "stopHostService failed", error)
         }
       }
     }
@@ -121,13 +122,13 @@ class LoamHotspotModule : Module() {
     Function("startKiosk") {
       val activity = appContext.currentActivity
       if (activity == null) {
-        android.util.Log.w("LoamHotspot", "startKiosk failed: no current activity")
+        Log.w(TAG, "startKiosk failed: no current activity")
       } else {
         activity.runOnUiThread {
           try {
             activity.startLockTask()
           } catch (error: Throwable) {
-            android.util.Log.w("LoamHotspot", "startLockTask failed", error)
+            Log.w(TAG, "startLockTask failed", error)
           }
         }
       }
@@ -142,14 +143,14 @@ class LoamHotspotModule : Module() {
       try {
         reservation?.close()
       } catch (error: Throwable) {
-        android.util.Log.w("LoamHotspot", "closeApp: hotspot close failed", error)
+        Log.w(TAG, "closeApp: hotspot close failed", error)
       }
       reservation = null
       appContext.reactContext?.applicationContext?.let { context ->
         try {
           LoamHostService.stop(context)
         } catch (error: Throwable) {
-          android.util.Log.w("LoamHotspot", "closeApp: stopHostService failed", error)
+          Log.w(TAG, "closeApp: stopHostService failed", error)
         }
       }
       val activity = appContext.currentActivity
@@ -165,7 +166,7 @@ class LoamHotspotModule : Module() {
           try {
             activity.finishAndRemoveTask()
           } catch (error: Throwable) {
-            android.util.Log.w("LoamHotspot", "closeApp: finishAndRemoveTask failed", error)
+            Log.w(TAG, "closeApp: finishAndRemoveTask failed", error)
           }
           Handler(Looper.getMainLooper()).postDelayed({
             android.os.Process.killProcess(android.os.Process.myPid())
@@ -181,7 +182,7 @@ class LoamHotspotModule : Module() {
           try {
             activity.stopLockTask()
           } catch (error: Throwable) {
-            android.util.Log.w("LoamHotspot", "stopLockTask failed", error)
+            Log.w(TAG, "stopLockTask failed", error)
           }
         }
       }
@@ -269,7 +270,7 @@ class LoamHotspotModule : Module() {
         try {
           sendEvent("onHotspotStopped")
         } catch (error: Throwable) {
-          android.util.Log.w("LoamHotspot", "onHotspotStopped event failed", error)
+          Log.w(TAG, "onHotspotStopped event failed", error)
         }
       }
     }
@@ -363,7 +364,7 @@ class LoamHotspotModule : Module() {
       try {
         NetworkInterface.getNetworkInterfaces()
       } catch (error: Throwable) {
-        Log.w("LoamHotspot", "NetworkInterface enumeration failed", error)
+        Log.w(TAG, "NetworkInterface enumeration failed", error)
         null
       } ?: return out
     for (iface in interfaces) {
@@ -448,7 +449,7 @@ class LoamHotspotModule : Module() {
         props.interfaceName?.let { names.add(it) }
       }
     } catch (error: Throwable) {
-      Log.w("LoamHotspot", "Upstream network enumeration failed", error)
+      Log.w(TAG, "Upstream network enumeration failed", error)
       return null
     }
     return names
@@ -474,7 +475,7 @@ class LoamHotspotModule : Module() {
         if (raw != 0) out.add(littleEndianIpv4(raw))
       }
     } catch (error: Throwable) {
-      Log.w("LoamHotspot", "Station address lookup failed", error)
+      Log.w(TAG, "Station address lookup failed", error)
     }
     return out
   }
@@ -506,7 +507,7 @@ class LoamHotspotModule : Module() {
           }
         }
       } catch (error: Throwable) {
-        Log.w("LoamHotspot", "Wi-Fi network check failed", error)
+        Log.w(TAG, "Wi-Fi network check failed", error)
       }
       var ssid: String? = null
       try {
@@ -518,11 +519,11 @@ class LoamHotspotModule : Module() {
           ssid = raw
         }
       } catch (error: Throwable) {
-        Log.w("LoamHotspot", "Wi-Fi SSID lookup failed", error)
+        Log.w(TAG, "Wi-Fi SSID lookup failed", error)
       }
       return mapOf("connected" to (onWifi || address != null), "address" to address, "ssid" to ssid)
     } catch (error: Throwable) {
-      Log.w("LoamHotspot", "wifiStationInfo failed", error)
+      Log.w(TAG, "wifiStationInfo failed", error)
       return mapOf("connected" to false)
     }
   }
@@ -537,5 +538,9 @@ class LoamHotspotModule : Module() {
     WifiManager.LocalOnlyHotspotCallback.ERROR_INCOMPATIBLE_MODE -> "incompatible Wi-Fi mode"
     WifiManager.LocalOnlyHotspotCallback.ERROR_TETHERING_DISALLOWED -> "tethering disallowed"
     else -> "reason code $reason"
+  }
+
+  companion object {
+    private const val TAG = "LoamHotspot"
   }
 }

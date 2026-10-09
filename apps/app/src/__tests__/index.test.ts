@@ -1,9 +1,12 @@
-// Unit tests for the WebView-message and wipe-key-clear logic in the Android host screen
+// Unit tests for the wipe-key-clear and start-fresh-intent logic in the Android host screen
 // (`src/app/index.tsx`). The apps/app Vitest harness runs in a `node` environment with no React
 // renderer, so the screen's native import graph (react-native, WebView, Expo native modules, the
 // nodejs-mobile bridge, sibling components) is replaced with inert `vi.mock` doubles below — enough
 // for the module to evaluate at import so the exported, dependency-free helpers can be exercised
 // directly. Only `react` is loaded for real (it's pure JS and never rendered here).
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // --- Native / Expo / bridge module doubles (only what index.tsx touches at module load) -----------
@@ -50,16 +53,16 @@ vi.mock('../../modules/loam-hotspot', () => ({
   stopKiosk: vi.fn(),
 }));
 
-// The one dependency this suite actually asserts against: `clearStoredDbKeys` must never be reached by
-// the WebView `loam-wipe` path. Declared via `vi.hoisted` so it exists when the hoisted `vi.mock`
-// factory below runs (a plain outer `const` would be referenced before initialization).
+// The stored-key clear the screen wires into `clearWipeKeyAndAck`. Declared via `vi.hoisted` so it exists
+// when the hoisted `vi.mock` factory below runs (a plain outer `const` would be referenced before
+// initialization).
 const { clearStoredDbKeys } = vi.hoisted(() => ({
   clearStoredDbKeys: vi.fn<() => Promise<{ ok: boolean; error?: string }>>(),
 }));
 vi.mock('@/lib/db-encryption', () => ({
   clearStoredDbKeys,
-  // `DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE` is referenced at module scope (in a Set); the rest are
-  // only used inside the component body, so inert stubs are enough for import to succeed.
+  // `DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE` is compared by `startFreshIntentForCode`; the rest are only
+  // used inside the component body, so inert stubs are enough for import to succeed.
   DB_ENCRYPTION_PLAINTEXT_UNCONVERTED_CODE: 'db_encryption_plaintext_unconverted',
   DB_ENCRYPTION_DRIVER_MISSING_CODE: 'db_encryption_driver_missing',
   DB_ENCRYPTION_MODE_READ_ERROR: '__read_error__',
@@ -76,29 +79,28 @@ vi.mock('@/lib/db-encryption', () => ({
 
 // Imported AFTER the mocks (vi.mock is hoisted, so ordering is safe) — index.tsx evaluates cleanly
 // against the doubles above.
-import { clearWipeKeyAndAck, handleClientWebViewMessage, startFreshIntentForCode } from '../app/index';
+import { clearWipeKeyAndAck, startFreshIntentForCode } from '../app/index';
 
 beforeEach(() => {
   clearStoredDbKeys.mockReset();
 });
 
-describe('handleClientWebViewMessage', () => {
-  it('does NOT clear the device key on a loam-wipe message from the WebView origin', () => {
-    // The security fix: a `{"type":"loam-wipe"}` message posted by web content must be a native no-op.
-    // Key rotation is exclusively driven by the acked `loam-wipe-restart` protocol (see below), never by
-    // this unauthenticated, phase-ungated WebView message.
-    handleClientWebViewMessage(JSON.stringify({ type: 'loam-wipe' }));
-    expect(clearStoredDbKeys).not.toHaveBeenCalled();
-  });
-
-  it('ignores unknown message types without clearing the device key', () => {
-    handleClientWebViewMessage(JSON.stringify({ type: 'something-else' }));
-    expect(clearStoredDbKeys).not.toHaveBeenCalled();
-  });
-
-  it('ignores malformed (non-JSON) messages without throwing or clearing the device key', () => {
-    expect(() => handleClientWebViewMessage('not-json {')).not.toThrow();
-    expect(clearStoredDbKeys).not.toHaveBeenCalled();
+describe('the WebView message bridge never touches the device key', () => {
+  it('reaches clearStoredDbKeys only through clearWipeKeyAndAck (the acked loam-wipe-restart protocol)', () => {
+    // A `{"type":"loam-wipe"}` message posted by web content must stay a native no-op for key material:
+    // rotation is driven exclusively by the acked `loam-wipe-restart` protocol (see below), never by that
+    // unauthenticated, phase-ungated WebView message. Pinned in the source, since the handler is a closure
+    // inside the (never rendered here) component: the only call sites of the clear are the two in
+    // `attemptWipeKeyClear`'s `clearWipeKeyAndAck(clearStoredDbKeys, …)` and the import.
+    const source = readFileSync(join(__dirname, '../app/index.tsx'), 'utf8');
+    const code = source
+      .split('\n')
+      .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+      .join('\n');
+    const uses = [...code.matchAll(/\bclearStoredDbKeys\b/g)].length;
+    expect(uses).toBe(2);
+    expect(code).toMatch(/clearWipeKeyAndAck\(clearStoredDbKeys,/);
+    expect(code).not.toMatch(/loam-wipe'[\s\S]{0,400}clearStoredDbKeys/);
   });
 });
 

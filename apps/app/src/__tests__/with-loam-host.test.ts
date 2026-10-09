@@ -1,6 +1,6 @@
-// Unit tests for the pure helpers of plugins/with-loam-host.js (pre-release review 2026-09-25):
-// no-backup + no-device-transfer, optional hardware features, the legacy Bluetooth permissions, and the
-// stale-prebuild fingerprint.
+// Unit tests for the pure helpers of plugins/with-loam-host.js: loopback-only cleartext, no-backup +
+// no-device-transfer, optional hardware features, the legacy Bluetooth permissions, and the stale-prebuild
+// fingerprint.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -13,16 +13,42 @@ import { afterEach, describe, expect, it } from "vitest";
 const plugin = require("../../plugins/with-loam-host.js");
 const {
   BACKUP_DOMAINS,
+  CLEARTEXT_HOSTS,
   FINGERPRINT_FILE,
   LEGACY_BLUETOOTH_PERMISSIONS,
+  NETWORK_SECURITY_CONFIG_RESOURCE,
   OPTIONAL_FEATURES,
   STALE_GUARD_GRADLE,
   addLegacyBluetoothPermissions,
   addOptionalFeatures,
   applyApplicationAttributes,
   dataExtractionRulesXml,
+  networkSecurityConfigXml,
   prebuildFingerprint,
 } = plugin._internal;
+
+describe("with-loam-host: cleartext only to loopback", () => {
+  it("points the application at a network security config and drops the app-wide usesCleartextTraffic", () => {
+    const application = applyApplicationAttributes({ $: { "android:usesCleartextTraffic": "true" } });
+    expect(application.$["android:networkSecurityConfig"]).toBe("@xml/network_security_config");
+    expect(NETWORK_SECURITY_CONFIG_RESOURCE).toBe("@xml/network_security_config");
+    expect(application.$).not.toHaveProperty("android:usesCleartextTraffic");
+  });
+
+  it("refuses cleartext by default and allows it for exactly localhost and 127.0.0.1", () => {
+    const xml = networkSecurityConfigXml();
+    expect(xml).toContain('<base-config cleartextTrafficPermitted="false" />');
+    const domainConfigs = [...xml.matchAll(/<domain-config cleartextTrafficPermitted="([^"]+)">([\s\S]*?)<\/domain-config>/g)];
+    expect(domainConfigs).toHaveLength(1);
+    expect(domainConfigs[0][1]).toBe("true");
+    const hosts = [...domainConfigs[0][2].matchAll(/<domain includeSubdomains="false">([^<]+)<\/domain>/g)].map((match) => match[1]);
+    expect(hosts.sort()).toEqual(["127.0.0.1", "localhost"]);
+    expect(CLEARTEXT_HOSTS.sort()).toEqual(["127.0.0.1", "localhost"]);
+    // No LAN range, no wildcard, no second permitted block: the joiners' phones never go through this app.
+    expect(xml).not.toMatch(/includeSubdomains="true"|192\.168|10\.0|\*/);
+    expect(xml).not.toContain("<debug-overrides");
+  });
+});
 
 /** The `<exclude domain=…>` values inside one section of the rules XML. */
 function excludedDomains(xml: string, section: "cloud-backup" | "device-transfer"): string[] {
@@ -48,7 +74,7 @@ describe("with-loam-host: backup / device-transfer exclusion", () => {
       "android:allowBackup": "false",
       "android:fullBackupContent": "false",
       "android:dataExtractionRules": "@xml/data_extraction_rules",
-      "android:usesCleartextTraffic": "true",
+      "android:networkSecurityConfig": "@xml/network_security_config",
     });
   });
 });

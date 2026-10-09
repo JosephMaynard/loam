@@ -1602,9 +1602,8 @@ notify('starting');
 //                              deletion before serving (persistent: RN still holds the device secret — we do NOT
 //                              clear it here; passphrase: the operator is asked for the passphrase first, since
 //                              the device never keeps it — the resume then continues once they enter it) and,
-//                              once verified,
-//                              serving and, once verified, signals the wipe-restart hook itself. So this is
-//                              still a normal `resolveDbEncryptionAndBoot()` call — the server does the rest.
+//                              once verified, signals the wipe-restart hook itself. So this is still a normal
+//                              `resolveDbEncryptionAndBoot()` call — the server does the rest.
 //   - phase `key-clear-ready`→ artifacts are PROVEN gone; the ONLY step left is clearing the device key.
 //                              Do the wipe-restart dance: re-post `loam-wipe-restart`, wait for
 //                              `loam-wipe-complete` (RN VERIFIED the key is gone), delete the phase file,

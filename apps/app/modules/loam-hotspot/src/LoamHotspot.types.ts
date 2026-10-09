@@ -47,6 +47,21 @@ export type WifiStationInfo = {
   ssid?: string | null;
 };
 
+/**
+ * The foreground host service's notification text, in the app's language (`src/lib/host-service.ts` builds
+ * it from the catalogs). The Kotlin side falls back to English for a start that carries no labels.
+ */
+export type HostServiceLabels = {
+  /** The notification channel's name, shown in the system's notification settings. */
+  channelName: string;
+  /** The channel's description, shown under its name in the system settings. */
+  channelDescription: string;
+  /** The notification's title. */
+  title: string;
+  /** The notification's body text. */
+  text: string;
+};
+
 /** Native → JS events. `onHotspotStopped` fires when the SYSTEM tears the hotspot down (tethering
  * enabled, Wi-Fi toggled, OEM power policy) — never for our own `stopHotspot()`. */
 export type LoamHotspotEvents = {

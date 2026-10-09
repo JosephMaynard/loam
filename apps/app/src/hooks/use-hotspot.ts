@@ -17,6 +17,7 @@ import {
   pickHotspotAddress,
   type HostInterface,
 } from '@/lib/hotspot-address';
+import { t } from '@/lib/i18n';
 
 /**
  * Lifecycle of the local-only hotspot:
@@ -113,7 +114,7 @@ function startWithTimeout(): Promise<HotspotCredentials> {
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       timedOut = true;
-      reject(new Error("The hotspot didn't start in time. This device may not support one."));
+      reject(new Error(t('hotspot.startTimeout')));
     }, START_TIMEOUT_MS);
   });
 
@@ -184,10 +185,7 @@ export async function ensureHotspot(): Promise<void> {
     return;
   }
   if (!isHotspotSupported()) {
-    publish({
-      phase: 'error',
-      error: 'Hotspot control is only available on the Android host build.',
-    });
+    publish({ phase: 'error', error: t('hotspot.unsupported') });
     return;
   }
   subscribeToSystemStops();
@@ -206,11 +204,7 @@ export async function ensureHotspot(): Promise<void> {
       // screen calls `ensureHotspot` again, which asks again, and an answer given meanwhile is just granted.
       publish({
         phase: 'error',
-        error:
-          permission === 'timeout'
-            ? 'Android gave no answer to the permission request. Close and reopen this screen to try again. ' +
-              'LOAM is still reachable to anyone already on this network.'
-            : 'Location permission is needed to start the hotspot. LOAM is still reachable to anyone already on this network.',
+        error: permission === 'timeout' ? t('hotspot.permissionTimeout') : t('hotspot.permissionDenied'),
       });
       return;
     }
@@ -367,12 +361,7 @@ function subscribeToSystemStops(): void {
     if (sharedState.phase !== 'running') {
       return;
     }
-    publish({
-      phase: 'error',
-      error:
-        'The system stopped the hotspot (turning on the phone’s own hotspot/tethering or toggling Wi-Fi does this). ' +
-        'Close and reopen this screen to start it again. LOAM is still reachable on any network the phone is on.',
-    });
+    publish({ phase: 'error', error: t('hotspot.systemStopped') });
   });
 }
 

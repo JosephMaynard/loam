@@ -8,9 +8,19 @@
 import { Platform } from 'react-native';
 
 import LoamHotspotModule from './src/LoamHotspotModule';
-import type { HotspotAddressCandidate, HotspotCredentials, WifiStationInfo } from './src/LoamHotspot.types';
+import type {
+  HostServiceLabels,
+  HotspotAddressCandidate,
+  HotspotCredentials,
+  WifiStationInfo,
+} from './src/LoamHotspot.types';
 
-export type { HotspotAddressCandidate, HotspotCredentials, WifiStationInfo } from './src/LoamHotspot.types';
+export type {
+  HostServiceLabels,
+  HotspotAddressCandidate,
+  HotspotCredentials,
+  WifiStationInfo,
+} from './src/LoamHotspot.types';
 
 /** True when the native hotspot module is present (Android with the module linked). */
 export function isHotspotSupported(): boolean {
@@ -100,12 +110,17 @@ export function stopHotspot(): void {
 /**
  * Start a foreground service so the host keeps serving while the screen is off / the app is
  * backgrounded (docs/04). Idempotent. Returns whether the start went through (false when unsupported or
- * refused — API 31+ refuses from the background); never throws. Prefer `ensureHostService`
- * (src/lib/host-service.ts), which also handles the notification permission and foreground timing.
+ * refused — API 31+ refuses from the background); never throws. `labels` is the notification's text in
+ * the app's language (a repeat start re-posts the notification with the labels it carries). Prefer
+ * `ensureHostService` (src/lib/host-service.ts), which also handles the notification permission and
+ * foreground timing and supplies the labels.
  */
-export function startHostService(): boolean {
+export function startHostService(labels?: HostServiceLabels): boolean {
   try {
-    return LoamHotspotModule?.startHostService() === true;
+    if (!LoamHotspotModule) {
+      return false;
+    }
+    return (labels ? LoamHotspotModule.startHostService(labels) : LoamHotspotModule.startHostService()) === true;
   } catch {
     // Best effort — the host still works while foregrounded even if the service can't start.
     return false;
