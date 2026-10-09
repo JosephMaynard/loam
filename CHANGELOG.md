@@ -99,6 +99,30 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   an older reaction stored before this can still be removed.
 
 ### Security
+- **Sync hardening against a hostile peer.** One record too large to download is remembered as refused
+  once isolated, so it can no longer make every round repeat the same downloads and stall everything
+  after it. A peer may introduce at most 200 new channels a round and 2 000 in all. A peer may author new
+  posts only as users that sync introduced or as a brand-new author, never as a user created on this node
+  (their owner-only channels included). Timestamps on imported messages are clamped to this node's clock
+  plus five minutes, so a far-future stamp cannot sort first forever or escape retention. Attachment
+  downloads from an encrypted peer are capped at 2 MB each and count toward the round's budget. The
+  request that links two nodes no longer carries this node's own sync token. When a peer without a pinned
+  key answers a later handshake with a different key, its public data is still pulled but the sync token
+  is withheld, a warning is logged once, and the admin sync panel marks the peer.
+- **Mesh:** a re-offered copy of sealed mail can raise the hop budget only of mail this node carries,
+  never of mail a local user sealed here; a contact card whose keys have the wrong length is refused when
+  added and ignored if an older build stored one, so sending to it answers 404 instead of a server error.
+- **Fenced code blocks can no longer carry a CSS class**, so a post cannot dress itself up as one of the
+  app's own notices or buttons.
+- **The web app's service worker answers every page load from one request for the app shell**, so a
+  conversation id or search term in the address never reaches the network or the browser's cache on a
+  reload; message search keeps the term out of the address altogether.
+- **Android host: cleartext HTTP is allowed only to the embedded server on the phone itself** (localhost),
+  through an Android network security config, instead of app-wide.
+- **The terminal UI's "same name as someone else" warning sees through zero-width characters, lookalike
+  letters and case**, so a copied name cannot slip past it; control and invisible characters never reach
+  the terminal. A new kiosk password needs at least 8 characters and is hashed at a higher cost; passwords
+  saved by earlier versions still unlock.
 - **Dependency bumps:** `shell-quote` to 1.12.0 (clears the one critical advisory `pnpm audit` reported; it
   only ever ran in development tooling) and `@fastify/websocket` to 11.3.4 (socket errors during the
   upgrade hooks are handled). The three advisories left are build-time tools with no patched release.
@@ -122,6 +146,50 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   server's own limiter sends no `x-ratelimit-*` headers.
 
 ### Fixed
+- **Every error the node answers with now has a code**, so the web app shows it in the chosen language
+  instead of English: timeouts, join requests, channel deletion, reports, mesh contacts, attachment size,
+  "this network is resetting" and the encrypted-connection refusals. A test keeps it that way.
+- **Replies can only answer a channel post**, not another reply; deleting a post also removes any older
+  nested replies under it.
+- **Reporting the same message or person twice updates the earlier report** instead of filing another; one
+  person may have 20 open reports and a node 2 000, the moderation queue is read in one pass, and a report
+  about a very long message is cut with a note instead of vanishing from the queue.
+- **An error inside an Emergency Reset locks the node and tells clients to purge** instead of answering with
+  a server error and leaving the node half wiped. A reset on a phone-hosted encrypted network turns
+  node-to-node sync off when its token had to be left behind, and says so at the next start.
+- **`loamnet --encrypt` takes the journaled Emergency Reset** (the one that resumes after an interrupted
+  wipe); a node started with a key and no declared key mode is treated as passphrase mode.
+- **Identities that were never used are removed after a day**: created but never agreed to the rules, never
+  wrote or received a message, never connected. Stray requests no longer leave ghosts on the People list.
+- **The node's bootstrap and config replies are validated** against the shared schema; a reply of the wrong
+  shape shows a readable error instead of a blank boot.
+- **A newer build upgrading the local database in one tab no longer stops the other open tabs** reading
+  and writing; only a wipe does. The local message cache keeps the newest 500 messages per conversation and
+  drops conversations the node no longer lists at start-up.
+- **The service worker precaches every file of the build**, so a device that joined once can open the app
+  offline from the first visit in any language; each build gets its own cache, so a new version refreshes
+  the icons and manifest and drops old bundles. The installed app's colour matches the page background.
+- **A "link another node" QR opened in a browser keeps the network's key** and explains that the code was
+  for another node.
+- **Terminal UI "Open as admin" works on Windows** (its arguments are passed verbatim), reports success only
+  when the opener exits cleanly, and always shows the admin link beside the message.
+- **`loamnet`** accepts `--port=4000` as well as `--port 4000`, refuses an unknown option or a stray
+  argument with one line instead of ignoring it, and in plain mode prints the server log only as
+  `[warn]` and `[error]` lines (everything with `--verbose`), never as raw JSON with the hostname. The
+  printed join QR is drawn black on white on a colour terminal so it scans on dark themes, and `pnpm dev`
+  prints the QR with the node's key.
+- **Android host: every native screen follows the chosen language.** The starting and recovery screens,
+  the Encryption settings screen, the on-device model manager, the hotspot and setup failure reasons, the
+  notification permission prompt and the "LOAM is hosting" notification itself are translated into all 15
+  languages. The recovery text for a missing encryption module had lost its first word ("Nothing was stored
+  unencrypted"); fixed. The hosting notification uses a monochrome status-bar icon instead of the launcher
+  icon.
+- **Smaller server fixes:** a file name with a broken character can no longer fail its download; editing a
+  message in a private channel you are not in gets the same answer as an unknown message; approving a join
+  request across a block is refused like an invite; the assistant bot and system records cannot be given
+  roles or moderated; banned and pending members are left off a private channel's member list; direct
+  messages to a mesh sender record or to a disabled assistant are refused; the assistant shows one plain
+  sentence when its backend fails instead of the backend's error text.
 - **A device wiped from Settings can rejoin by scanning the join QR again.** The "Device wiped" screen
   used to stay until site data was cleared by hand, because the app read the join key after it had
   already been stripped from the address. The Android host's own screen recovers the same way.
@@ -181,6 +249,11 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   needs a `node-gyp` build (the error says how). An unencrypted node never loads the driver.
 
 ### Changed
+- **Deleting a message, handing over a private channel and leaving one use the app's own confirmation
+  dialog** instead of the browser's confirm box. Screen readers hear new messages arriving in the open
+  conversation, one announcement per burst, and dialogs no longer tab onto hidden controls. The admin
+  bootstrap choices read as plain words ("First person to join", "One-time setup code", "Passphrase", "This
+  device (the host)", "Nobody").
 - **One place for everything a message offers.** The three-dot button beside a message opens the same
   actions sheet as tapping its time (the full reaction grid, then reply, copy, edit, delete and report)
   instead of a shorter menu; the separate smiley button is gone.

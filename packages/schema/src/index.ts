@@ -1516,6 +1516,15 @@ export const SERVER_ERROR_CODES = [
   "rules_version_mismatch",
   "reroll_not_allowed",
   "host_not_allowed",
+  "channel_delete_admin_required",
+  "location_disabled",
+  "timed_out",
+  "node_resetting",
+  "node_reset",
+  "wipe_incomplete",
+  "mesh_identity_missing",
+  "mesh_card_invalid",
+  "encrypted_session_required",
 ] as const;
 export type ServerErrorCode = (typeof SERVER_ERROR_CODES)[number];
 
