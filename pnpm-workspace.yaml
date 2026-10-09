@@ -9,14 +9,14 @@ packages:
 # deps stay in their own manifest.
 catalog:
   "@preact/preset-vite": ^2.10.6
-  "@types/node": ^24.13.6
+  "@types/node": ^24.19.1
   esbuild: ^0.28.2
-  jsdom: ^30.1.1
+  jsdom: ^30.1.2
   preact: ^10.29.8
   tsx: ^4.23.15
   typescript: ~7.0.2
-  vite: ^8.3.0
-  vitest: ^5.0.2
+  vite: ^8.3.3
+  vitest: ^5.0.3
 
 onlyBuiltDependencies:
   - better-sqlite3-multiple-ciphers
