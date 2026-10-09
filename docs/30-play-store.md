@@ -1,5 +1,12 @@
 # 30 — Google Play readiness
 
+> **Status: current working checklist** (audited 25 September 2026; large-screen section added 9 October
+> for 0.6.0). Nothing has been uploaded to Play yet. The in-repo blockers are closed; what remains is the
+> owner's work in the Play Console (the first internal-testing upload, Play App Signing, the H1 and H2
+> declarations, Data safety, the listing copy and the large-screen form factors) and the device run in
+> [docs/21](21-device-verification-checklist.md).
+> The 0.5.0 `versionCode` note below is history: 0.6.0 is `versionCode` 8.
+
 Status of publishing the Android host (`apps/app`, package `com.loamnet.host`) on Google Play. Audited
 2026-09-19 (updated 2026-09-25 after the pre-release fixes) against the release APK (`aapt2 dump badging`, `zipalign -c -P 16`, `llvm-readelf -lW` on every
 native lib) and the generated manifest. Play's thresholds move — **confirm the current target-API level
@@ -128,7 +135,10 @@ device checks below, and size headroom before a production track.
   checkouts don't persist the token, the build job is read-only, and a separate release job (`contents:
   write`, runs no repo code) attaches the APK. Keystore secrets reach only the signing step; a tag build
   fails without them and runs `pnpm test` + the app typecheck before building. Dependabot bumps the pinned
-  action SHAs weekly (`github-actions` ecosystem).
+  action SHAs weekly (`github-actions` ecosystem). The release also carries `loam-host.apk.sha256`, and a
+  separate `attest` job (the only one with `id-token: write` and `attestations: write`) records signed
+  build provenance for the APK and the AAB; check either with
+  `gh attestation verify <file> --repo MagicZebraLtd/loam` before installing or uploading it.
 - Predictive back is opted out (`predictiveBackGestureEnabled: false`) — fine for now, revisit later.
 
 ## Large screens and Android laptops

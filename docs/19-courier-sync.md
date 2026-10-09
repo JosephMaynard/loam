@@ -4,7 +4,7 @@
 > existing delivery layer — a "data mule" / sneakernet mode — as a **peer option alongside** (not a
 > replacement for) the continuous LAN sync (docs/11) and the opportunistic BLE/Wi-Fi-Aware auto-sync
 > (docs/16 Phase 3, PR #77). An operator can enable any combination. Written to be reviewed (by the
-> maintainer + an external model) before implementation, per the "don't rush the transport" rule.
+> maintainer and an external reviewer) before implementation, per the "don't rush the transport" rule.
 
 ## Why
 

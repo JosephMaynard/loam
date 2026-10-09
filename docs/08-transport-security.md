@@ -320,6 +320,10 @@ Only viable for **self-hosters with a domain**, *not* a mass-distributed app:
   inside a public app, which is instantly compromised (anyone extracts it). Per-install certs need a CA
   the client trusts → self-signed warnings, which is worse UX than the QR handshake. **So: app-layer QR
   handshake for the distributed/Android case; real-cert option documented for advanced self-hosters.**
+- **Not built.** The server doesn't terminate TLS itself, and running it behind a TLS-terminating reverse
+  proxy is unsupported: the `/ws` origin check refuses the `https://` page unless `CLIENT_PORT=443`, and
+  the join links stay `http://`. The limits and the workaround are in
+  [docs/12](12-operators-guide.md#behind-an-https-reverse-proxy-not-supported).
 
 ## Layered recommendation
 

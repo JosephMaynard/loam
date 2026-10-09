@@ -186,7 +186,7 @@ below.**
 | `passphrase` | `SHA-256(passphrase + ":" + deviceSecret)`, hex-encoded | Yes | the device secret lives in `expo-secure-store`; the **passphrase is entered at every start and never stored** (it sits in the secure store only between the operator typing it and the boot consuming it); the derived key is recomputed each boot, never stored |
 
 The passphrase pre-key is `SHA-256(passphrase + ":" + deviceSecret)` — it mixes the operator's passphrase
-with a random 32-byte **device secret** held in the Keystore (introduced in the Sol round-4 redesign). Two
+with a random 32-byte **device secret** held in the Keystore (introduced in the redesign after the fourth external review round). Two
 consequences worth documenting: an attacker needs the Keystore-held device secret, not just the passphrase,
 to even attempt derivation; and rotating the device secret (which is what a wipe does) rotates the derived
 key even when the passphrase is unchanged, so old ciphertext becomes unreadable. This pre-key is not the
@@ -343,8 +343,9 @@ publishes for Android/ABI 108:
    `better-sqlite3-<version>-node-108-android-arm64.tar.gz` containing a single
    `better_sqlite3.node` at the tarball root (matching the layout `fetch-native-modules.mjs` already
    expects and extracts).
-5. **sha256-pin it and wire it into `fetch-native-modules.mjs`** *(done)*: the script installs the
-   MC JS wrapper from npm (`--ignore-scripts`, keeping `bindings`/`file-uri-to-path`), then reads the
+5. **sha256-pin it and wire it into `fetch-native-modules.mjs`** *(done)*: the script unpacks the
+   MC JS wrapper and `bindings`/`file-uri-to-path` from their vendored, sha256-pinned npm tarballs
+   (`apps/app/native-prebuilds/npm/`, no registry, no install scripts), then reads the
    **vendored** tarball, verifies it against `MC_PREBUILD_SHA256` **before** extracting, and places
    `better_sqlite3.node` in a **separate** `node_modules/better-sqlite3-multiple-ciphers/build/Release/`
    (not overwriting the plain driver — `apps/server/src/db.ts` lazy-`require`s whichever one it

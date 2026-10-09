@@ -66,7 +66,9 @@ soil. We picked the word first and worked out the letters afterwards.)*
 
 1. **Download [`loam-host.apk`](https://github.com/MagicZebraLtd/loam/releases/latest/download/loam-host.apk)**
    from the [latest release](https://github.com/MagicZebraLtd/loam/releases/latest) and open it to
-   install. Your phone may ask you to allow installs from your browser.
+   install. Your phone may ask you to allow installs from your browser. (To check the file on a computer
+   first: `sha256sum -c loam-host.apk.sha256` with the checksum from the same release, or
+   `gh attestation verify loam-host.apk --repo MagicZebraLtd/loam`.)
 2. **Answer four questions:** your language, the kind of network (see [below](#kinds-of-network)),
    its name, and how people connect: **Hotspot** (the phone makes its own Wi-Fi, no router needed) or
    **Wi-Fi** (everyone on the Wi-Fi the phone is already on).

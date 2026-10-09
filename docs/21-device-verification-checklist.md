@@ -1,5 +1,13 @@
 # 21 · On-device runtime verification checklist
 
+> **Status: current, not yet run.** No results are recorded for this checklist. SQLCipher keying, rekey
+> and wipe on a physical phone, the on-device model lifecycle and the host service are verified only in
+> code and CI. Some host features have been tried on a Galaxy S25 Ultra along the way (hotspot address
+> discovery and a second phone joining, 2026-09-28, docs/04), but not this list. Android changes made since
+> it was written (the permission flow, the translated hosting notification, wired Wi-Fi mode, large-screen
+> support) need the same run; docs/30 lists the large-screen checks. Open items are tracked in
+> [docs/25](25-backlog.md).
+
 The `feat/hardening-llm-sqlcipher` work (on-device LLM via llama.rn, at-rest SQLCipher encryption, the
 kill-switch/wipe lifecycle) is code-complete and covered by the workspace test suite + CI, and it passed an
 external review sign-off. Everything reachable in code and CI is verified there.

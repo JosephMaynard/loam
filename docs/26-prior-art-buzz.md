@@ -61,8 +61,8 @@ verifiable tombstone needs.
 Two honest caveats, so this stays corroboration rather than a rival design:
 
 - **Nostr buys its simplicity by giving up completeness/ordering.** Independent events carry no chain,
-  so a relay can silently drop any subset undetectably — the same equivocation/suppression caveat Sol
-  flagged for `docs/23` (which is *why* that plan uses per-device operation logs, not bare events).
+  so a relay can silently drop any subset undetectably. That is the same equivocation/suppression caveat the
+  external review flagged for `docs/23` (which is *why* that plan uses per-device operation logs, not bare events).
   Nostr validates the "self-contained signed event + signed delete" building blocks; it does not
   replace the `docs/23` log design.
 - **Wire compatibility is not worth it.** Nostr is secp256k1/Schnorr; LOAM's shipped crypto is Ed25519

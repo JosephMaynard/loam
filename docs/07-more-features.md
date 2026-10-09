@@ -2,7 +2,7 @@
 
 Candidate features surfaced while researching the roadmap, prioritized by fit with LOAM's stated
 priorities (simplicity, privacy, resilience) and its threat models. Not commitments — a menu for the
-owner/Fable to pick from. "Threat-fit" flags the protest/privacy use case specifically.
+owner to pick from. "Threat-fit" flags the protest/privacy use case specifically.
 
 | Feature | Why it matters | Effort | Threat-fit | Notes |
 |---------|----------------|--------|-----------|-------|

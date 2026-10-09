@@ -6,7 +6,7 @@ The plain (unencrypted) SQLite driver for the LOAM Android host's embedded Node 
 
 | | |
 |---|---|
-| Package / version | `better-sqlite3@12.10.0` (the JS wrapper is installed from npm at the same version) |
+| Package / version | `better-sqlite3@12.10.0` (the JS wrapper is the vendored `npm pack` tarball of the same version in `../npm/`) |
 | Target | `android-arm64`, Node ABI 108 |
 | Upstream asset | `https://github.com/digidem/better-sqlite3-nodejs-mobile/releases/download/12.10.0/better-sqlite3-12.10.0-node-108-android-arm64.tar.gz` |
 | Original upstream tarball sha256 | `00d84fcd41b80bbc910c0531320763f8f1a5c72a5638404ad9484f8805d70e9a` (pinned 2026-07-02) |

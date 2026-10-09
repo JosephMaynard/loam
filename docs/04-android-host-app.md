@@ -312,10 +312,15 @@ one it needs, so both ship):
   deleted the old database, so it says so; in `persistent`/`passphrase` the encrypted file stays on disk
   and can be preserved (the actions live in `src/lib/driver-missing-recovery.ts`, with tests).
 
-The `.node` binaries themselves are **not committed** in `nodejs-assets/` (gitignored build output) —
-re-run `fetch:native` after a clean checkout. `fetch-native-modules.mjs` sha256-verifies **each**
-vendored tarball before installing it. Each JS-wrapper npm version and its
-`.node` source version must stay in lockstep (change both together).
+The JS side comes from the same place: the two wrappers and their runtime dependencies (`bindings`,
+`file-uri-to-path`) are `npm pack` tarballs vendored at `apps/app/native-prebuilds/npm/`, unpacked
+straight into `node_modules`, so `fetch:native` never contacts the npm registry and runs no install
+script (see that directory's README).
+
+The `.node` binaries themselves are **not committed** in `nodejs-assets/` (gitignored build output),
+so re-run `fetch:native` after a clean checkout. `fetch-native-modules.mjs` sha256-verifies **each**
+vendored tarball (native and npm) before unpacking it and stops on a mismatch. Each JS-wrapper version
+and its `.node` source version must stay in lockstep (change both together).
 
 ### What's committed vs generated
 - **Committed (source):** `apps/server/src/db.ts` (`driver` option), `embedded.ts`
@@ -332,7 +337,9 @@ vendored tarball before installing it. Each JS-wrapper npm version and its
   self-built encrypted-driver prebuild tarball + `build-mc-android-arm64.sh` + `CMakeLists.mc.txt` +
   `README.md` — vendored because no upstream Android/ABI-108 release exists) and
   **`apps/app/native-prebuilds/better-sqlite3/`** (the plain driver's original upstream binary,
-  repackaged + README), both sha256-pinned in `fetch-native-modules.mjs`.
+  repackaged + README) and **`apps/app/native-prebuilds/npm/`** (the drivers' JS wrappers +
+  `bindings` + `file-uri-to-path` as `npm pack` tarballs + README), all sha256-pinned in
+  `fetch-native-modules.mjs`.
 - **Generated at build time (gitignored):** `apps/app/android/` (prebuild — local modules are
   autolinked into it, not committed), `apps/app/nodejs-assets/nodejs-project/` (bundle output + web
   client + **both** SQLite native prebuilds, plain + encrypted), `android/loam-prebuild.sha256`, the

@@ -112,9 +112,9 @@ trade-offs, not open bugs:
 
 ## Review history
 
-How these reviews were done: the maintainer runs the reviews below with AI models (the names in the
-headings are the models used), each working from the source with a written brief, and every finding is
-re-verified against the code and covered by a regression test before it is counted as fixed. There has
+How these reviews were done: the maintainer runs the reviews below with AI models, each working from
+the source with a written brief, and every finding is re-verified against the code and covered by a
+regression test before it is counted as fixed. There has
 been no third-party human security audit yet. If you do one, we will link it here.
 
 ### 2026-09-25: pre-release review (with the 2026-09-09 review's findings)
@@ -154,7 +154,7 @@ fails closed); Android 12+ device-to-device transfer copied the database and med
 service could be refused when started from the background, leaving the host frozen at screen-off; a
 release AAB could be silently debug-signed (now refused without a release keystore).
 
-### 2026-09-04: full-codebase review (Fable 5.1)
+### 2026-09-04: full-codebase review
 
 A second full read of the post-#118 code (server, client, Android host) with three parallel adversarial
 audits, each finding re-verified against the source. **Fixed on `feat/review-fixes-and-server-split`:**
@@ -201,7 +201,7 @@ archived ones; a setup code was minted on a host-token node where it could never
 split was verified by a normalised per-function diff against master: no function or route missing or
 altered beyond the intended fixes.
 
-### 2026-08-15: external full-codebase review (Sol)
+### 2026-08-15: external full-codebase review
 
 An independent external review of v0.4.0-era code (commit `7cd5558`) reproduced six findings:
 three authorization-lifecycle gaps, a join-bootstrap gap, and two resource-limit gaps, all

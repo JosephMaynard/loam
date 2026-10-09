@@ -6,6 +6,10 @@ updates:
     directory: "/" # pnpm workspace root — covers every apps/* and packages/* manifest
     schedule:
       interval: "weekly"
+    # Matches `minimumReleaseAge: 1440` in pnpm-workspace.yaml: propose nothing published in the last day,
+    # which pnpm would refuse to resolve anyway.
+    cooldown:
+      default-days: 1
     # Batch routine minor/patch bumps into a single weekly PR instead of one-per-dependency, so the
     # PR queue stays small. Major bumps still arrive as their own PRs for individual review.
     groups:
@@ -20,7 +24,7 @@ updates:
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
       # @noble/{hashes,curves,ciphers} 2.x require Node 20.19+ and are ESM-only; the embedded Android host
-      # runs Node 18, so the major is blocked until that runtime moves (Sol crypto review; docs/23 §11).
+      # runs Node 18, so the major is blocked until that runtime moves (external crypto review; docs/23 §11).
       # It also needs a coordinated, security-reviewed migration of @loam/crypto — not an auto-bump. Hold at
       # 1.x (minor/patch within 1.x is fine); revisit when the embedded runtime moves off Node 18.
       - dependency-name: "@noble/hashes"

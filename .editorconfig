@@ -1,0 +1,18 @@
+# https://editorconfig.org
+# The whole repo (TypeScript, JavaScript, CSS, HTML, JSON, YAML, Markdown, and the Android host's Kotlin
+# and Gradle files) uses two-space indents, LF line endings and a final newline.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Leave these byte-for-byte as they are: a patch's context lines and a snapshot must match exactly, and the
+# licence texts are kept as published.
+[{*.patch,*.snap,LICENSE}]
+insert_final_newline = unset
+trim_trailing_whitespace = unset

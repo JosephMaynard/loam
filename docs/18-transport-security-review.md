@@ -1,6 +1,14 @@
 # 18 — Transport encryption: reviewer's guide
 
-A map for anyone auditing LOAM's app-layer transport encryption (docs/08) — an external model, a
+> **Status: partly current.** Written in July 2026 for the v2 hardening. The code map, the guarantees and
+> most of the checklist still hold, but the auth-binding work ([docs/20](20-transport-auth-binding.md))
+> changed two things this guide describes. WebSocket frames are now sealed under a connection-bound aad
+> (`loam.ws.frame.v1 <connectionId>`) with a per-connection sequence, so the "constant `"ws"` aad" and
+> "WS frames are not sequence-numbered" notes below are out of date. And a bound session's tunnelled
+> requests carry its identity as an internal `x-loam-user`, not its cookie. Read docs/08 and docs/20 for
+> the current mechanics.
+
+A map for anyone auditing LOAM's app-layer transport encryption (docs/08): an external reviewer, a
 security researcher, or a future maintainer. It points at the exact code, states the guarantees and
 the **known limitations honestly**, and lists the concrete things worth attacking. This covers Layer 1
 (session encryption) **and** the v2 hardening (anti-replay + path-hiding tunnel + image encryption).
