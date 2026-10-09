@@ -498,6 +498,7 @@ export const sw: Translation = {
   "error.thread_has_replies": "Uzi huu una majibu kutoka kwa watu wengine. Msimamizi pekee anaweza kuufuta",
   "error.too_many_attempts": "Majaribio mengi mno",
   "error.too_many_claim_attempts": "Majaribio mengi mno ya kupata; jaribu tena baadaye",
+  "error.rate_limited": "Maombi mengi mno; subiri kidogo kisha ujaribu tena",
   "error.message_create_failed": "Imeshindwa kuunda ujumbe",
   "error.websocket_unauthenticated": "WebSocket isiyothibitishwa",
   "error.unknown_attachment": "Kiambatisho kisichojulikana",

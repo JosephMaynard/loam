@@ -508,6 +508,7 @@ export const uk: Translation = {
   "error.thread_has_replies": "Ця гілка має відповіді від інших людей. Видалити її може лише адміністратор",
   "error.too_many_attempts": "Забагато спроб",
   "error.too_many_claim_attempts": "Забагато спроб отримання; спробуйте пізніше",
+  "error.rate_limited": "Забагато запитів; зачекайте мить і спробуйте ще раз",
   "error.message_create_failed": "Не вдалося створити повідомлення",
   "error.websocket_unauthenticated": "Неавтентифікований WebSocket",
   "error.unknown_attachment": "Невідоме вкладення",

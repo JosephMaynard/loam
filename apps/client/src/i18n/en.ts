@@ -574,6 +574,7 @@ export const en = {
   "error.thread_has_replies": "This thread has replies from other people. Only an admin can delete it",
   "error.too_many_attempts": "Too many attempts",
   "error.too_many_claim_attempts": "Too many claim attempts; try again later",
+  "error.rate_limited": "Too many requests; wait a moment and try again",
   "error.message_create_failed": "Unable to create message",
   "error.websocket_unauthenticated": "Unauthenticated websocket",
   "error.unknown_attachment": "Unknown attachment",

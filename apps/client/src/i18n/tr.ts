@@ -498,6 +498,7 @@ export const tr: Translation = {
   "error.thread_has_replies": "Bu konuda başkalarının yanıtları var. Yalnızca bir yönetici silebilir",
   "error.too_many_attempts": "Çok fazla deneme",
   "error.too_many_claim_attempts": "Çok fazla alma denemesi; daha sonra tekrar deneyin",
+  "error.rate_limited": "Çok fazla istek; biraz bekleyip tekrar deneyin",
   "error.message_create_failed": "Mesaj oluşturulamadı",
   "error.websocket_unauthenticated": "Kimliği doğrulanmamış WebSocket",
   "error.unknown_attachment": "Bilinmeyen ek",

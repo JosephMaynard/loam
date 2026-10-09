@@ -512,6 +512,7 @@ export const ar: Translation = {
   "error.thread_has_replies": "تحتوي هذه السلسلة على ردود من أشخاص آخرين. يمكن للمشرف فقط حذفها",
   "error.too_many_attempts": "محاولات كثيرة جدًا",
   "error.too_many_claim_attempts": "محاولات حصول كثيرة جدًا؛ حاول مرة أخرى لاحقًا",
+  "error.rate_limited": "طلبات كثيرة جدًا؛ انتظر قليلًا ثم حاول مرة أخرى",
   "error.message_create_failed": "تعذّر إنشاء الرسالة",
   "error.websocket_unauthenticated": "WebSocket غير موثّق",
   "error.unknown_attachment": "مرفق غير معروف",

@@ -498,6 +498,7 @@ export const bn: Translation = {
   "error.thread_has_replies": "এই থ্রেডে অন্যদের উত্তর আছে. শুধু একজন অ্যাডমিন এটি মুছতে পারে",
   "error.too_many_attempts": "অনেক বেশি চেষ্টা",
   "error.too_many_claim_attempts": "অনেক বেশি দাবির চেষ্টা; পরে আবার চেষ্টা করুন",
+  "error.rate_limited": "অনেক বেশি অনুরোধ; একটু অপেক্ষা করে আবার চেষ্টা করুন",
   "error.message_create_failed": "বার্তা তৈরি করা যায়নি",
   "error.websocket_unauthenticated": "অপ্রমাণীকৃত WebSocket",
   "error.unknown_attachment": "অজানা সংযুক্তি",

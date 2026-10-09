@@ -1,12 +1,17 @@
 // Typed boot/identity errors and the stable wire error-code table.
 import type { ServerErrorCode } from "@loam/schema";
 
+/** The stable code on every 429 that has no more specific one: the rate limiter's refusals and the
+ *  new-identity budget. Fastify's default error handler puts a thrown error's `code` in the body. */
+export const RATE_LIMITED_CODE: ServerErrorCode = "rate_limited";
+
 /**
  * Thrown by `getSessionUserId` when a client IP exceeds its new-identity budget. The `statusCode`
  * makes Fastify's default error handler answer `429 Too Many Requests` without a custom handler.
  */
 export class IdentityLimitError extends Error {
   readonly statusCode = 429;
+  readonly code = RATE_LIMITED_CODE;
   constructor() {
     super("Too many new identities from this address");
     this.name = "IdentityLimitError";

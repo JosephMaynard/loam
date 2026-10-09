@@ -498,6 +498,7 @@ export const es: Translation = {
   "error.thread_has_replies": "Este hilo tiene respuestas de otras personas. Solo un administrador puede eliminarlo",
   "error.too_many_attempts": "Demasiados intentos",
   "error.too_many_claim_attempts": "Demasiados intentos de obtención; inténtalo de nuevo más tarde",
+  "error.rate_limited": "Demasiadas solicitudes; espera un momento e inténtalo de nuevo",
   "error.message_create_failed": "No se pudo crear el mensaje",
   "error.websocket_unauthenticated": "WebSocket no autenticado",
   "error.unknown_attachment": "Adjunto desconocido",

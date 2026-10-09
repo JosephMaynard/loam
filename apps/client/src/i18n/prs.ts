@@ -499,6 +499,7 @@ export const prs: Translation = {
   "error.thread_has_replies": "این رشته پاسخ‌های افراد دیگر را دارد. تنها یک مدیر آن را حذف کرده می‌تواند",
   "error.too_many_attempts": "کوشش‌های بسیار زیاد",
   "error.too_many_claim_attempts": "کوشش‌های به‌دست‌آوردن بسیار زیاد؛ بعداً دوباره کوشش کنید",
+  "error.rate_limited": "درخواست‌های بسیار زیاد؛ کمی صبر کنید و دوباره کوشش کنید",
   "error.message_create_failed": "ساخت پیام ممکن نشد",
   "error.websocket_unauthenticated": "WebSocket تصدیق‌ناشده",
   "error.unknown_attachment": "ضمیمهٔ ناشناخته",

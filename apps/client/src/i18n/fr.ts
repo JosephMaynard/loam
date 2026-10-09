@@ -498,6 +498,7 @@ export const fr: Translation = {
   "error.thread_has_replies": "Ce fil contient des réponses d’autres personnes. Seul un administrateur peut le supprimer",
   "error.too_many_attempts": "Trop de tentatives",
   "error.too_many_claim_attempts": "Trop de tentatives d’obtention ; réessayez plus tard",
+  "error.rate_limited": "Trop de requêtes ; patientez un instant, puis réessayez",
   "error.message_create_failed": "Impossible de créer le message",
   "error.websocket_unauthenticated": "WebSocket non authentifié",
   "error.unknown_attachment": "Pièce jointe inconnue",
