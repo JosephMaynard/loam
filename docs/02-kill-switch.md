@@ -48,10 +48,14 @@
 > **Durable writes on Windows.** The wipe journal and `config.json` are written to a staging file, flushed,
 > renamed into place, and then the directory is flushed. Windows needs two changes to that recipe: the
 > staging file is flushed through a handle opened for writing (FlushFileBuffers refuses a read-only one),
-> and the directory flush is skipped, because Node has no way to flush a directory there and NTFS journals
-> the rename itself. Before this, every durable write on a Windows `loamnet` host reported failure, so an
-> Emergency Reset would have locked the node. The fix is covered by tests that emulate the Windows rules, but
-> it has not yet been run on a real Windows machine (docs/25, O3).
+> and the directory flush is skipped, because Node has no way to flush a directory there. That makes the
+> rename best-effort on Windows: Node renames without write-through, so the call can return before the
+> change is on disk, and NTFS journaling only keeps the file system consistent after a crash; it doesn't
+> promise the rename survived. After a power cut the old file or the new one is there (never a torn one),
+> so a journal written just before the cut may be missing and the next boot would not finish that wipe.
+> Before this, every durable write on a Windows `loamnet` host reported failure, so an Emergency Reset would
+> have locked the node. The fix is covered by tests that emulate the Windows rules, but it has not yet been
+> run on a real Windows machine (docs/25, O3).
 >
 > **Which branch a keyed node takes.** `persistent`/`passphrase` nodes take the journaled fixed-key wipe
 > (delete, prove gone, journal, hand off or recreate); `ephemeral` nodes rotate their RAM key. A real key
