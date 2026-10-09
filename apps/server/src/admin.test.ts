@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { buildApp, type LoamApp } from "./app.js";
+import { openStore } from "./db.js";
 import {
   claim,
   cleanups,
@@ -33,50 +34,15 @@ describe("admin bootstrap", () => {
 
   it("removes legacy demo seed users so a live node ships no fake contacts and bootstrap governs admin", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "loam-app-test-"));
-    writeFileSync(
-      join(dataDir, "users.json"),
-      JSON.stringify([
-        {
-          id: "user.1234",
-          displayName: "Seed",
-          type: "human",
-          isAdmin: true,
-          createdAt: 1_704_067_200_000,
-          ephemeral: false,
-        },
-        {
-          id: "user_reactor",
-          displayName: "Reactor",
-          type: "human",
-          isAdmin: false,
-          createdAt: 1_704_067_200_000,
-          ephemeral: true,
-        },
-      ]),
-    );
-    // A DM from the demo user, plus a reaction ON it authored by a real user — the reaction must be
-    // cascaded away with its target (no orphan reaction pointing at a deleted message).
-    writeFileSync(
-      join(dataDir, "messages.json"),
-      JSON.stringify([
-        {
-          id: "msg_demo1",
-          type: "dm",
-          authorId: "user.1234",
-          recipientUserId: "user_reactor",
-          body: "hello",
-          createdAt: 1_704_067_200_000,
-        },
-        {
-          id: "msg_react1",
-          type: "reaction",
-          authorId: "user_reactor",
-          targetMessageId: "msg_demo1",
-          reaction: "👍",
-          createdAt: 1_704_067_200_001,
-        },
-      ]),
-    );
+    // A database an older build left: the demo user (an admin), a real user, a DM from the demo user, and a
+    // reaction ON it authored by the real user — the reaction must be cascaded away with its target (no
+    // orphan reaction pointing at a deleted message).
+    const seed = openStore(join(dataDir, "loam.db"));
+    seed.upsertUser({ id: "user.1234", displayName: "Seed", type: "human", isAdmin: true, createdAt: 1_704_067_200_000, ephemeral: false });
+    seed.upsertUser({ id: "user_reactor", displayName: "Reactor", type: "human", isAdmin: false, createdAt: 1_704_067_200_000, ephemeral: true });
+    seed.insertMessage({ id: "msg_demo1", type: "dm", authorId: "user.1234", recipientUserId: "user_reactor", body: "hello", createdAt: 1_704_067_200_000 });
+    seed.insertMessage({ id: "msg_react1", type: "reaction", authorId: "user_reactor", targetMessageId: "msg_demo1", reaction: "👍", createdAt: 1_704_067_200_001 });
+    seed.close();
 
     const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     cleanups.push(async () => {
@@ -168,6 +134,30 @@ describe("admin bootstrap", () => {
 
     const notClaimable = await makeApp();
     expect(await readClaimFlag(notClaimable)).toBe(false);
+  });
+
+  it("answers a claim with the claimer's own record as other routes show it, never the stored row", async () => {
+    const app = await makeApp({ admin: { bootstrap: "passphrase", passphrase: "correct horse battery" } });
+    const first = await newSession(app);
+    expect((await claim(app, first.cookie, "correct horse battery")).statusCode).toBe(200);
+    const quiet = await newSession(app);
+    const shadowed = await app.server.inject({
+      method: "PATCH",
+      url: `/api/moderation/users/${quiet.userId}`,
+      headers: { cookie: first.cookie },
+      payload: { shadowBanned: true },
+    });
+    expect(shadowed.statusCode).toBe(200);
+
+    // A shadow-banned member who knows the passphrase must not learn of the shadow-ban from the reply.
+    const claimed = await claim(app, quiet.cookie, "correct horse battery");
+    expect(claimed.statusCode).toBe(200);
+    expect(claimed.json()).toMatchObject({ id: quiet.userId, isAdmin: true });
+    expect(claimed.json()).not.toHaveProperty("shadowBanned");
+    // Nor from the already-admin answer to a repeat.
+    const again = await claim(app, quiet.cookie, "anything");
+    expect(again.statusCode).toBe(200);
+    expect(again.json()).not.toHaveProperty("shadowBanned");
   });
 });
 
@@ -265,6 +255,18 @@ describe("host-device admin bootstrap: the claim budget and setup codes", () => 
     const promoted = await claim(app, host.cookie, HOST_TOKEN);
     expect(promoted.statusCode).toBe(200);
     expect((promoted.json() as { isAdmin: boolean }).isAdmin).toBe(true);
+  });
+
+  it("counts claim guesses per IPv6 /64, so a guesser cycling addresses gets no more tries", async () => {
+    const app = await makeApp(undefined, { hostToken: HOST_TOKEN });
+    const guesser = await newSession(app);
+    const from = (remoteAddress: string, secret: string) =>
+      app.server.inject({ method: "POST", url: "/api/admin/claim", headers: { cookie: guesser.cookie }, payload: { secret }, remoteAddress });
+    for (let host = 1; host <= 5; host += 1) {
+      expect((await from(`2001:db8:5:6::${host}`, `guess-${host}`)).statusCode).toBe(403);
+    }
+    expect((await from("2001:db8:5:6::99", "guess-6")).statusCode).toBe(429);
+    expect((await from("2001:db8:5:7::1", "guess-7")).statusCode).toBe(403); // another /64 is another host
   });
 
   it("hostDevice CONFIGURED on a node with no launcher token behaves like `none` and never touches the limiter", async () => {

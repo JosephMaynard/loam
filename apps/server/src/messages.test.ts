@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MessageSchema } from "@loam/schema";
 
 import { buildApp, type LoamApp } from "./app.js";
+import { openStore } from "./db.js";
 import { makeUser } from "./identity.js";
 import {
   cleanups,
@@ -158,15 +159,12 @@ describe("message authorization", () => {
       allowReplies: true,
       discoverable: true,
       createdAt: 1_704_067_200_000,
-    };
-    writeFileSync(
-      join(dataDir, "channels.json"),
-      JSON.stringify([
-        { id: "general", name: "General", ...base },
-        { id: "notices", name: "Notices", ...base, allowPosting: "admins" },
-        { id: "old", name: "Old", ...base, archived: true },
-      ]),
-    );
+    } as const;
+    const seed = openStore(join(dataDir, "loam.db"));
+    seed.upsertChannel({ id: "general", name: "General", ...base });
+    seed.upsertChannel({ id: "notices", name: "Notices", ...base, allowPosting: "admins" });
+    seed.upsertChannel({ id: "old", name: "Old", ...base, archived: true });
+    seed.close();
     const app = await buildApp({ requireRulesAcceptance: false, dataDir, logger: false });
     cleanups.push(async () => {
       await app.close();
@@ -211,6 +209,36 @@ describe("public-channel flag", () => {
     });
     expect(reply.statusCode).toBe(400);
     expect((reply.json() as { error: string }).error).toMatch(/Channel posting is disabled/);
+  });
+
+  it("leaves private channels working when public channels are off", async () => {
+    const app = await makeApp({ features: { enablePublicChannels: false } });
+    const owner = await newSession(app);
+    const created = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: owner.cookie },
+      payload: { name: "crew", visibility: "private" },
+    });
+    expect(created.statusCode).toBe(201);
+    const channelId = (created.json() as { id: string }).id;
+    const send = (payload: object) =>
+      app.server.inject({ method: "POST", url: "/api/messages", headers: { cookie: owner.cookie }, payload });
+
+    const posted = await send({ type: "channelPost", channelId, body: "still here" });
+    expect(posted.statusCode).toBe(201);
+    const postId = (posted.json() as { message: { id: string } }).message.id;
+    expect((await send({ type: "channelReply", channelId, parentMessageId: postId, body: "and a reply" })).statusCode).toBe(201);
+    const edited = await app.server.inject({
+      method: "PATCH",
+      url: `/api/messages/${postId}`,
+      headers: { cookie: owner.cookie },
+      payload: { body: "edited" },
+    });
+    expect(edited.statusCode).toBe(200);
+
+    // The public ones stay closed.
+    expect((await send({ type: "channelPost", channelId: "general", body: "nope" })).statusCode).toBe(400);
   });
 });
 

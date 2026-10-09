@@ -106,6 +106,7 @@ export const my: Translation = {
   "people.pendingLoadError": "စောင့်ဆိုင်းနေသော ဝင်ရောက်မှုများ ဖွင့်၍မရပါ။",
   "people.pendingLoading": "စောင့်ဆိုင်းနေသော ဝင်ရောက်မှုများ ဖွင့်နေသည်…",
   "people.pendingEmpty": "ဝင်ရောက်ရန် စောင့်နေသူ မရှိပါ။",
+  "people.pendingSince": "ဝင်ရောက်ရန် တောင်းဆိုချိန်: {when}",
   "people.approve": "ခွင့်ပြုရန်",
   "people.deny": "ငြင်းပယ်ရန်",
 
@@ -497,6 +498,7 @@ export const my: Translation = {
   "error.thread_has_replies": "ဤ thread တွင် အခြားသူများ၏ ပြန်စာများ ရှိသည်. အက်ဒမင်သာ ဖျက်နိုင်သည်",
   "error.too_many_attempts": "ကြိုးပမ်းမှု များလွန်းသည်",
   "error.too_many_claim_attempts": "ရယူမှု ကြိုးပမ်းချက် များလွန်းသည်; နောက်မှ ထပ်စမ်းပါ",
+  "error.rate_limited": "တောင်းဆိုမှု များလွန်းသည်; ခဏစောင့်ပြီး ထပ်စမ်းပါ",
   "error.message_create_failed": "စာ ဖန်တီး၍မရပါ",
   "error.websocket_unauthenticated": "အထောက်အထားမစိစစ်ရသေးသော WebSocket",
   "error.unknown_attachment": "အမည်မသိ ပူးတွဲဖိုင်",

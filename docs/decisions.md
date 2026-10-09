@@ -38,4 +38,5 @@ reverse. Update the "Decision" column as they're settled.
 - `packages/qr` exports `wifiPayload()` (standard `WIFI:…` string) and `encodeQR()` / `renderQRToSvg()`,
   which generate both the hotspot-join and LOAM-access codes.
 - Server persistence is SQLite behind the `LoamStore` DAL (`apps/server/src/db.ts`), with transactional
-  write-through; the flat-JSON 1 s-flush store it replaced auto-imports to `*.json.bak` on first boot.
+  write-through. The flat-JSON 1 s-flush store it replaced was auto-imported to `*.json.bak` on first boot
+  until October 2026; that importer is gone, since no released version ever used the JSON store.

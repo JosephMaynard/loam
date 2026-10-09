@@ -106,6 +106,7 @@ export const ur: Translation = {
   "people.pendingLoadError": "زیرِ التوا درخواستیں لوڈ نہیں ہو سکیں۔",
   "people.pendingLoading": "زیرِ التوا درخواستیں لوڈ ہو رہی ہیں…",
   "people.pendingEmpty": "کوئی شامل ہونے کے لیے منتظر نہیں۔",
+  "people.pendingSince": "شامل ہونے کی درخواست: {when}",
   "people.approve": "منظور کریں",
   "people.deny": "مسترد کریں",
 
@@ -497,6 +498,7 @@ export const ur: Translation = {
   "error.thread_has_replies": "اِس تھریڈ میں دوسرے لوگوں کے جوابات ہیں. صرف منتظم اِسے حذف کر سکتا ہے",
   "error.too_many_attempts": "بہت زیادہ کوششیں",
   "error.too_many_claim_attempts": "حاصل کرنے کی بہت زیادہ کوششیں؛ بعد میں دوبارہ کوشش کریں",
+  "error.rate_limited": "بہت زیادہ درخواستیں؛ تھوڑا انتظار کریں اور دوبارہ کوشش کریں",
   "error.message_create_failed": "پیغام نہیں بن سکا",
   "error.websocket_unauthenticated": "غیر مصدقہ WebSocket",
   "error.unknown_attachment": "نامعلوم منسلکہ",

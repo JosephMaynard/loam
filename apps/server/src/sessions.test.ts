@@ -16,7 +16,9 @@ describe("anonymous identity minting limit", () => {
     // Two more fresh mints (count 2, 3) are allowed; the 4th cookieless request exceeds the cap.
     expect((await app.server.inject({ method: "GET", url: "/api/config" })).statusCode).toBe(200);
     expect((await app.server.inject({ method: "GET", url: "/api/config" })).statusCode).toBe(200);
-    expect((await app.server.inject({ method: "GET", url: "/api/config" })).statusCode).toBe(429);
+    const refused = await app.server.inject({ method: "GET", url: "/api/config" });
+    expect(refused.statusCode).toBe(429);
+    expect(refused.json()).toMatchObject({ code: "rate_limited" });
 
     // A request that carries an existing session cookie mints nothing, so it's unaffected.
     const returning = await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie } });

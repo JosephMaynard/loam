@@ -5,6 +5,7 @@ import { openTransport, sealTransport } from "@loam/crypto";
 import type { StreamEvent } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
+import { rateLimitKey } from "./rate-limit.js";
 import { originMatchesHost } from "./transport-server.js";
 import type { ClientEvent, SocketClient, SocketSession } from "./types.js";
 import type { FastifyReply, FastifyRequest } from "fastify";
@@ -387,8 +388,11 @@ export function createRealtime(ctx: AppContext) {
       // — presence, events, admission to `sockets` — until the client answers a reflection-safe
       // challenge. Cap simultaneously-unconfirmed sockets both globally AND per-IP so this pre-auth path
       // can't be flooded (a few LAN hosts mustn't lock everyone out), and time out a socket that never proves.
+      // "Per-IP" keys like the HTTP limiter (`rateLimitKey`): an IPv6 /64 counts as one host, so cycling
+      // addresses inside it buys no extra sockets, and an IPv4-mapped address counts as its IPv4 form.
       const ip = request.ip;
-      if (unconfirmedSocketCount >= WS_UNCONFIRMED_CAP || (unconfirmedByIp.get(ip) ?? 0) >= WS_UNCONFIRMED_PER_IP_CAP) {
+      const ipKey = rateLimitKey(ip);
+      if (unconfirmedSocketCount >= WS_UNCONFIRMED_CAP || (unconfirmedByIp.get(ipKey) ?? 0) >= WS_UNCONFIRMED_PER_IP_CAP) {
         connection.send(JSON.stringify({ type: "error", ...errorBody("Too many pending connections; try again") }));
         connection.close();
         return;
@@ -399,7 +403,7 @@ export function createRealtime(ctx: AppContext) {
       let confirmed = false;
       let settled = false; // guards the unconfirmed counters against a double decrement (confirm then close)
       unconfirmedSocketCount += 1;
-      unconfirmedByIp.set(ip, (unconfirmedByIp.get(ip) ?? 0) + 1);
+      unconfirmedByIp.set(ipKey, (unconfirmedByIp.get(ipKey) ?? 0) + 1);
 
       /** Release the unconfirmed-socket reservation exactly once (on confirm, timeout, or close). */
       function releaseUnconfirmed(): void {
@@ -408,11 +412,11 @@ export function createRealtime(ctx: AppContext) {
         }
         settled = true;
         unconfirmedSocketCount -= 1;
-        const remaining = (unconfirmedByIp.get(ip) ?? 1) - 1;
+        const remaining = (unconfirmedByIp.get(ipKey) ?? 1) - 1;
         if (remaining <= 0) {
-          unconfirmedByIp.delete(ip);
+          unconfirmedByIp.delete(ipKey);
         } else {
-          unconfirmedByIp.set(ip, remaining);
+          unconfirmedByIp.set(ipKey, remaining);
         }
       }
 

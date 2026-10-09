@@ -365,6 +365,40 @@ describe("transport encryption foundation", () => {
     // The oldest session was evicted: its id is now unknown, refused exactly like any expired session.
     expect(usingFirst.statusCode).toBe(401);
   });
+
+  it("evicts anonymous sessions before bound ones, so a handshake flood can't push out a signed-in device", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } }, { transportSessionCap: 3 });
+    const signedIn = await openTransport08(app);
+    expect((await resumeIdentity(app, signedIn, 1)).status).toBe(200);
+    const flood: { sessionId: string; key: string }[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      flood.push(await openTransport08(app));
+    }
+
+    // The bound session survives the flood and still reaches content through the tunnel...
+    const users = await tunnelInner(app, signedIn, 2, { m: "GET", p: "/api/users" });
+    expect(users.outerStatus).toBe(200);
+    expect(users.status).toBe(200);
+    // ...while the oldest anonymous ones made room for the newest.
+    const evicted = await app.server.inject({
+      method: "POST",
+      url: "/api/session/resume",
+      headers: { "x-loam-enc": flood[0]!.sessionId, "content-type": "application/json" },
+      payload: { enc: sealSeq(flood[0]!.key, 1, "POST /api/session/resume", {}) },
+    });
+    expect(evicted.statusCode).toBe(401);
+    expect((await resumeIdentity(app, flood[5]!, 1)).status).toBe(200);
+  });
+
+  it("answers a repeat resume on a bound session with the cached identity, never a second one", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const session = await openTransport08(app);
+    const first = await resumeIdentity(app, session, 1);
+    const again = await resumeIdentity(app, session, 2);
+    expect(again.status).toBe(200);
+    expect(again.currentUser.id).toBe(first.currentUser.id);
+    expect(again.token).toBe(first.token);
+  });
 });
 
 describe("transport encryption transparent round-trip", () => {
@@ -417,6 +451,60 @@ describe("transport encryption transparent round-trip", () => {
     const opened = openTransport(session.key, (res.json() as { enc: string }).enc, aad);
     expect(opened).not.toBeNull();
     expect((JSON.parse(opened as string) as { message: { body: string } }).message.body).toBe(secret);
+  });
+
+  it("binds a direct sealed response to the request's sequence when the envelope asks (r: 1)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const user = await newSession(app);
+    const session = await openSession(app);
+    const headers = { cookie: user.cookie, "x-loam-enc": session.sessionId, "content-type": "application/json" };
+    const enc = (res: InjectResponse) => (res.json() as { enc: string }).enc;
+
+    // A GET carries its `{ s, r }` envelope in the x-loam-seq header; the answer opens only under `#s`.
+    const getAad = "GET /api/channels";
+    const listed = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { ...headers, "x-loam-seq": sealTransport(session.key, JSON.stringify({ s: 1, r: 1 }), getAad) },
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(openTransport(session.key, enc(listed), `${getAad}#1`)).not.toBeNull();
+    expect(openTransport(session.key, enc(listed), getAad)).toBeNull();
+    expect(openTransport(session.key, enc(listed), `${getAad}#2`)).toBeNull();
+
+    // The same header again is a replay: refused before the handler, like a replayed body.
+    const replayed = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { ...headers, "x-loam-seq": sealTransport(session.key, JSON.stringify({ s: 1, r: 1 }), getAad) },
+    });
+    expect(replayed.statusCode).toBe(409);
+    // A header that doesn't open under the session key is malformed.
+    const forged = await app.server.inject({ method: "GET", url: "/api/channels", headers: { ...headers, "x-loam-seq": "AAAA" } });
+    expect(forged.statusCode).toBe(400);
+
+    // A mutation asks in its body envelope.
+    const postAad = "POST /api/messages";
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers,
+      payload: { enc: sealTransport(session.key, JSON.stringify({ s: 2, r: 1, b: { type: "channelPost", channelId: "general", body: "bound" } }), postAad) },
+    });
+    expect(posted.statusCode).toBe(201);
+    expect(openTransport(session.key, enc(posted), `${postAad}#2`)).not.toBeNull();
+    expect(openTransport(session.key, enc(posted), postAad)).toBeNull();
+
+    // An envelope that doesn't ask (an older client) still gets the bare route aad, and so does a bare GET.
+    const legacy = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers,
+      payload: { enc: sealRequest(session.key, 3, postAad, { type: "channelPost", channelId: "general", body: "older client" }) },
+    });
+    expect(openTransport(session.key, enc(legacy), postAad)).not.toBeNull();
+    const bareGet = await app.server.inject({ method: "GET", url: "/api/channels", headers });
+    expect(openTransport(session.key, enc(bareGet), getAad)).not.toBeNull();
   });
 
   it("required mode: only the public bootstrap is directly reachable; all content is tunnel-only", async () => {
@@ -1042,7 +1130,8 @@ describe("transport encryption WebSocket frames", () => {
 
   it("closes a confirmed socket when its transport session is evicted", async () => {
     // A confirmed socket must not outlive its session key. Drive the session cap low, confirm a socket,
-    // then open enough fresh handshakes to evict its (oldest) session — the socket should be closed.
+    // then open (and bind, since anonymous sessions are evicted first) enough fresh sessions to evict its
+    // (oldest) session — the socket should be closed.
     const app = await makeApp(
       { security: { profile: "custom", transportEncryption: "required" } },
       { transportSessionCap: 2 },
@@ -1057,9 +1146,10 @@ describe("transport encryption WebSocket frames", () => {
     try {
       expect(client.connectionId()).not.toBe(""); // confirmed and admitted
 
-      // Each new handshake prunes+evicts; with cap 2 the socket's (oldest) session is evicted quickly.
+      // Each new handshake prunes+evicts; with cap 2 and only bound sessions in the map, the socket's
+      // (oldest) session is evicted quickly.
       for (let i = 0; i < 4; i += 1) {
-        await openTransport08(app);
+        await resumeIdentity(app, await openTransport08(app), 1);
       }
       const deadline = Date.now() + 2_000;
       while (!closed && Date.now() < deadline) {
@@ -1120,6 +1210,38 @@ describe("transport encryption WebSocket frames", () => {
       plain.close();
     }
     expect(plainClosed).toBe(false); // admitted (not refused) — legitimate off-node plaintext socket
+  });
+
+  it("counts unconfirmed sockets per IPv6 /64, like the HTTP limiter, so cycling addresses buys none", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const session = await openTransport08(app);
+    await resumeIdentity(app, session, 1);
+
+    /** Open an encrypted socket from `address` (never answering its challenge) and return its first frame. */
+    async function firstFrameFrom(address: string): Promise<string> {
+      let first!: Promise<string>;
+      const socket = await app.server.injectWS(
+        `/ws?enc=${session.sessionId}`,
+        { headers: { host: "127.0.0.1" }, socket: { remoteAddress: address } } as never,
+        {
+          // Listen before the upgrade completes: the server speaks first.
+          onInit: (ws) => {
+            first = new Promise<string>((resolve) => ws.once("message", (data: Buffer) => resolve(data.toString())));
+          },
+        },
+      );
+      cleanups.push(() => socket.terminate());
+      return first;
+    }
+
+    // Eight sockets from eight addresses in one /64 fill that host's share of the pre-auth pool.
+    for (let host = 1; host <= 8; host += 1) {
+      const frame = await firstFrameFrom(`2001:db8:1:2::${host}`);
+      expect(openTransport(session.key, frame, WS_CHALLENGE_AAD)).toBeTruthy();
+    }
+    // A ninth address in the same /64 is refused; one in another /64 is not.
+    expect(await firstFrameFrom("2001:db8:1:2::9")).toContain("Too many pending connections");
+    expect(openTransport(session.key, await firstFrameFrom("2001:db8:1:3::1"), WS_CHALLENGE_AAD)).toBeTruthy();
   });
 });
 

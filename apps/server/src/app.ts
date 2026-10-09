@@ -34,7 +34,7 @@ import {
 import { generateDisplayName } from "@loam/display-name";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 
-import { importLegacyJsonData, type StoredRowReport } from "./db.js";
+import type { StoredRowReport } from "./db.js";
 import { createLlmLayer, INTERRUPTED_ASSISTANT_BODY } from "./llm.js";
 import { createMeshLayer } from "./mesh.js";
 import type { Runtime } from "./runtime.js";
@@ -57,7 +57,7 @@ import { createTransportServer, loamLogController, loamLoggerOptions, registerTr
 import { createSyncEngine } from "./sync.js";
 import { resolveLanIPv4 } from "./net.js";
 
-import type { AppData, AppOptions, LoamApp } from "./types.js";
+import type { AppData, AppOptions, LoamApp, PendingUpload } from "./types.js";
 
 import { IdentityLimitError, errorBody } from "./errors.js";
 import { sessionCookieName, sessionCookieMaxAge, claimAttemptLimit, claimAttemptWindowMs, defaultTombstoneHorizonMs, defaultChannels, legacyDemoUserIds } from "./defaults.js";
@@ -178,12 +178,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const identityWindowMs = options.identityWindowMs ?? 10 * 60_000;
   // How long an identity nobody ever used may linger before `reapUnusedIdentities` removes it.
   const unusedIdentityMaxAgeMs = options.unusedIdentityMaxAgeMs ?? 24 * 3_600_000;
+  // The same for one waiting in a greeter's queue: longer, so a greeter away for a weekend still finds
+  // a real newcomer there, but not for ever.
+  const pendingIdentityMaxAgeMs = options.pendingIdentityMaxAgeMs ?? 7 * 24 * 3_600_000;
   const tombstoneHorizonMs = options.tombstoneHorizonMs ?? defaultTombstoneHorizonMs;
-  // Uploaded-but-unattached attachment ids → uploader + upload time. A message may only reference
-  // the uploader's own pending uploads; each id is consumed on first use. RAM-only: entries a
-  // restart loses (and uploads abandoned past the grace period) are swept by
-  // reapOrphanedAttachments, so unclaimed files never accumulate on disk.
-  const attachmentOwners = new Map<string, { userId: string; uploadedAt: number }>();
+  // Uploaded-but-unattached attachment ids → uploader, upload time and the upload's own record. A message
+  // may only reference the uploader's own pending uploads; each id is consumed on first use, and the
+  // message stores the upload's record. RAM-only: entries a restart loses (and uploads abandoned past the
+  // grace period) are swept by reapOrphanedAttachments, so unclaimed files never accumulate on disk.
+  const attachmentOwners = new Map<string, PendingUpload>();
   const attachmentPendingGraceMs = 15 * 60_000;
   // Message ids deliberately deleted on this node — node-to-node sync never re-imports these.
   const tombstones = new Set<string>();
@@ -1482,7 +1485,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // content injection through PATCH. Reactions check their own posting rules
         // at create; for mutation purposes they inherit the target's channel state checked here.
         // Like the type-specific flags above, the node-wide shutdown blocks edits but not deletes.
-        if (!opts.isDelete && !appConfig.features.enablePublicChannels) {
+        if (!opts.isDelete && !channelOpenUnderFlags(channel)) {
           return { code: 403, error: "Channel posting is disabled on this LOAM node" };
         }
 
@@ -1579,6 +1582,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return channel?.visibility === "private" ? channelMemberIds(channel) : undefined;
   }
 
+  /** Whether the node-wide channel flag leaves `channel` open to posts and edits: `enablePublicChannels`
+   *  covers the public channels only, never a private one. */
+  function channelOpenUnderFlags(channel: Channel): boolean {
+    return channel.visibility === "private" || appConfig.features.enablePublicChannels;
+  }
+
   /**
    * Validate input and create a new message record, or remove an existing reaction when toggled.
    *
@@ -1616,13 +1625,6 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (authorRulesError) {
       return { error: authorRulesError, forbidden: true };
-    }
-
-    if (
-      (input.type === "channelPost" || input.type === "channelReply") &&
-      !appConfig.features.enablePublicChannels
-    ) {
-      return { error: "Channel posting is disabled on this LOAM node" };
     }
 
     if (input.type === "channelReply" && !appConfig.features.enableReplies) {
@@ -1667,6 +1669,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // never leaked by probing the message endpoint.
       if (!canAccessChannel(channel, authorId)) {
         return { error: "Channel does not exist" };
+      }
+
+      // `enablePublicChannels` switches off the PUBLIC channels only: a private channel is governed by
+      // `enablePrivateChannels` (which gates creating new ones) and its own roster, and keeps working.
+      // Checked after the access check, so a non-member still can't tell a private channel exists.
+      if (!channelOpenUnderFlags(channel)) {
+        return { error: "Channel posting is disabled on this LOAM node" };
       }
 
       const policyError = channelPostingError(channel, authorId, input.type === "channelReply");
@@ -1808,7 +1817,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           ? undefined
           : { markdown: appConfig.features.enableMarkdown, source: "human" as const },
     };
-    const message = MessageSchema.parse({ ...input, ...base });
+    // Each attachment is the upload's own record (checked above to be the author's pending upload), never
+    // the client's copy: a message that claimed another type, name or size for a file would point readers
+    // at a file that isn't there, and its deletion would remove the wrong path and leave the real one.
+    const pinnedAttachments =
+      input.type !== "reaction" && input.attachments?.length
+        ? { attachments: input.attachments.map((attachment) => attachmentOwners.get(attachment.id)?.attachment ?? attachment) }
+        : {};
+    const message = MessageSchema.parse({ ...input, ...pinnedAttachments, ...base });
     store.insertMessage(message);
     data.messages.push(message);
 
@@ -1850,16 +1866,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Loads persisted application data into memory: runs the one-time legacy JSON import, loads all
-   * tables, seeds default channels on first boot, ensures (non-admin) seed users — demoting any
-   * legacy admin seed, since admin now comes only from the bootstrap strategies — and ensures the
-   * Ollama bot user if configured.
+   * Loads persisted application data into memory: loads all tables, seeds default channels on first
+   * boot, ensures (non-admin) seed users — demoting any legacy admin seed, since admin now comes only
+   * from the bootstrap strategies — and ensures the Ollama bot user if configured.
    */
   function loadData(): void {
-    if (importLegacyJsonData(store, dataDir)) {
-      server.log.info("Imported legacy .loam JSON data into SQLite (originals renamed to *.json.bak)");
-    }
-
     // A row an older release wrote that no longer validates (e.g. an id past `ID_MAX_LENGTH`) is not fatal:
     // an upgraded node must still boot. The store repairs what it provably can (in memory) and QUARANTINES the
     // rest — not loaded, left on disk, and its id refused to every write (see `LoamStore.quarantine`).
@@ -2371,21 +2382,33 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * curl, a HEAD) mints and persists a user record, which then sits on the People list and in the DM picker
    * for ever. A human record older than `unusedIdentityMaxAgeMs` that never agreed to the member rules,
    * neither wrote nor received a message, owns or belongs to no channel, holds no admin flag, role or
-   * moderation state, is not waiting in a greeter's queue (`pending`: such a person cannot agree to the rules
-   * until admitted), has no report still open in the moderators' queue (reporting, like reading and
+   * moderation state, has no report still open in the moderators' queue (reporting, like reading and
    * blocking, is allowed before agreeing), and has no socket open or mid-challenge is such a ghost. Its row,
    * sessions, identity tokens and mesh keypair go, with the rows that exist only for it (`deleteUser`: its
    * block-list rows, private-channel join requests and mesh address book), all in one transaction; a
    * returning cookie mints afresh, and clients drop it when they next reconcile the roster from
    * `GET /api/users`. Nothing is broadcast: nobody ever saw it do anything. Only meaningful while the rules
    * gate is on, since agreeing is the signal that a person is behind the record.
+   *
+   * On an approval-only node every newcomer is minted `pending` (waiting in a greeter's queue) and can't
+   * agree to the rules until admitted, so a probe there would wait in the queue for ever. A pending ghost
+   * (the same criteria) is therefore reaped too, after the longer `pendingIdentityMaxAgeMs`, and its queue
+   * entry goes with it (the queue is the pending records themselves). A pending record that did agree to
+   * the rules is a person waiting and is never reaped; nothing queues such a record today, so that guard is
+   * defensive.
+   *
+   * A block is deliberately NOT a sign of use: the Welcome screen keeps a real member from blocking anyone
+   * before agreeing, so a block-list row on an unagreed record is a probe's, and counting it would let a
+   * probe keep itself alive by blocking someone. Its block rows go with it.
    */
   function reapUnusedIdentities(): void {
     if (!requireRulesAcceptance) {
       return;
     }
 
-    const cutoff = Date.now() - unusedIdentityMaxAgeMs;
+    const now = Date.now();
+    const cutoff = now - unusedIdentityMaxAgeMs;
+    const pendingCutoff = now - pendingIdentityMaxAgeMs;
     const connected = new Set<string>();
     for (const session of sockets) {
       connected.add(session.userId);
@@ -2416,11 +2439,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         user.rulesVersion === undefined &&
         !user.isAdmin &&
         !user.roles?.length &&
-        !user.pending &&
         !user.banned &&
         !user.shadowBanned &&
         user.timeoutUntil === undefined &&
-        user.createdAt < cutoff &&
+        user.createdAt < (user.pending ? pendingCutoff : cutoff) &&
         !connected.has(user.id) &&
         !referenced.has(user.id) &&
         // Last, so only the few records that are otherwise ghosts cost a query (the indexed reporter column).

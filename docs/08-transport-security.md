@@ -56,6 +56,22 @@
 > heartbeat (sealed + sequenced like any frame) on admission and every 25 s, so a client can detect a dead
 > connection (docs/20).
 >
+> **Response binding (`optional` mode's direct requests).** The tunnel binds each response to its request
+> inside the sealed descriptor, and sync responses are sealed under `${METHOD} ${path}#${s}`. A direct
+> sealed request in `optional` mode used to get its response sealed under the bare `${METHOD} ${url}`, the
+> same for every request on that route, so an on-path attacker could keep an old sealed answer and replay
+> it as the answer to a later request (stale messages, an old roster). Now the browser client puts
+> `r: 1` in the authenticated `{ s, r, b? }` envelope of every direct request, and the server then seals
+> the response under `${METHOD} ${url}#${s}`; the client opens it only under the sequence it sent. A GET
+> or HEAD can't carry a body, so its envelope (`{ s, r: 1 }`, sealed under the same request aad) rides an
+> `x-loam-seq` header and runs through the same replay window (409 on a repeat, 400 if it doesn't open).
+> That is the whole wire change. A refusal the server makes before it has read the request's sequence (a
+> 429 from the rate limiter, a 400 or 409 for a bad envelope) has no sequence to bind, so it is sealed under
+> the bare aad, and the client accepts a bare-aad seal only with an error status: a replayed one can fail
+> a request, which an on-path attacker can do anyway, but never pass old data as a success. An envelope
+> without `r` (an older client still open in a tab across an upgrade) gets the bare aad as before, so the
+> server stays compatible; the client and server ship together because the node serves the client.
+>
 > **Client pin rules (pre-release review 2026-09-25).** A `#k=` fragment only ever *establishes* a pin for
 > an origin that has none (or re-confirms the same key). A **different** key never silently replaces the
 > pin — any same-origin navigation can carry a `#k=` (a link posted in a channel, say), so silent

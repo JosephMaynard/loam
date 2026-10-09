@@ -111,6 +111,7 @@ export const ru: Translation = {
   "people.pendingLoadError": "Не удалось загрузить заявки на вступление.",
   "people.pendingLoading": "Загрузка заявок на вступление…",
   "people.pendingEmpty": "Никто не ждёт вступления.",
+  "people.pendingSince": "Запрос на вступление: {when}",
   "people.approve": "Одобрить",
   "people.deny": "Отклонить",
 
@@ -507,6 +508,7 @@ export const ru: Translation = {
   "error.thread_has_replies": "В этом треде есть ответы других людей. Удалить его может только администратор",
   "error.too_many_attempts": "Слишком много попыток",
   "error.too_many_claim_attempts": "Слишком много попыток получения; повторите позже",
+  "error.rate_limited": "Слишком много запросов; подождите немного и попробуйте ещё раз",
   "error.message_create_failed": "Не удалось создать сообщение",
   "error.websocket_unauthenticated": "Неаутентифицированный WebSocket",
   "error.unknown_attachment": "Неизвестное вложение",

@@ -1,6 +1,5 @@
-import { closeSync, existsSync, openSync, readFileSync, readSync, renameSync } from "node:fs";
+import { closeSync, openSync, readSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
 
 import {
   ChannelSchema,
@@ -783,6 +782,14 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
 
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA synchronous = NORMAL");
+  if (!pragma) {
+    // A plaintext store has only the logical wipe (`wipeAll`) for Emergency Reset, so have SQLite overwrite
+    // deleted content with zeros instead of leaving it in free pages and freed cell space, where a copy of
+    // the file would still give it up. Not secure erasure on flash (the device may keep the old blocks; see
+    // docs/02), but nothing readable is left in the database file itself once the wipe is checkpointed.
+    // A SQLCipher store's free pages are ciphertext already and its wipes delete the files.
+    db.exec("PRAGMA secure_delete = ON");
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
@@ -1459,86 +1466,4 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   };
 
   return store;
-}
-
-function isSessionRecord(value: unknown): value is SessionRecord {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const record = value as Partial<SessionRecord>;
-  return (
-    typeof record.token === "string" &&
-    record.token.length > 0 &&
-    typeof record.userId === "string" &&
-    record.userId.length > 0
-  );
-}
-
-function readLegacyJsonArray(dataDir: string, file: string): unknown[] {
-  const path = join(dataDir, `${file}.json`);
-
-  if (!existsSync(path)) {
-    return [];
-  }
-
-  const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-
-  if (!Array.isArray(parsed)) {
-    // Coercing to [] would "import" nothing and rename the file to .bak — silent data loss.
-    throw new Error(`Legacy data file ${path} does not contain a JSON array`);
-  }
-
-  return parsed;
-}
-
-/**
- * One-time import of the legacy flat-JSON persistence (`users/channels/messages/sessions.json`)
- * into an empty store, renaming each imported file to `<name>.json.bak` afterwards.
- *
- * Users, channels, and messages are validated strictly (a corrupt row aborts the import and rolls
- * back); session records are skipped when malformed, matching the old loader's leniency.
- *
- * @param store - The destination store; must be empty for the import to run
- * @param dataDir - Directory containing the legacy JSON files
- * @returns `true` when an import happened, `false` when the store had data or no files exist
- */
-export function importLegacyJsonData(store: LoamStore, dataDir: string): boolean {
-  if (!store.isEmpty()) {
-    return false;
-  }
-
-  const files = ["users", "channels", "messages", "sessions"] as const;
-  const presentFiles = files.filter((file) => existsSync(join(dataDir, `${file}.json`)));
-
-  if (!presentFiles.length) {
-    return false;
-  }
-
-  store.transaction(() => {
-    for (const user of readLegacyJsonArray(dataDir, "users")) {
-      store.upsertUser(UserSchema.parse(user));
-    }
-
-    for (const channel of readLegacyJsonArray(dataDir, "channels")) {
-      store.upsertChannel(ChannelSchema.parse(channel));
-    }
-
-    for (const message of readLegacyJsonArray(dataDir, "messages")) {
-      store.insertMessage(MessageSchema.parse(message));
-    }
-
-    for (const session of readLegacyJsonArray(dataDir, "sessions")) {
-      if (isSessionRecord(session)) {
-        store.putSession(session.token, session.userId);
-      }
-    }
-  });
-
-  for (const file of presentFiles) {
-    const path = join(dataDir, `${file}.json`);
-    renameSync(path, `${path}.bak`);
-  }
-
-  return true;
 }

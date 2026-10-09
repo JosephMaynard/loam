@@ -12,7 +12,7 @@
 |---|------|-----|-------|
 | O1 | **Real-device run of the Android host's Kotlin changes** from PR #153 (`LoamHostService.kt`: the hosting notification's translated labels passed in from the app and its new monochrome small icon; `LoamHotspotModule.kt`: the Wi-Fi station read reporting a wired Ethernet connection) and from the branch after it, plus #153's manifest changes for large screens (`plugins/with-loam-host.js`). They build into the APK; none has run on a phone. | 04, 21, 30 | Hardware |
 | O2 | **SQLCipher on a physical phone**: `PRAGMA key`, rekey and wipe with the vendored driver under the embedded Node 18 (S1 below). | 01, 21 §2 | Hardware |
-| O3 | **Windows host: durable writes.** Check that the config, the wipe journal and the database survive a crash or power cut on Windows, where file and directory syncing behave differently from Linux and macOS. | 02, 14 | Windows machine |
+| O3 | **Windows host: durable writes.** Check that the config, the wipe journal and the database survive a crash or power cut on Windows, where file and directory syncing behave differently from Linux and macOS. The known failure (every durable write reported "not durable", because the flush used a read-only handle and a directory handle) is fixed and tested against emulated Windows rules (docs/02, "Durable writes on Windows"); it has not run on a real Windows machine. | 02, 14 | Windows machine |
 | O4 | **Native-speaker review of the translations**: 14 of the 15 catalogs are machine-translated; their structure is tested, their quality isn't (D3 below). | 13 | Translators |
 
 ## Earlier notes

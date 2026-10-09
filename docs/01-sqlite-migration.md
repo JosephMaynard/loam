@@ -112,7 +112,10 @@ kill switch a key-discard.
      to queries so the whole message history no longer lives in memory. Do this once message volume
      matters; not required for correctness.
 4. **One-time importer**: if `.loam/*.json` exists and the DB is empty, import it, then rename the JSON
-   files to `*.json.bak`. Preserves existing local data on upgrade.
+   files to `*.json.bak`. Preserves existing local data on upgrade. *(Removed in October 2026: the SQLite
+   store landed on 2 July 2026, before the first tagged release (0.2.0, 31 July), so no released LOAM ever
+   wrote those files, and the importer could still fail a boot over a stray or malformed `users.json`. A
+   pre-July development data dir is no longer imported; its JSON files are left alone.)*
 5. **Retire**: `dirty`, `dataRev`, `saveInProgress`, `saveAllData`, the `setInterval`, `readJsonArray`,
    `writeJson`, `dataPath`. The `SIGINT` handler just closes the DB.
 

@@ -106,6 +106,7 @@ export const bn: Translation = {
   "people.pendingLoadError": "অপেক্ষমাণ যোগদান লোড করা যায়নি।",
   "people.pendingLoading": "অপেক্ষমাণ যোগদান লোড হচ্ছে…",
   "people.pendingEmpty": "যোগ দিতে কেউ অপেক্ষা করছে না।",
+  "people.pendingSince": "যোগ দেওয়ার অনুরোধ: {when}",
   "people.approve": "অনুমোদন",
   "people.deny": "প্রত্যাখ্যান",
 
@@ -497,6 +498,7 @@ export const bn: Translation = {
   "error.thread_has_replies": "এই থ্রেডে অন্যদের উত্তর আছে. শুধু একজন অ্যাডমিন এটি মুছতে পারে",
   "error.too_many_attempts": "অনেক বেশি চেষ্টা",
   "error.too_many_claim_attempts": "অনেক বেশি দাবির চেষ্টা; পরে আবার চেষ্টা করুন",
+  "error.rate_limited": "অনেক বেশি অনুরোধ; একটু অপেক্ষা করে আবার চেষ্টা করুন",
   "error.message_create_failed": "বার্তা তৈরি করা যায়নি",
   "error.websocket_unauthenticated": "অপ্রমাণীকৃত WebSocket",
   "error.unknown_attachment": "অজানা সংযুক্তি",

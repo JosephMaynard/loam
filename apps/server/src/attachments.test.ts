@@ -431,6 +431,38 @@ describe("message attachments", () => {
     }
     expect(existsSync(filePath)).toBe(false);
   });
+
+  it("stores the upload's own record on the message, whatever kind, name or size the client claims", async () => {
+    const { app, dataDir } = await makeApp();
+    const session = await newSession(app);
+    const uploaded = (await upload(app, session.cookie)).json() as { id: string; mimeType: string; width: number; height: number };
+    expect(uploaded).toEqual({ id: uploaded.id, mimeType: "image/png", width: 1, height: 1 });
+
+    // The client says the PNG is a JPEG of another size, and gives it a file name.
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: session.cookie },
+      payload: {
+        type: "channelPost",
+        channelId: "general",
+        body: "",
+        attachments: [{ id: uploaded.id, mimeType: "image/jpeg", width: 4000, height: 3000, name: "holiday.jpg" }],
+      },
+    });
+    expect(posted.statusCode).toBe(201);
+    const message = (posted.json() as { message: { id: string; attachments: unknown[] } }).message;
+    expect(message.attachments).toEqual([uploaded]);
+
+    // So readers are pointed at the file that exists, and deleting the message removes it.
+    const pngPath = join(dataDir, "attachments", `${uploaded.id}.png`);
+    expect(existsSync(pngPath)).toBe(true);
+    await app.server.inject({ method: "DELETE", url: `/api/messages/${message.id}`, headers: { cookie: session.cookie } });
+    for (let i = 0; i < 40 && existsSync(pngPath); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(existsSync(pngPath)).toBe(false);
+  });
 });
 
 describe("attachment size caps", () => {

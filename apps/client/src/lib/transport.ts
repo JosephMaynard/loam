@@ -847,6 +847,24 @@ function restAad(method: string, path: string): string {
   return `${method} ${path}`;
 }
 
+/**
+ * Open a direct sealed response (docs/08, "Response binding"). The server seals the answer to a request
+ * under `${aad}#${seq}`, the sequence that request carried, so a response captured earlier on the same
+ * route can't be passed off as this one: it opens under another sequence or not at all. The one exception
+ * is a refusal the server made before it could authenticate the request's sequence (a 429 from the rate
+ * limiter, a 400 for a malformed envelope, a 409 for a replay), sealed under the bare aad; that is accepted
+ * only with an error status, so the worst a replay of one can do is fail a request, never feed it old data.
+ *
+ * @returns The plaintext, or null when it opens under neither.
+ */
+function openBoundResponse(key: string, enc: string, aad: string, seq: number, status: number): string | null {
+  const bound = openTransport(key, enc, `${aad}#${seq}`);
+  if (bound !== null) {
+    return bound;
+  }
+  return status >= 400 ? openTransport(key, enc, aad) : null;
+}
+
 export interface EncryptedFetchInit {
   signal?: AbortSignal;
 }
@@ -927,30 +945,27 @@ async function attemptFetch(
 
   const isSafe = SAFE_METHODS.has(method.toUpperCase());
   const aad = restAad(method, path);
-  // A safe (GET/HEAD) call with no logical body keeps the pre-existing shape: no envelope at all.
-  // Every other method is ALWAYS sealed, even with an empty payload — the server (docs/08) requires a
-  // sealed `{ enc }` body from any mutation presented under a live session, so a bodyless mutation
-  // still needs an (empty) envelope to prove it actually went through the session.
-  //
-  // The sealed plaintext is a `{ s, b? }` envelope: `s` is this session's next monotonic sequence
-  // number (for the server's replay window) and `b` the actual body (omitted when there is none).
+  // Every request carries a sealed `{ s, r: 1, b? }` envelope: `s` is this session's next monotonic
+  // sequence number (for the server's replay window), `r: 1` asks the server to bind its response to that
+  // sequence (docs/08, "Response binding"), and `b` is the actual body (omitted when there is none).
   // `++active.seq` is atomic under JS's single thread, so concurrent in-flight requests each get a
-  // distinct, ever-increasing number.
-  const requestBody =
-    isSafe && body === undefined
-      ? undefined
-      : JSON.stringify({
-          enc: sealTransport(
-            active.key,
-            JSON.stringify(body === undefined ? { s: ++active.seq } : { s: ++active.seq, b: body }),
-            aad,
-          ),
-        });
+  // distinct, ever-increasing number. A safe (GET/HEAD) call with no body can't carry one in the body, so
+  // the envelope rides the `x-loam-seq` header instead. Every other method is ALWAYS sealed in the body,
+  // even with an empty payload: the server requires a sealed `{ enc }` body from any mutation presented
+  // under a live session, so a bodyless mutation still proves it went through the session.
+  const seq = ++active.seq;
+  const envelope = JSON.stringify(body === undefined ? { s: seq, r: 1 } : { s: seq, r: 1, b: body });
+  const inHeader = isSafe && body === undefined;
+  const requestBody = inHeader ? undefined : JSON.stringify({ enc: sealTransport(active.key, envelope, aad) });
+  const headers: Record<string, string> = { "content-type": "application/json", "x-loam-enc": active.sessionId };
+  if (inHeader) {
+    headers["x-loam-seq"] = sealTransport(active.key, envelope, aad);
+  }
 
   const response = await fetch(apiUrl(path), {
     method,
     credentials: sessionCredentials(),
-    headers: { "content-type": "application/json", "x-loam-enc": active.sessionId },
+    headers,
     signal: init.signal,
     body: requestBody,
   });
@@ -959,7 +974,7 @@ async function attemptFetch(
     const payload: unknown = await response.json().catch(() => undefined);
     const enc =
       payload && typeof payload === "object" ? (payload as { enc?: unknown }).enc : undefined;
-    const opened = typeof enc === "string" ? openTransport(active.key, enc, aad) : null;
+    const opened = typeof enc === "string" ? openBoundResponse(active.key, enc, aad, seq, response.status) : null;
 
     if (opened === null) {
       // The server replied `x-loam-enc: 1` — i.e. its handler already ran and produced a response —

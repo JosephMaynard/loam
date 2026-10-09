@@ -8,6 +8,7 @@ import { mergeConfig } from "./config.js";
 import { errorBody } from "./errors.js";
 import { makeAdminSetupCode } from "./identity.js";
 import type { KillSwitchResult } from "./kill-switch.js";
+import { rateLimitKey } from "./rate-limit.js";
 import { timingSafeEqualStrings, verifySecret } from "./secrets.js";
 
 /**
@@ -83,7 +84,7 @@ export function registerAdminRoutes(ctx: AppContext): void {
       // Spend a one-time code from the host's screen anyway, so a link opened in a browser that was already
       // admin isn't left usable by someone else for the rest of its 10 minutes.
       ctx.adminClaimCodes.consume(body.data.secret);
-      return currentUser;
+      return ctx.rolesVisibleUser(currentUser);
     }
 
     const strategy = ctx.effectiveAdminBootstrap();
@@ -102,13 +103,15 @@ export function registerAdminRoutes(ctx: AppContext): void {
     // Persist first, then mirror onto the live record and broadcast (the house mutator order), and clear
     // `pending`: under `access.joinPolicy: "approval"` the claimer's session was created pending, and an
     // admin still marked pending is locked out of every participation-gated route — including the
-    // approval queue — so a fresh approval-policy node would have no one able to let anyone in.
+    // approval queue — so a fresh approval-policy node would have no one able to let anyone in. The reply is
+    // the claimer's own record as every self-facing route shows it (`rolesVisibleUser`: roles, never
+    // `shadowBanned`), not the stored row.
     const promote = () => {
       const next = UserSchema.parse({ ...currentUser, isAdmin: true, pending: false });
       ctx.store.upsertUser(next);
       Object.assign(currentUser, next);
       ctx.broadcast({ type: "userUpserted", user: currentUser });
-      return currentUser;
+      return ctx.rolesVisibleUser(currentUser);
     };
 
     // `hostDevice`: the secret is the launcher's per-boot host token, which only the
@@ -127,8 +130,9 @@ export function registerAdminRoutes(ctx: AppContext): void {
       return promote();
     }
 
-    // Key on the caller's IP: a session-id key could be reset by simply omitting the cookie.
-    if (ctx.attemptRateLimited(ctx.claimAttempts, request.ip)) {
+    // Key on the caller's IP: a session-id key could be reset by simply omitting the cookie. Folded like the
+    // HTTP limiter (an IPv6 /64 is one host), so cycling addresses buys no extra guesses.
+    if (ctx.attemptRateLimited(ctx.claimAttempts, rateLimitKey(request.ip))) {
       return reply.code(429).send(errorBody("Too many claim attempts; try again later"));
     }
 
@@ -224,7 +228,7 @@ export function registerAdminRoutes(ctx: AppContext): void {
       return reply.code(404).send(errorBody("Not found"));
     }
 
-    if (ctx.attemptRateLimited(ctx.panicAttempts, request.ip)) {
+    if (ctx.attemptRateLimited(ctx.panicAttempts, rateLimitKey(request.ip))) {
       return reply.code(404).send(errorBody("Not found"));
     }
 

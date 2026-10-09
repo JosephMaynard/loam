@@ -21,6 +21,13 @@ const fsFaults = vi.hoisted(() => ({
   openSync: undefined as string | undefined,
   rmSync: undefined as string | undefined,
 }));
+// Windows flush rules, when `windowsFlush.armed`: `fsyncSync` (FlushFileBuffers) refuses with EPERM a handle
+// opened read-only, and every directory handle. `opened` records each `openSync` (path + flags) while armed.
+const windowsFlush = vi.hoisted(() => ({
+  armed: false,
+  opened: [] as Array<{ path: string; flags: string }>,
+  handles: new Map<number, { path: string; flags: string }>(),
+}));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   const simulatedEio = (call: string, path: string): Error =>
@@ -37,7 +44,20 @@ vi.mock("node:fs", async (importOriginal) => {
       if (fsFaults.openSync !== undefined && String(args[0]) === fsFaults.openSync) {
         throw simulatedEio("open", fsFaults.openSync);
       }
-      return actual.openSync(...args);
+      const fd = actual.openSync(...args);
+      if (windowsFlush.armed) {
+        const handle = { path: String(args[0]), flags: String(args[1] ?? "r") };
+        windowsFlush.opened.push(handle);
+        windowsFlush.handles.set(fd, handle);
+      }
+      return fd;
+    },
+    fsyncSync: (fd: number) => {
+      const handle = windowsFlush.handles.get(fd);
+      if (windowsFlush.armed && handle && (handle.flags === "r" || actual.statSync(handle.path).isDirectory())) {
+        throw Object.assign(new Error(`simulated EPERM: flush ${handle.path}`), { code: "EPERM" });
+      }
+      return actual.fsyncSync(fd);
     },
     rmSync: (...args: Parameters<typeof actual.rmSync>) => {
       if (fsFaults.rmSync !== undefined && String(args[0]) === fsFaults.rmSync) {
@@ -55,6 +75,9 @@ afterEach(async () => {
   fsFaults.writeFileSync = undefined;
   fsFaults.openSync = undefined;
   fsFaults.rmSync = undefined;
+  windowsFlush.armed = false;
+  windowsFlush.opened = [];
+  windowsFlush.handles.clear();
   while (cleanups.length > 0) {
     await cleanups.pop()!();
   }
@@ -355,5 +378,54 @@ describe.skipIf(process.platform === "win32")("file modes on a shared computer",
     expect(lifecycle.durableWriteFileSync(config, '{"node":{"name":"after"}}')).toBe(true);
     expect(statSync(config).mode & 0o777).toBe(0o640);
     expect(readFileSync(config, "utf8")).toBe('{"node":{"name":"after"}}');
+  });
+});
+
+describe("durable writes under Windows flush rules", () => {
+  /** A lifecycle over `dataDir`. */
+  function lifecycleIn(dataDir: string): ReturnType<typeof createStoreLifecycle> {
+    return createStoreLifecycle({
+      dataDir,
+      avatarsDir: join(dataDir, "avatars"),
+      attachmentsDir: join(dataDir, "attachments"),
+      options: { dataDir },
+      log: Fastify({ logger: false }).log,
+      configPath: join(dataDir, "config.json"),
+      markAwaitingWipeRestart: () => {},
+    });
+  }
+
+  /** Run `body` with `process.platform` reading "win32" and the Windows flush rules armed. */
+  function asWindows<T>(body: () => T): T {
+    const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...original, value: "win32" });
+    windowsFlush.armed = true;
+    try {
+      return body();
+    } finally {
+      windowsFlush.armed = false;
+      Object.defineProperty(process, "platform", original);
+    }
+  }
+
+  it("flushes the staging file through a handle that may write, and skips the directory flush", () => {
+    const dataDir = tempDir();
+    const lifecycle = lifecycleIn(dataDir);
+    const journal = join(dataDir, ".loam-wipe-phase");
+
+    expect(asWindows(() => lifecycle.durableWriteFileSync(journal, '{"phase":"delete-pending"}'))).toBe(true);
+    expect(readFileSync(journal, "utf8")).toBe('{"phase":"delete-pending"}');
+    expect(windowsFlush.opened.some((handle) => handle.path === dataDir)).toBe(false);
+    const staging = windowsFlush.opened.filter((handle) => handle.path.startsWith(`${journal}.tmp-`));
+    expect(staging.map((handle) => handle.flags)).toEqual(["r+"]);
+  });
+
+  it("clears the wipe journal without a directory flush", () => {
+    const dataDir = tempDir();
+    const lifecycle = lifecycleIn(dataDir);
+    writeFileSync(join(dataDir, ".loam-wipe-phase"), '{"phase":"key-clear-ready"}');
+
+    expect(asWindows(() => lifecycle.clearWipePhase())).toBe(true);
+    expect(existsSync(join(dataDir, ".loam-wipe-phase"))).toBe(false);
   });
 });

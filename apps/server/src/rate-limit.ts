@@ -22,6 +22,8 @@ import { isIPv4, isIPv6 } from "node:net";
 
 import type { FastifyInstance, FastifyRequest, onRequestAsyncHookHandler } from "fastify";
 
+import { RATE_LIMITED_CODE } from "./errors.js";
+
 /** Passed to an `errorResponseBuilder` when a request is refused. */
 export interface RateLimitExceeded {
   statusCode: 429;
@@ -161,9 +163,12 @@ function describeWait(ttlMs: number): string {
   return `${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
+/** The default refusal: a 429 naming the wait, with the stable `rate_limited` code the client translates
+ *  (the message itself is English and server-built, so a client never shows it). */
 function defaultErrorResponse(_request: FastifyRequest, context: RateLimitExceeded): Error {
-  const error = new Error(`Rate limit exceeded, retry in ${describeWait(context.ttl)}`) as Error & { statusCode: number };
+  const error = new Error(`Rate limit exceeded, retry in ${describeWait(context.ttl)}`) as Error & { statusCode: number; code: string };
   error.statusCode = context.statusCode;
+  error.code = RATE_LIMITED_CODE;
   return error;
 }
 

@@ -106,6 +106,7 @@ export const ps: Translation = {
   "people.pendingLoadError": "پاتې غوښتنې نه شوې پورته کیدی.",
   "people.pendingLoading": "پاتې غوښتنې پورته کیږي…",
   "people.pendingEmpty": "هیڅوک د یوځای کیدو په تمه نه دي.",
+  "people.pendingSince": "د یوځای کیدو غوښتنه: {when}",
   "people.approve": "منل",
   "people.deny": "ردول",
 
@@ -497,6 +498,7 @@ export const ps: Translation = {
   "error.thread_has_replies": "دې لړۍ کې د نورو خلکو ځوابونه شته. یوازې اډمین یې ړنګولی شي",
   "error.too_many_attempts": "ډیرې هڅې",
   "error.too_many_claim_attempts": "د ترلاسه کولو ډیرې هڅې؛ وروسته بیا هڅه وکړئ",
+  "error.rate_limited": "ډیرې غوښتنې؛ لږ صبر وکړئ او بیا هڅه وکړئ",
   "error.message_create_failed": "پیغام جوړ نشو",
   "error.websocket_unauthenticated": "ناتصدیق‌شوی WebSocket",
   "error.unknown_attachment": "ناپېژندلې ضمیمه",

@@ -114,7 +114,7 @@ describe("registerRateLimit", () => {
     await statuses("/a", 3);
     const refused = await server.inject({ method: "GET", url: "/a", remoteAddress: "10.0.0.1" });
     expect(refused.statusCode).toBe(429);
-    expect(refused.json()).toMatchObject({ statusCode: 429, message: "Rate limit exceeded, retry in 1 minute" });
+    expect(refused.json()).toMatchObject({ statusCode: 429, code: "rate_limited", message: "Rate limit exceeded, retry in 1 minute" });
     expect(refused.headers["retry-after"]).toBe("60");
     const allowed = await server.inject({ method: "GET", url: "/a", remoteAddress: "10.0.0.9" });
     for (const response of [refused, allowed]) {

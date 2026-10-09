@@ -1489,6 +1489,7 @@ export const SERVER_ERROR_CODES = [
   "thread_has_replies",
   "too_many_attempts",
   "too_many_claim_attempts",
+  "rate_limited",
   "message_create_failed",
   "websocket_unauthenticated",
   "unknown_attachment",

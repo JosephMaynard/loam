@@ -106,6 +106,7 @@ export const fa: Translation = {
   "people.pendingLoadError": "بارگیری درخواست‌های در انتظار ممکن نشد.",
   "people.pendingLoading": "در حال بارگیری درخواست‌های در انتظار…",
   "people.pendingEmpty": "کسی منتظر پیوستن نیست.",
+  "people.pendingSince": "درخواست پیوستن: {when}",
   "people.approve": "تأیید",
   "people.deny": "رد",
 
@@ -497,6 +498,7 @@ export const fa: Translation = {
   "error.thread_has_replies": "این رشته پاسخ‌هایی از افراد دیگر دارد. تنها یک مدیر می‌تواند آن را حذف کند",
   "error.too_many_attempts": "تلاش‌های بیش از حد",
   "error.too_many_claim_attempts": "تلاش‌های دریافت بیش از حد؛ بعداً دوباره تلاش کنید",
+  "error.rate_limited": "درخواست‌های بیش از حد؛ کمی صبر کنید و دوباره تلاش کنید",
   "error.message_create_failed": "ساخت پیام ممکن نشد",
   "error.websocket_unauthenticated": "WebSocket احراز هویت‌نشده",
   "error.unknown_attachment": "پیوست ناشناخته",

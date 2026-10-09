@@ -1,9 +1,16 @@
 // Shared server types: the socket/session shapes, the in-memory data mirror, the client event union,
 // and the public `buildApp` option/handle types.
 import type { FastifyInstance } from "fastify";
-import type { Channel, DbEncryptionMode, HostApi, Message, NetworkConfig, User } from "@loam/schema";
+import type { Channel, DbEncryptionMode, HostApi, Message, MessageAttachment, NetworkConfig, User } from "@loam/schema";
 
 import type { LoamStore, StoreDriver } from "./db.js";
+
+/**
+ * An uploaded attachment no message has claimed yet (RAM-only, keyed by attachment id): who uploaded it,
+ * when, and the record `POST /api/attachments` answered with. A message that names the id gets THIS record,
+ * not the one the client sent, so its kind, name and size always match the stored file.
+ */
+export type PendingUpload = { userId: string; uploadedAt: number; attachment: MessageAttachment };
 
 export type SocketClient = {
   OPEN: number;
@@ -204,6 +211,13 @@ export type AppOptions = {
    * `requireRulesAcceptance` is on (without the rules gate there is no "never agreed" signal).
    */
   unusedIdentityMaxAgeMs?: number;
+  /**
+   * The same window for an unused identity waiting in a greeter's queue (`pending`, on an approval-only
+   * node, where every newcomer starts pending and can't agree to the rules until admitted). Longer, so a
+   * real newcomer outlasts a greeter's weekend away. Defaults to 7 days. A pending identity that agreed to
+   * the rules is never reaped.
+   */
+  pendingIdentityMaxAgeMs?: number;
   /**
    * Hard cap on live transport-encryption sessions (docs/08) — `POST /api/transport/handshake` is
    * deliberately unauthenticated (it's the bootstrap step before any session exists), so without a

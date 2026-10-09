@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { getActiveLocale, setActiveLocale } from "../i18n";
-import { dayKey, dayLabel } from "./dates";
+import { ageLabel, dayKey, dayLabel } from "./dates";
 
 // A fixed reference "now": 2026-07-06 14:30 local time.
 const NOW = new Date(2026, 6, 6, 14, 30).getTime();
@@ -54,5 +54,22 @@ describe("dayLabel", () => {
       setActiveLocale("en");
       expect(dayLabel(new Date(2026, 6, 6, 1, 0).getTime(), NOW)).toBe("Today");
     });
+  });
+});
+
+describe("ageLabel", () => {
+  afterEach(() => setActiveLocale("en"));
+
+  it("counts minutes, then hours up to two days, then days", () => {
+    expect(ageLabel(NOW - 5_000, NOW)).toBe("1 minute ago");
+    expect(ageLabel(NOW - 59 * 60_000, NOW)).toBe("59 minutes ago");
+    expect(ageLabel(NOW - 3 * 3_600_000, NOW)).toBe("3 hours ago");
+    expect(ageLabel(NOW - 47 * 3_600_000, NOW)).toBe("47 hours ago");
+    expect(ageLabel(NOW - 6 * 86_400_000, NOW)).toBe("6 days ago");
+  });
+
+  it("speaks the node's language", () => {
+    setActiveLocale("fr");
+    expect(ageLabel(NOW - 3 * 3_600_000, NOW)).toBe("il y a 3 heures");
   });
 });

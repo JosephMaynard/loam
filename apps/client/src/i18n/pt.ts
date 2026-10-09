@@ -106,6 +106,7 @@ export const pt: Translation = {
   "people.pendingLoadError": "Não foi possível carregar as solicitações pendentes.",
   "people.pendingLoading": "Carregando solicitações pendentes…",
   "people.pendingEmpty": "Ninguém está esperando para entrar.",
+  "people.pendingSince": "Pediu para entrar {when}",
   "people.approve": "Aprovar",
   "people.deny": "Recusar",
 
@@ -497,6 +498,7 @@ export const pt: Translation = {
   "error.thread_has_replies": "Este tópico tem respostas de outras pessoas. Somente um administrador pode excluí-lo",
   "error.too_many_attempts": "Tentativas em excesso",
   "error.too_many_claim_attempts": "Tentativas de obtenção em excesso; tente novamente mais tarde",
+  "error.rate_limited": "Pedidos em excesso; aguarde um momento e tente novamente",
   "error.message_create_failed": "Não foi possível criar a mensagem",
   "error.websocket_unauthenticated": "WebSocket não autenticado",
   "error.unknown_attachment": "Anexo desconhecido",
