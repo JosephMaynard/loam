@@ -805,24 +805,42 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
     if (typeof payload !== "string") {
       return payload;
     }
-    // Bind the RESPONSE to the request's authenticated sequence (docs/08, "Response binding"): sealing under
-    // `${method} ${url}#${seq}` means a captured response can't be replayed or cross-fed to a different
-    // request on the same route (the caller opens with the exact seq it sent). Always for the direct-sealed
-    // sync routes (every sealed sync request carries a `{ s }` envelope); for any other direct request when
-    // its envelope asked (`r: 1`, the browser client in `optional` mode). The tunnel binds its responses
-    // inside the sealed descriptor instead, and resume/logout carry their own `{ s, m, p }`. A request refused
-    // before its sequence was authenticated (a 429, a malformed body) has none, so it gets the bare aad.
-    const seq = ctx.transportRequestSeq.get(request);
-    const routeUrl = request.routeOptions?.url;
-    const bindToSequence =
-      seq !== undefined &&
-      (responseBoundRequests.has(request) || (routeUrl !== undefined && ctx.DIRECT_SEALED_SYNC_ROUTES.has(routeUrl)));
-    const responseAad = bindToSequence ? `${request.method} ${request.url}#${seq}` : `${request.method} ${request.url}`;
-    const sealed = sealTransport(key, payload, responseAad);
     reply.header("content-type", "application/json; charset=utf-8");
     reply.header("x-loam-enc", "1");
-    return JSON.stringify({ enc: sealed });
+    return JSON.stringify(sealResponse(request, key, payload, reply.statusCode));
   });
+
+  /**
+   * Seal a direct response (docs/08, "Response binding"). The aad says which request it answers, so a
+   * captured response can't be replayed or cross-fed to another request on the same route, and (for a
+   * client that asked) which status it carries, so the outer status, which is outside the AEAD, can't be
+   * relabelled:
+   *
+   * - a request whose envelope asked (`r: 1`, the browser client in `optional` mode): `METHOD url#seq#status`;
+   * - a direct-sealed sync request (every one carries a `{ s }` envelope; peers since 0.6.0 open this):
+   *   `METHOD url#seq`;
+   * - any other request with an authenticated sequence (an older client, the tunnel, whose descriptor
+   *   carries its own binding, resume/logout with their own `{ s, m, p }`): the bare `METHOD url`;
+   * - a request with no authenticated sequence (refused before it was read: a 429, a 400 or 409 for a bad
+   *   envelope; or a bare GET from an older client): sealed twice, `enc` under the bare aad for older
+   *   clients and `encStatus` under `METHOD url!status` for current ones, which never open `enc`. Whether
+   *   the client asked isn't known yet at that point, so both go out.
+   */
+  function sealResponse(request: FastifyRequest, key: string, payload: string, status: number): { enc: string; encStatus?: string } {
+    const aad = `${request.method} ${request.url}`;
+    const seq = ctx.transportRequestSeq.get(request);
+    if (seq === undefined) {
+      return { enc: sealTransport(key, payload, aad), encStatus: sealTransport(key, payload, `${aad}!${status}`) };
+    }
+    if (responseBoundRequests.has(request)) {
+      return { enc: sealTransport(key, payload, `${aad}#${seq}#${status}`) };
+    }
+    const routeUrl = request.routeOptions?.url;
+    if (routeUrl !== undefined && ctx.DIRECT_SEALED_SYNC_ROUTES.has(routeUrl)) {
+      return { enc: sealTransport(key, payload, `${aad}#${seq}`) };
+    }
+    return { enc: sealTransport(key, payload, aad) };
+  }
 
   ctx.server.addHook("onSend", async (request, reply) => {
     reply.header("x-content-type-options", "nosniff");

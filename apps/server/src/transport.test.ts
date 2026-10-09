@@ -460,7 +460,7 @@ describe("transport encryption transparent round-trip", () => {
     const headers = { cookie: user.cookie, "x-loam-enc": session.sessionId, "content-type": "application/json" };
     const enc = (res: InjectResponse) => (res.json() as { enc: string }).enc;
 
-    // A GET carries its `{ s, r }` envelope in the x-loam-seq header; the answer opens only under `#s`.
+    // A GET carries its `{ s, r }` envelope in the x-loam-seq header; the answer opens only under `#s#status`.
     const getAad = "GET /api/channels";
     const listed = await app.server.inject({
       method: "GET",
@@ -468,20 +468,30 @@ describe("transport encryption transparent round-trip", () => {
       headers: { ...headers, "x-loam-seq": sealTransport(session.key, JSON.stringify({ s: 1, r: 1 }), getAad) },
     });
     expect(listed.statusCode).toBe(200);
-    expect(openTransport(session.key, enc(listed), `${getAad}#1`)).not.toBeNull();
+    expect(openTransport(session.key, enc(listed), `${getAad}#1#200`)).not.toBeNull();
+    expect(openTransport(session.key, enc(listed), `${getAad}#1`)).toBeNull();
+    expect(openTransport(session.key, enc(listed), `${getAad}#1#404`)).toBeNull();
     expect(openTransport(session.key, enc(listed), getAad)).toBeNull();
-    expect(openTransport(session.key, enc(listed), `${getAad}#2`)).toBeNull();
+    expect(openTransport(session.key, enc(listed), `${getAad}#2#200`)).toBeNull();
+    expect((listed.json() as { encStatus?: string }).encStatus).toBeUndefined();
 
-    // The same header again is a replay: refused before the handler, like a replayed body.
+    // The same header again is a replay: refused before the handler, like a replayed body. It has no
+    // authenticated sequence, so it goes out twice: under the bare aad (older clients) and bound to its
+    // status (`encStatus`, which current clients open).
     const replayed = await app.server.inject({
       method: "GET",
       url: "/api/channels",
       headers: { ...headers, "x-loam-seq": sealTransport(session.key, JSON.stringify({ s: 1, r: 1 }), getAad) },
     });
     expect(replayed.statusCode).toBe(409);
+    const replayedBody = replayed.json() as { enc: string; encStatus: string };
+    expect(openTransport(session.key, replayedBody.enc, getAad)).not.toBeNull();
+    expect(openTransport(session.key, replayedBody.encStatus, `${getAad}!409`)).not.toBeNull();
+    expect(openTransport(session.key, replayedBody.encStatus, `${getAad}!500`)).toBeNull();
     // A header that doesn't open under the session key is malformed.
     const forged = await app.server.inject({ method: "GET", url: "/api/channels", headers: { ...headers, "x-loam-seq": "AAAA" } });
     expect(forged.statusCode).toBe(400);
+    expect(openTransport(session.key, (forged.json() as { encStatus: string }).encStatus, `${getAad}!400`)).not.toBeNull();
 
     // A mutation asks in its body envelope.
     const postAad = "POST /api/messages";
@@ -492,7 +502,8 @@ describe("transport encryption transparent round-trip", () => {
       payload: { enc: sealTransport(session.key, JSON.stringify({ s: 2, r: 1, b: { type: "channelPost", channelId: "general", body: "bound" } }), postAad) },
     });
     expect(posted.statusCode).toBe(201);
-    expect(openTransport(session.key, enc(posted), `${postAad}#2`)).not.toBeNull();
+    expect(openTransport(session.key, enc(posted), `${postAad}#2#201`)).not.toBeNull();
+    expect(openTransport(session.key, enc(posted), `${postAad}#2`)).toBeNull();
     expect(openTransport(session.key, enc(posted), postAad)).toBeNull();
 
     // An envelope that doesn't ask (an older client) still gets the bare route aad, and so does a bare GET.
@@ -503,8 +514,11 @@ describe("transport encryption transparent round-trip", () => {
       payload: { enc: sealRequest(session.key, 3, postAad, { type: "channelPost", channelId: "general", body: "older client" }) },
     });
     expect(openTransport(session.key, enc(legacy), postAad)).not.toBeNull();
+    expect((legacy.json() as { encStatus?: string }).encStatus).toBeUndefined();
     const bareGet = await app.server.inject({ method: "GET", url: "/api/channels", headers });
     expect(openTransport(session.key, enc(bareGet), getAad)).not.toBeNull();
+    // ...and its status-bound twin names the 200, so a current client never takes it as an error.
+    expect(openTransport(session.key, (bareGet.json() as { encStatus: string }).encStatus, `${getAad}!200`)).not.toBeNull();
   });
 
   it("seals a bodyless answer as an empty 200 for a client that asked for a bound response; an older client still gets the 204", async () => {
@@ -522,7 +536,7 @@ describe("transport encryption transparent round-trip", () => {
     });
     expect(bound.statusCode).toBe(200);
     expect(bound.headers["x-loam-enc"]).toBe("1");
-    expect(openTransport(session.key, (bound.json() as { enc: string }).enc, `${aad}#1`)).toBe("");
+    expect(openTransport(session.key, (bound.json() as { enc: string }).enc, `${aad}#1#200`)).toBe("");
 
     const legacy = await app.server.inject({
       method: "POST",

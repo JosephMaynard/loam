@@ -62,15 +62,22 @@
 > same for every request on that route, so an on-path attacker could keep an old sealed answer and replay
 > it as the answer to a later request (stale messages, an old roster). Now the browser client puts
 > `r: 1` in the authenticated `{ s, r, b? }` envelope of every direct request, and the server then seals
-> the response under `${METHOD} ${url}#${s}`; the client opens it only under the sequence it sent. A GET
-> or HEAD can't carry a body, so its envelope (`{ s, r: 1 }`, sealed under the same request aad) rides an
-> `x-loam-seq` header and runs through the same replay window (409 on a repeat, 400 if it doesn't open).
-> That is the whole wire change. A refusal the server makes before it has read the request's sequence (a
-> 429 from the rate limiter, a 400 or 409 for a bad envelope) has no sequence to bind, so it is sealed under
-> the bare aad, and the client accepts a bare-aad seal only with an error status: a replayed one can fail
-> a request, which an on-path attacker can do anyway, but never pass old data as a success. An envelope
-> without `r` (an older client still open in a tab across an upgrade) gets the bare aad as before, so the
-> server stays compatible; the client and server ship together because the node serves the client.
+> the response under `${METHOD} ${url}#${s}#${status}`; the client opens it only under the sequence it sent
+> and the status the reply arrived with, so the outer status (outside the AEAD) can't be relabelled either.
+> A GET or HEAD can't carry a body, so its envelope (`{ s, r: 1 }`, sealed under the same request aad) rides
+> an `x-loam-seq` header and runs through the same replay window (409 on a repeat, 400 if it doesn't open).
+> A response to a request with no authenticated sequence (a refusal the server made before reading it: a
+> 429 from the rate limiter, a 400 or 409 for a bad envelope; or a GET whose `x-loam-seq` header was
+> stripped on the way) can't be bound to a sequence, and at that point the server doesn't know whether the
+> client asked. So it goes out sealed twice: `enc` under the bare `${METHOD} ${url}` for older clients, and
+> `encStatus` under `${METHOD} ${url}!${status}`. The current client never opens the bare `enc`, and takes
+> `encStatus` only with an error status: a replayed refusal can fail a request, which an on-path attacker
+> can do anyway, but a success can't be relabelled as an error (or the reverse), and old data never passes
+> as a success. An envelope without `r` (an older client still open in a tab across an upgrade) gets the
+> bare aad as before, so the server stays compatible; the client and server ship together because the
+> node serves the client. Sync pullers don't send `r`, and their responses stay under `#${s}` so 0.6.0
+> peers keep working; a relabelled status there can only fail a pull, since a non-2xx answer carries no
+> data the puller imports.
 > Binding only helps if the client also refuses a reply with the seal stripped off. Under a live session
 > it accepts an unsealed reply only for the three refusals the node makes before it has looked the session
 > up: a `401` for a session it doesn't know, a `421` for a Host name it doesn't serve, and a `503` while an

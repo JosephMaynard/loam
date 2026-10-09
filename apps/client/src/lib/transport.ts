@@ -849,20 +849,23 @@ function restAad(method: string, path: string): string {
 
 /**
  * Open a direct sealed response (docs/08, "Response binding"). The server seals the answer to a request
- * under `${aad}#${seq}`, the sequence that request carried, so a response captured earlier on the same
- * route can't be passed off as this one: it opens under another sequence or not at all. The one exception
- * is a refusal the server made before it could authenticate the request's sequence (a 429 from the rate
- * limiter, a 400 for a malformed envelope, a 409 for a replay), sealed under the bare aad; that is accepted
- * only with an error status, so the worst a replay of one can do is fail a request, never feed it old data.
+ * under `${aad}#${seq}#${status}`: the sequence that request carried, so a response captured earlier on the
+ * same route can't be passed off as this one, and the status it was sent with, so the outer status (outside
+ * the AEAD) can't be relabelled. The one exception is a refusal the server made before it could
+ * authenticate the request's sequence (a 429 from the rate limiter, a 400 for a malformed envelope, a 409
+ * for a replay): its `encStatus` is sealed under `${aad}!${status}`, and is accepted only with an error
+ * status, so the worst a replay of one can do is fail a request, never feed it old data. The bare-aad `enc`
+ * that rides beside it is for older clients and is never opened here.
  *
- * @returns The plaintext, or null when it opens under neither.
+ * @returns The plaintext, or null when neither opens.
  */
-function openBoundResponse(key: string, enc: string, aad: string, seq: number, status: number): string | null {
-  const bound = openTransport(key, enc, `${aad}#${seq}`);
+function openBoundResponse(key: string, payload: unknown, aad: string, seq: number, status: number): string | null {
+  const record = payload && typeof payload === "object" ? (payload as { enc?: unknown; encStatus?: unknown }) : {};
+  const bound = typeof record.enc === "string" ? openTransport(key, record.enc, `${aad}#${seq}#${status}`) : null;
   if (bound !== null) {
     return bound;
   }
-  return status >= 400 ? openTransport(key, enc, aad) : null;
+  return status >= 400 && typeof record.encStatus === "string" ? openTransport(key, record.encStatus, `${aad}!${status}`) : null;
 }
 
 export interface EncryptedFetchInit {
@@ -947,7 +950,7 @@ async function attemptFetch(
   const aad = restAad(method, path);
   // Every request carries a sealed `{ s, r: 1, b? }` envelope: `s` is this session's next monotonic
   // sequence number (for the server's replay window), `r: 1` asks the server to bind its response to that
-  // sequence (docs/08, "Response binding"), and `b` is the actual body (omitted when there is none).
+  // sequence and to its status (docs/08, "Response binding"), and `b` is the actual body (omitted when there is none).
   // `++active.seq` is atomic under JS's single thread, so concurrent in-flight requests each get a
   // distinct, ever-increasing number. A safe (GET/HEAD) call with no body can't carry one in the body, so
   // the envelope rides the `x-loam-seq` header instead. Every other method is ALWAYS sealed in the body,
@@ -972,9 +975,7 @@ async function attemptFetch(
 
   if (response.headers.get("x-loam-enc") === "1") {
     const payload: unknown = await response.json().catch(() => undefined);
-    const enc =
-      payload && typeof payload === "object" ? (payload as { enc?: unknown }).enc : undefined;
-    const opened = typeof enc === "string" ? openBoundResponse(active.key, enc, aad, seq, response.status) : null;
+    const opened = openBoundResponse(active.key, payload, aad, seq, response.status);
 
     if (opened === null) {
       // The server replied `x-loam-enc: 1` — i.e. its handler already ran and produced a response —
