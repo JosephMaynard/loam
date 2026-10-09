@@ -2,6 +2,7 @@
 // windows, the internal tunnel token, the global request hooks, and the handshake/resume/logout/tunnel
 // routes. Extracted verbatim from app.ts (2026-09-04 split) over the shared AppContext.
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 
 import { type TransportIdentity, createTransportIdentity, openTransport, sealTransport, transportServerAccept, verifyTransportKeypair } from "@loam/crypto";
 import { TransportHandshakeRequestSchema } from "@loam/schema";
@@ -71,10 +72,78 @@ export function loggedRequest(request: {
   return {
     method: request.method,
     url: isInternalDispatchForLogging(request) ? "[tunnelled]" : (request.url ?? "").split("?", 1)[0],
-    host: request.host,
+    // A `Host` is logged only when it's one of the names every node serves (an IP literal, localhost, a
+    // `.local` name); anything else (a configured join hostname, or the arbitrary name a misdirected
+    // request carried) is a placeholder, so a refused hostname never reaches the log.
+    host: hostNameAllowed(hostHeaderName(request.host), () => undefined) ? request.host : "[hostname]",
     remoteAddress: request.ip,
     remotePort: request.socket?.remotePort,
   };
+}
+
+/**
+ * The name in a `Host` header (or a URL authority): lowercased, port stripped, IPv6 brackets removed, a
+ * trailing dot dropped. Undefined for an empty or malformed value (a non-numeric port, an unclosed
+ * bracket, a bare multi-colon value that isn't an IPv6 address).
+ */
+export function hostHeaderName(host: string | undefined): string | undefined {
+  const value = host?.trim().toLowerCase() ?? "";
+  if (!value) {
+    return undefined;
+  }
+  if (value.startsWith("[")) {
+    const close = value.indexOf("]");
+    if (close === -1) {
+      return undefined;
+    }
+    const rest = value.slice(close + 1);
+    if (rest && !/^:\d{1,5}$/.test(rest)) {
+      return undefined;
+    }
+    return value.slice(1, close) || undefined;
+  }
+  // A bare IPv6 literal (no brackets, several colons) is tolerated; a `name:port` has exactly one colon.
+  if (value.split(":").length > 2) {
+    return isIP(value) ? value : undefined;
+  }
+  const [name = "", port] = value.split(":");
+  if (port !== undefined && !/^\d{1,5}$/.test(port)) {
+    return undefined;
+  }
+  return name.replace(/\.$/, "") || undefined;
+}
+
+/**
+ * Whether a request's `Host` names this node (DNS rebinding): an IP literal (v4 or v6),
+ * `localhost` or a `*.localhost` name, an mDNS `*.local` name (LAN-only by construction), or the node's
+ * advertised join host. `joinHost` is consulted last and lazily: when no join host is pinned, resolving it
+ * scans the network interfaces, and the result is then an IP literal the first rule already covers.
+ */
+export function hostNameAllowed(name: string | undefined, joinHost: () => string | undefined): boolean {
+  if (!name) {
+    return false;
+  }
+  if (isIP(name) || name === "localhost" || name.endsWith(".localhost") || name.endsWith(".local")) {
+    return true;
+  }
+  return name === hostHeaderName(joinHost());
+}
+
+/**
+ * Whether a WebSocket upgrade's `Origin` names the same host the request was addressed to (its `Host`),
+ * ports aside. A page served by this node always does; a page on another origin (a DNS-rebinding page, any
+ * cross-site page) does not, and an opaque `Origin: null` never matches.
+ */
+export function originMatchesHost(origin: string, host: string | undefined): boolean {
+  const hostName = hostHeaderName(host);
+  if (!hostName) {
+    return false;
+  }
+  try {
+    return hostHeaderName(new URL(origin).host) === hostName;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -526,6 +595,15 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
     // it holds in every mode.
     if (ctx.isInternalTunnelRequest(request)) {
       return; // trusted internal re-dispatch — its x-loam-internal/x-loam-user headers are legitimate
+    }
+    // Host allowlist: a request addressed to a name this node doesn't serve is refused
+    // before anything else happens (no identity is minted, no content is read). On an internet-connected LAN
+    // (Wi-Fi mode, `loamnet` on a home network) a DNS-rebinding page could otherwise point its own hostname at
+    // this node and read public channels as a fresh identity. Every real client arrives by IP literal,
+    // `localhost` (the Android host's own WebView), an mDNS `.local` name, or the advertised join host. The
+    // internal tunnel re-dispatch above inherits the outer request's already-checked Host.
+    if (!hostNameAllowed(hostHeaderName(request.headers.host), () => ctx.currentJoinHost())) {
+      return reply.code(421).send(errorBody("This address isn't served by this LOAM node"));
     }
     // This request is EXTERNAL: strip the trusted internal headers so a client can never forge identity
     // or the tunnel bypass (docs/20 — defence in depth; the resolver already gates x-loam-user on the

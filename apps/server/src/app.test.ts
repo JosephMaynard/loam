@@ -1261,6 +1261,92 @@ describe("message retention (ephemeral messages)", () => {
     expect(bodies).not.toContain("channel-ephemeral");
   });
 
+  it("a channel's retention TTL is admin-only: the owner is refused, an admin is not", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const owner = await newSession(app);
+    expect(owner.isAdmin).toBe(false);
+
+    const created = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: owner.cookie },
+      payload: { name: "mine" },
+    });
+    expect(created.statusCode).toBe(201);
+    const channelId = (created.json() as { id: string }).id;
+    const patchAs = (cookie: string, payload: unknown) =>
+      app.server.inject({ method: "PATCH", url: `/api/channels/${channelId}`, headers: { cookie }, payload });
+
+    const lengthen = await patchAs(owner.cookie, { messageTtlMs: 10_000_000_000 });
+    expect(lengthen.statusCode).toBe(403);
+    expect((lengthen.json() as { code?: string }).code).toBe("admin_required");
+    // Clearing the channel TTL is a retention change too.
+    expect((await patchAs(owner.cookie, { messageTtlMs: null })).statusCode).toBe(403);
+    // The owner's other settings are untouched by the rule.
+    expect((await patchAs(owner.cookie, { description: "still mine" })).statusCode).toBe(200);
+    expect(app.store.loadChannels().find((channel) => channel.id === channelId)?.messageTtlMs).toBeUndefined();
+
+    const byAdmin = await patchAs(admin.cookie, { messageTtlMs: 60_000 });
+    expect(byAdmin.statusCode).toBe(200);
+    expect((byAdmin.json() as { messageTtlMs?: number }).messageTtlMs).toBe(60_000);
+  });
+
+  it("a channel TTL can only shorten the node-wide TTL, never lengthen it", async () => {
+    const app = await makeApp({ retention: { messageTtlMs: 1 } });
+    const admin = await newSession(app);
+    vi.useFakeTimers({ toFake: ["Date"] });
+
+    const patched = await app.server.inject({
+      method: "PATCH",
+      url: "/api/channels/general",
+      headers: { cookie: admin.cookie },
+      payload: { messageTtlMs: 10_000_000_000 },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(
+      (await app.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: admin.cookie },
+        payload: { type: "channelPost", channelId: "general", body: "outlives nothing" },
+      })).statusCode,
+    ).toBe(201);
+
+    await vi.advanceTimersByTimeAsync(10);
+    app.reapExpiredMessages();
+    expect(app.store.loadMessages()).toEqual([]);
+  });
+
+  it("a channel TTL below the node-wide TTL still shortens retention for that channel", async () => {
+    const app = await makeApp({ retention: { messageTtlMs: 3_600_000 } });
+    const admin = await newSession(app);
+    vi.useFakeTimers({ toFake: ["Date"] });
+
+    expect(
+      (await app.server.inject({
+        method: "PATCH",
+        url: "/api/channels/general",
+        headers: { cookie: admin.cookie },
+        payload: { messageTtlMs: 500 },
+      })).statusCode,
+    ).toBe(200);
+    const postTo = (channelId: string, body: string) =>
+      app.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: admin.cookie },
+        payload: { type: "channelPost", channelId, body },
+      });
+    expect((await postTo("general", "short-lived")).statusCode).toBe(201);
+    expect((await postTo("announcements", "node default applies")).statusCode).toBe(201);
+
+    await vi.advanceTimersByTimeAsync(700);
+    app.reapExpiredMessages();
+    const bodies = app.store.loadMessages().map((message) => ("body" in message ? message.body : ""));
+    expect(bodies).toEqual(["node default applies"]);
+  });
+
   it("does nothing when no TTL is configured", async () => {
     const app = await makeApp();
     const session = await newSession(app);
@@ -4895,6 +4981,28 @@ describe("private channels", () => {
   function readMessages(app: LoamApp, cookie: string, channelId: string): Promise<InjectResponse> {
     return app.server.inject({ method: "GET", url: `/api/messages/${channelId}`, headers: { cookie } });
   }
+
+  it("a private channel never takes the bare slug of its name, so a later creator can't learn it exists", async () => {
+    const app = await makeApp();
+    const alice = await newSession(app);
+    const bob = await newSession(app);
+
+    const first = await createPrivateChannel(app, alice.cookie, "Secret");
+    const second = await createPrivateChannel(app, bob.cookie, "Secret");
+    expect(first.id).toMatch(/^secret-[0-9a-f]{6}$/);
+    expect(second.id).toMatch(/^secret-[0-9a-f]{6}$/);
+    expect(first.id).not.toBe(second.id);
+
+    // A public channel keeps its clean slug, and the hidden ones left no trace in it.
+    const open = await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: bob.cookie },
+      payload: { name: "Secret" },
+    });
+    expect(open.statusCode).toBe(201);
+    expect((open.json() as { id: string }).id).toBe("secret");
+  });
 
   function post(app: LoamApp, cookie: string, channelId: string, body: string): Promise<InjectResponse> {
     return app.server.inject({

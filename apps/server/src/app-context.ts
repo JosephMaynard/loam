@@ -134,7 +134,7 @@ export type AppContext = {
   visibleUsers(viewer: User): User[];
   avatarImagePath(imageId: string, mimeType: AvatarImageMimeType): string;
   ensureChannel(id: string): Channel | undefined;
-  uniqueChannelId(name: string): string;
+  uniqueChannelId(name: string, visibility?: Channel["visibility"]): string;
   channelMemberIds(channel: Channel): Set<string>;
   canAccessChannel(channel: Channel, userId: string): boolean;
   createChannelFromRequest(input: ChannelCreateRequest, ownerId: string): Channel;

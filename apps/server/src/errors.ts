@@ -214,6 +214,8 @@ export const ERROR_CODES: Record<string, ServerErrorCode> = {
   "A new name is only available before you first join in": "reroll_not_allowed",
   // The generic 5xx body (see the app's error handler) — internal detail is logged, never returned.
   "Internal server error": "internal_error",
+  // A request whose `Host` names something this node doesn't serve (DNS rebinding): 421.
+  "This address isn't served by this LOAM node": "host_not_allowed",
 };
 
 /** All stable error codes actually in use, exported so tests can assert client-catalog coverage. */

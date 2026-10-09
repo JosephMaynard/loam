@@ -505,6 +505,13 @@ export function registerChannelRoutes(ctx: AppContext): void {
       return reply.code(400).send(errorBody("Invalid channel update request"));
     }
 
+    // Retention is the operator's call: a channel's `messageTtlMs` is set, changed
+    // or cleared by an admin only. The reaper also caps it at the node-wide TTL, but an owner must not get to
+    // touch the axis at all; the admin channels panel is the only UI that sends it.
+    if (body.data.messageTtlMs !== undefined && !currentUser.isAdmin) {
+      return reply.code(403).send(errorBody("Admin access required"));
+    }
+
     // A new name or description is published text: it needs the member rules agreed. Settings like
     // archiving or posting rules stay open, so an admin can still manage a channel before agreeing.
     const textRulesError =

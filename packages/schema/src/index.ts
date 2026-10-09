@@ -1499,6 +1499,7 @@ export const SERVER_ERROR_CODES = [
   "rules_not_accepted",
   "rules_version_mismatch",
   "reroll_not_allowed",
+  "host_not_allowed",
 ] as const;
 export type ServerErrorCode = (typeof SERVER_ERROR_CODES)[number];
 

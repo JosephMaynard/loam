@@ -205,11 +205,14 @@ describe("upgrade: a channel row that can't be repaired is quarantined with ever
     const owner = await newSession(first);
     const post = (payload: Record<string, unknown>) =>
       first.server.inject({ method: "POST", url: "/api/messages", headers: { cookie: owner.cookie }, payload });
+    // A PUBLIC channel, so its id is the bare name slug: the "no create request can claim the quarantined id"
+    // check at the end needs a slug a later request would otherwise take (a private channel's id always
+    // always carries a random suffix, so nothing could collide with it anyway).
     const created = await first.server.inject({
       method: "POST",
       url: "/api/channels",
       headers: { cookie: owner.cookie },
-      payload: { name: "Ops Room", visibility: "private" },
+      payload: { name: "Ops Room" },
     });
     const channel = created.json() as Channel;
     expect(channel.id).toBe("ops-room");

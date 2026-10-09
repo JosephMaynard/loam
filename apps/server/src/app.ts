@@ -1259,10 +1259,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   /**
    * Derives a stable, collision-free channel id from a display name: a URL-friendly slug (so routes
-   * read `/channel/general`), with a short random suffix appended only when the slug is already
-   * taken or empty (e.g. a name made entirely of emoji or punctuation).
+   * read `/channel/general`), with a short random suffix appended when the slug is already taken or
+   * empty (e.g. a name made entirely of emoji or punctuation). A channel that isn't public ALWAYS gets
+   * the suffix: if a private "Secret" took the bare `secret`, the next person to
+   * create a "Secret" would be handed `secret-<hex>` and learn a hidden channel of that name exists.
    */
-  function uniqueChannelId(name: string): string {
+  function uniqueChannelId(name: string, visibility: Channel["visibility"] = "public"): string {
     const slug = name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
@@ -1277,7 +1279,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // taken too: a new channel under it would inherit that row's retained messages.
     const taken = (id: string) => !!ensureChannel(id) || store.quarantine().channels.has(id);
 
-    if (slug && !taken(slug) && !tombstones.has(slug)) {
+    if (visibility === "public" && slug && !taken(slug) && !tombstones.has(slug)) {
       return slug;
     }
 
@@ -1322,7 +1324,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   function createChannelFromRequest(input: ChannelCreateRequest, ownerId: string): Channel {
     const visibility = input.visibility ?? "public";
     const channel: Channel = {
-      id: uniqueChannelId(input.name),
+      id: uniqueChannelId(input.name, visibility),
       name: input.name,
       description: input.description,
       ownerUserId: ownerId,
@@ -2115,18 +2117,22 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     const now = Date.now();
     // Index channels once per cycle so the per-message TTL lookup is O(1), not an O(channels) find each.
     const channelsById = new Map(data.channels.map((channel) => [channel.id, channel]));
-    /** The retention TTL that applies to a message: its channel's override if set, else the node default. */
-    const ttlForMessage = (message: Message): number | undefined => {
-      const channelId =
-        message.type === "channelPost" || message.type === "channelReply" ? message.channelId : undefined;
-      const channelTtl = channelId ? channelsById.get(channelId)?.messageTtlMs : undefined;
-      // `|| undefined` (not `??`) so a zero/NaN global TTL is treated as OFF, never as "expire everything
-      // now" — a 0 would make `createdAt < now - 0` true for every message in a non-TTL channel.
-      return channelTtl ?? (globalTtl || undefined);
+    /**
+     * The retention TTL that applies to a channel: the shorter of its own `messageTtlMs` and the node default.
+     * A channel TTL may only SHORTEN retention: the node-wide TTL is the
+     * operator's ceiling, so a channel setting above it never keeps messages past it. With the node default
+     * off, the channel TTL stands alone (P12). `|| undefined` (not `??`) so a zero/NaN TTL is treated as
+     * OFF, never as "expire everything now" — a 0 would make `createdAt < now - 0` true for every message.
+     */
+    const ttlForChannel = (channelId: string | null | undefined): number | undefined => {
+      const channelTtl = (channelId ? channelsById.get(channelId)?.messageTtlMs : undefined) || undefined;
+      const nodeTtl = globalTtl || undefined;
+      return channelTtl !== undefined && nodeTtl !== undefined ? Math.min(channelTtl, nodeTtl) : (channelTtl ?? nodeTtl);
     };
-    reapExpiredQuarantinedMessages(now, (channelId) =>
-      (channelId ? channelsById.get(channelId)?.messageTtlMs : undefined) ?? (globalTtl || undefined),
-    );
+    /** The retention TTL that applies to a message: its channel's (DMs and reactions follow the node default). */
+    const ttlForMessage = (message: Message): number | undefined =>
+      ttlForChannel(message.type === "channelPost" || message.type === "channelReply" ? message.channelId : undefined);
+    reapExpiredQuarantinedMessages(now, ttlForChannel);
 
     const expired = data.messages.filter((message) => {
       if (message.meta?.streaming) {

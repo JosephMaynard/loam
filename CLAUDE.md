@@ -277,7 +277,10 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   `AppOptions.logStream` lets tests capture output.
 - **Ephemeral messages** (off by default; `retention.messageTtlMs`): a 30s reaper (+ boot sweep)
   deletes expired messages and broadcasts `messageDeleted`; streaming LLM messages are spared until
-  complete.
+  complete. A channel's own `messageTtlMs` is **admin-only** on `PATCH /api/channels/:id` (an owner sending
+  it gets 403 `admin_required`) and can only **shorten** retention: the reaper applies
+  `min(channelTtl, nodeTtl)`, so no channel outlives the node-wide TTL; with the node TTL off a channel TTL
+  stands alone.
 - **Kill switch** (off by default; `killSwitch.enabled`): `executeKillSwitch()` deletes avatars,
   invalidates sessions, broadcasts `wipe` (clients purge IndexedDB/localStorage/SW caches and show a
   neutral disconnected screen), closes sockets, and re-seeds defaults. Config survives. The data
@@ -376,6 +379,13 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   a strict CSP (`default-src 'self'`, `frame-ancestors 'none'`, no external origins) on the app shell
   (non-`/api/` navigations). No HSTS — LOAM serves plain HTTP on the LAN by design. The session
   cookie's `Secure` flag tracks the real request protocol (`x-forwarded-proto`/TLS), not `NODE_ENV`.
+  **Host allowlist** (DNS rebinding): the global `onRequest` hook serves a request only when its `Host`
+  (port stripped, IPv6 brackets handled) is an IP literal, `localhost`/`*.localhost`, an mDNS `*.local`
+  name, or the advertised join host (`currentJoinHost()`, so `LOAM_JOIN_HOST`/the TUI's pinned address);
+  anything else gets 421 `host_not_allowed` before any identity is minted, and the request log replaces a
+  non-allowlisted hostname with `[hostname]`. The `/ws` upgrade additionally refuses (403, before the
+  upgrade) an `Origin` whose host differs from the request's `Host`, ports aside; a client that sends no
+  Origin is judged by its credentials alone.
 - **Transport encryption** (docs/08, `security.transportEncryption` — `optional` **default (secure by
   default)** / `required`; `off` is no longer operator-settable, see below):
   QR-bootstrapped app-layer session encryption over plain HTTP (no WebCrypto/TLS in the

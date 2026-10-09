@@ -1,5 +1,5 @@
-// Boot-time care of the data dir in store-lifecycle.ts (review 2026-10-09): an ephemeral-key node booting a
-// second time over its own previous database (P1-1), the refusal to destroy a persistent database under an
+// Boot-time care of the data dir in store-lifecycle.ts: an ephemeral-key node booting a
+// second time over its own previous database, the refusal to destroy a persistent database under an
 // ephemeral key, the `.loam-db-ephemeral` marker contract shared with the Android launcher, and the file
 // modes the node keeps on a shared computer (data dir 0700, database files and config writes 0600).
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -66,7 +66,7 @@ function hasPost(app: LoamApp, body: string): boolean {
   return app.store.loadMessages().some((message) => message.type === "channelPost" && message.body === body);
 }
 
-describe("ephemeral key across boots (P1-1)", () => {
+describe("ephemeral key across boots", () => {
   it("boots again over its own previous database, starting empty with last boot's media gone", async () => {
     const dataDir = tempDir();
     const first = await boot(dataDir, { ephemeralDbKey: true });
