@@ -1,0 +1,25 @@
+name: Feature request
+description: Ask for something LOAM does not do yet
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        LOAM stays local, anonymous and offline: no accounts, no cloud, no internet needed. Features that fit that get a warm welcome.
+  - type: textarea
+    id: who
+    attributes:
+      label: Who is this for, and what would they do with it?
+      description: A short scene helps more than a feature name. Who is hosting, who is joining, what are they trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What do they do today instead?
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like LOAM to do?
+    validations:
+      required: true

@@ -11,7 +11,7 @@ intimate images shared without consent, posting someone's private details, scams
 is for adults (18+). Our child safety standards are at https://loamnet.com/child-safety.
 
 LOAM has no central service, no user accounts, and no mechanism for the project's maintainers to see,
-moderate, or shut down any individual deployment — each node runs entirely under the control of
+moderate, or shut down any individual deployment: each node runs entirely under the control of
 whoever starts it. That means responsibility for a given deployment sits with its operator: the person
 running a node decides who can join and what's enforced (moderation, message retention, the emergency
 data wipe), and is responsible for that node's use complying with applicable law.

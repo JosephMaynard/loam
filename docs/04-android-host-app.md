@@ -488,14 +488,17 @@ found; Step 2 says "Finding the hotspot's address…" meanwhile, and gives the m
 never is). When the hotspot can't start, `HostPanel` shows the error in Step 1 while keeping Step 2 with
 the launcher-reported LAN address (graceful degradation).
 
-**Left-on-display controls** (both optional, both in the overlay): **Keep screen on** holds an
-`expo-keep-awake` lock while enabled — for a host taped to a wall showing the join QRs. **Kiosk mode**
-enters Android **screen pinning** (`Activity.startLockTask()`, exposed from `LoamHotspotModule` as
-`startKiosk`/`stopKiosk` and driven by an effect in `index.tsx`) so a passer-by can't wander into
-other apps. Without device-owner provisioning, leaving a pinned app uses the system exit gesture
-(**swipe up and hold** on gesture nav, or hold **Back + Recents** on 3-button nav), which demands the
-phone's own screen-lock PIN when one is set — so the host must set a device PIN first. Both native calls are best-effort no-ops when unsupported and never throw; the pin is
-released on unmount. The overlay also shows the app **version** (`Constants.expoConfig?.version`).
+**Display mode** (one button on the share screen; it replaced the earlier separate "Keep screen on" and
+"Kiosk mode" switches in 0.6.0): shows the join codes full screen, as large as the screen allows with no
+scrolling (one code in Wi-Fi mode; two on a hotspot, side by side in landscape), holds an
+`expo-keep-awake` lock so the screen stays on, and pins LOAM in front with Android **screen pinning**
+(`Activity.startLockTask()`, exposed from `LoamHotspotModule` as `startKiosk`/`stopKiosk`). Leaving it
+takes a press-and-hold; without device-owner provisioning Android also offers its own exit gesture
+(**swipe up and hold** on gesture nav, or hold **Back + Recents** on 3-button nav), which asks for the
+phone's screen-lock PIN when one is set, so a host left out in public should set a device PIN first. The
+network keeps running with the screen off either way; the screen only stays on so the codes can be seen.
+Both native calls are best-effort no-ops when unsupported and never throw; the pin is released on
+unmount. The overlay also shows the app **version** (`Constants.expoConfig?.version`).
 
 ## QR codes (mostly already solved)
 

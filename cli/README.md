@@ -1,6 +1,6 @@
 # loamnet
 
-Run a local, off-grid [LOAM](https://github.com/MagicZebraLtd/loam) messaging node from your terminal. One command starts a server and an installable web app (a PWA); anyone on the same network scans the printed QR code to join. No internet, no accounts, no cloud.
+Run a local, off-grid [LOAM](https://github.com/MagicZebraLtd/loam) messaging node from your terminal. One command starts a server and a web app; anyone on the same network scans the printed QR code to join. No internet, no accounts, no cloud.
 
 LOAM is local communication for places where the internet is missing, overloaded, or simply not the right tool: a festival or conference, a boat or campsite, a community space, or a neighbourhood during an outage. The host runs a node; nearby people join over the LAN and can post to channels, reply in threads, send direct messages, react, and share images. Identities are anonymous and ephemeral, and everything stays on your machine and your local network.
 
@@ -71,7 +71,7 @@ The default database driver is Node's built in `node:sqlite`, so a plain node ne
 ## What you get
 
 - Channels, threaded replies, direct messages, reactions, and image attachments.
-- An installable PWA that keeps working offline against its local cache.
+- A web app that caches what it has seen and reconnects by itself when the network comes back. On a plain-HTTP LAN address browsers do not offer installation or full offline mode; that needs a secure origin.
 - Optional database encryption at rest.
 - A node that never reaches the internet: all traffic stays on the local network.
 

@@ -17,9 +17,17 @@ loamnet/
 └─ client/              # the built PWA (apps/client/dist), served offline over the LAN
 ```
 
-`npm pack` produces a ~0.6 MB tarball (~2.9 MB unpacked). There are **no regular runtime
-dependencies**: the default database driver is the built-in `node:sqlite` (Node ≥22), so a plain
+`npm pack` produces a ~1 MB tarball (~4.5 MB unpacked; the figure moves with the client build). There are **no regular runtime
+dependencies**: the default database driver is the built-in `node:sqlite` (Node 22.14 or newer; `loam` refuses to start on an older Node with a plain message), so a plain
 `npm install -g loamnet` needs **no node-gyp / no native build**.
+
+## What the command shows
+
+In a terminal, `loam` opens a full-screen terminal UI (`@loam/tui`): the join QR stays on screen, with
+Activity, People, Settings and Debug screens a key away, a one-time "open as admin" code (`o`), live
+settings, Emergency Reset, and a kiosk mode (`loam --kiosk`, a password-locked screen that shows only
+the QR). Without a terminal on both ends (a service, a pipe, `--plain`) it prints the join address, the
+QR and a one-time admin link instead. The web app, messages and moderation stay in the browser.
 
 ## How it's built
 

@@ -1,7 +1,7 @@
 # 29 — Next phase: stabilize, prove, then extend
 
-**Status: plan of record for the post-v0.4.0 phase — revision 2, incorporating Sol's full-codebase
-review (2026-08-15, `sol-review/REVIEW-RESULT-full-codebase-2026-08-15.md`).** Successor to `docs/27`
+**Status: historical. This was the plan of record for the post-v0.4.0 phase (revision 2, incorporating Sol's full-codebase
+review (2026-08-15, `sol-review/REVIEW-RESULT-full-codebase-2026-08-15.md`)).** Successor to `docs/27`
 (Path to MVP). Every open item in the consolidated backlog (`docs/25`) is dispositioned in §5 so
 nothing is silently lost. Sizes use the `docs/25` key (S ≈ hours–1d · M ≈ days · L ≈ 1–2wk ·
 epic ≈ multi-session).
