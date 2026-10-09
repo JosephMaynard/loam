@@ -523,7 +523,7 @@ describe("read markers use server timestamps (review 2026-09-25)", () => {
 
 describe("messageCacheOverflow (the per-conversation on-disk cap)", () => {
   it("keeps the newest N per conversation and drops the rest, with the reactions on them", () => {
-    const channel = [post("c1", 100), post("c2", 200), reply("c3", 300, "c1"), post("c4", 400)];
+    const channel = [post("c1", 100), post("c2", 200), post("c3", 300), post("c4", 400)];
     const dms = [dm("d1", 110, "user.peer", ME), dm("d2", 120, ME, "user.peer"), dm("d3", 130, "user.peer", ME)];
     const reactions = [reaction("r-old", 500, "c1", "👍", ME), reaction("r-new", 500, "c4", "👍", ME)];
     // Deliberately out of order: the helper must not rely on the array being sorted.
@@ -542,6 +542,58 @@ describe("messageCacheOverflow (the per-conversation on-disk cap)", () => {
   it("counts the two directions of one DM as one conversation", () => {
     const thread = [dm("a", 1, ME, "user.peer"), dm("b", 2, "user.peer", ME), dm("c", 3, ME, "user.peer")];
     expect(messageCacheOverflow(thread, ME, 2)).toEqual(new Set(["a"]));
+  });
+
+  it("keeps the root of a kept reply even when the root is older than the newest N (default 500)", () => {
+    // One thread: a root and 500 newer replies. By age alone the root is the one message past the cap, yet
+    // the conversation view reaches a reply only through its root, so caching the replies without it would
+    // leave 500 unreachable orphans on disk.
+    const root = post("root", 0);
+    const replies = Array.from({ length: 500 }, (_, index) => reply(`reply${index}`, index + 1, "root"));
+    const onRoot = reaction("on-root", 600, "root", "👍", ME);
+    const history = [...replies, onRoot, root];
+
+    const overflow = messageCacheOverflow(history, ME);
+    expect(overflow.size).toBe(0);
+
+    // What the cache keeps still renders as a thread with the real grouping helpers.
+    const cached = history.filter((message) => !overflow.has(message.id));
+    expect(topLevelMessages(cached, CHANNEL).map((message) => message.id)).toEqual(["root"]);
+    expect(repliesFor(groupRepliesByParent(cached).get("root") ?? [], "root")).toHaveLength(500);
+  });
+
+  it("evicts an old root together with its replies once every reply is past the cap, reactions on both included", () => {
+    const history = [
+      post("old-root", 0),
+      reply("old-reply1", 1, "old-root"),
+      reply("old-reply2", 2, "old-root"),
+      reaction("on-old-root", 3, "old-root", "👍", ME),
+      reaction("on-old-reply", 4, "old-reply1", "❤️", "user.peer"),
+      post("n1", 10),
+      post("n2", 11),
+      post("n3", 12),
+    ];
+
+    const overflow = messageCacheOverflow(history, ME, 3);
+    expect([...overflow].sort()).toEqual(["old-reply1", "old-reply2", "old-root", "on-old-reply", "on-old-root"]);
+  });
+
+  it("protects only the roots of kept replies: other old posts and other conversations still trim to the cap", () => {
+    const history = [
+      post("threaded-root", 0),
+      post("plain-old", 1),
+      post("n1", 10),
+      post("n2", 11),
+      reply("fresh-reply", 12, "threaded-root"),
+      dm("d-old", 1, ME, "user.peer"),
+      dm("d-new1", 2, "user.peer", ME),
+      dm("d-new2", 3, ME, "user.peer"),
+      dm("d-new3", 4, "user.peer", ME),
+    ];
+
+    // The channel keeps n1, n2, fresh-reply (the newest 3) plus threaded-root: a one-message overshoot. The DM
+    // has no threads, so it trims to exactly 3.
+    expect([...messageCacheOverflow(history, ME, 3)].sort()).toEqual(["d-old", "plain-old"]);
   });
 });
 

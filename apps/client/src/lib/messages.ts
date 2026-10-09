@@ -539,9 +539,9 @@ export function countUnreadByConversation(
 }
 
 /**
- * How many posts/replies (or DMs) of one conversation the on-disk cache keeps: the newest this many. Older
- * ones stay available from the node; a device that never reloads a 20 000-message channel into IndexedDB
- * boots faster and leaves less behind.
+ * How many posts/replies (or DMs) of one conversation the on-disk cache keeps: the newest this many, plus
+ * the root post of every kept reply (see `messageCacheOverflow`). Older ones stay available from the node; a
+ * device that never reloads a 20 000-message channel into IndexedDB boots faster and leaves less behind.
  */
 export const MESSAGE_CACHE_LIMIT_PER_CONVERSATION = 500;
 
@@ -550,6 +550,13 @@ export const MESSAGE_CACHE_LIMIT_PER_CONVERSATION = 500;
  * posts/replies/DMs, plus the reactions targeting those (a reaction has no conversation of its own and would
  * otherwise outlive its target). The in-memory history is left alone; this only decides what is written to
  * and kept in IndexedDB.
+ *
+ * Threads are kept whole from the top: a root post whose reply is kept is kept too, however old the root is,
+ * so a busy thread may push a conversation a few messages over the cap. The conversation view reaches a reply
+ * only through its root (`topLevelMessages` + `groupRepliesByParent`), so a cached reply without its root
+ * would be an unreachable orphan on disk. The rule runs the other way as well: a root is evicted once every
+ * reply under it is, and its reactions go with it like any evicted message's. Replies are one level deep (the
+ * node refuses a reply to a reply), so a kept reply protects exactly its root.
  *
  * @param messages - The whole in-memory history (any order).
  * @param currentUserId - The signed-in user's id (resolves which DM a message belongs to).
@@ -594,11 +601,21 @@ export function messageCacheOverflow(
     }
   }
 
-  if (overflow.size) {
-    for (const message of messages) {
-      if (message.type === "reaction" && overflow.has(message.targetMessageId)) {
-        overflow.add(message.id);
-      }
+  if (overflow.size === 0) {
+    return overflow;
+  }
+
+  // A kept reply keeps its root. Roots are posts, never replies, so taking one out of the overflow changes no
+  // reply's verdict and a single pass is exact.
+  for (const message of messages) {
+    if (message.type === "channelReply" && !overflow.has(message.id)) {
+      overflow.delete(message.parentMessageId);
+    }
+  }
+
+  for (const message of messages) {
+    if (message.type === "reaction" && overflow.has(message.targetMessageId)) {
+      overflow.add(message.id);
     }
   }
 

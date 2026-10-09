@@ -773,7 +773,8 @@ function LoamApp() {
   /**
    * Write `written` to the message cache, less whatever lies past the per-conversation cap given the full
    * history `all`, and delete from disk what has just crossed it: the newest 500 of each channel or DM stay
-   * cached, older ones are the node's to serve again.
+   * cached (plus the root of every cached reply), older ones are the node's to serve again. A message pruned
+   * earlier that the cap keeps again (a reply just arrived under an old root) goes back on disk from `all`.
    */
   const persistMessages = useCallback((all: Message[], written: Message[]) => {
     const overflow = messageCacheOverflow(all, currentUserIdRef.current);
@@ -784,6 +785,27 @@ function LoamApp() {
       if (!overflow.has(message.id)) {
         pruned.delete(message.id);
         toWrite.push(message);
+      }
+    }
+
+    const restore = new Set<string>();
+
+    for (const id of pruned) {
+      if (!overflow.has(id)) {
+        restore.add(id);
+      }
+    }
+
+    if (restore.size) {
+      for (const message of all) {
+        if (restore.has(message.id)) {
+          toWrite.push(message);
+        }
+      }
+
+      // Whether found in `all` or long gone from memory, none of these is a pruned record any more.
+      for (const id of restore) {
+        pruned.delete(id);
       }
     }
 
