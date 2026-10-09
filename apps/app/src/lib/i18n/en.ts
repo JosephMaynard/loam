@@ -159,6 +159,8 @@ export const en = {
   "common.dismiss": "Dismiss",
   "common.unknownError": "unknown error",
   "common.unknown": "unknown",
+  "qr.unavailable": "QR code unavailable: use the text below.",
+  "qr.label": "QR code: {value}",
   // The host screen while the embedded server boots, and its recovery screens (src/app/index.tsx).
   "boot.notAndroid": "The embedded host runs on Android. Build and install the APK on a device to run it.",
   "boot.startupTimeout": "The embedded server is taking too long to start. Close and reopen the app.",

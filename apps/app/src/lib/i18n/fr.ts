@@ -154,6 +154,8 @@ export const fr: Partial<AppCatalog> = {
   "common.dismiss": "Ignorer",
   "common.unknownError": "erreur inconnue",
   "common.unknown": "inconnu",
+  "qr.unavailable": "Code QR indisponible : utilisez le texte ci-dessous.",
+  "qr.label": "Code QR : {value}",
   "boot.notAndroid": "L'hôte embarqué fonctionne sur Android. Compilez et installez l'APK sur un appareil pour le lancer.",
   "boot.startupTimeout": "Le serveur embarqué met trop de temps à démarrer. Fermez l'application et rouvrez-la.",
   "boot.keyClearUnknown": "Erreur inconnue lors de la suppression de la clé de chiffrement de l'appareil.",

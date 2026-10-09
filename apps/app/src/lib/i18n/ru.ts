@@ -154,6 +154,8 @@ export const ru: Partial<AppCatalog> = {
   "common.dismiss": "Скрыть",
   "common.unknownError": "неизвестная ошибка",
   "common.unknown": "неизвестно",
+  "qr.unavailable": "QR-код недоступен: используйте текст ниже.",
+  "qr.label": "QR-код: {value}",
   "boot.notAndroid": "Встроенный хост работает на Android. Чтобы его запустить, соберите и установите APK на устройство.",
   "boot.startupTimeout": "Встроенный сервер запускается слишком долго. Закройте приложение и откройте его снова.",
   "boot.keyClearUnknown": "Неизвестная ошибка при удалении ключа шифрования устройства.",

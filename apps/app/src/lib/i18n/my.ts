@@ -154,6 +154,8 @@ export const my: Partial<AppCatalog> = {
   "common.dismiss": "ပယ်ရန်",
   "common.unknownError": "အမည်မသိ အမှား",
   "common.unknown": "မသိရ",
+  "qr.unavailable": "QR ကုဒ် မရနိုင်ပါ: အောက်ပါ စာသားကို သုံးပါ။",
+  "qr.label": "QR ကုဒ်: {value}",
   "boot.notAndroid": "မြှုပ်သွင်းထားသော လက်ခံစက်သည် Android ပေါ်တွင် လည်ပတ်သည်။ လည်ပတ်ရန် APK ကို တည်ဆောက်ပြီး စက်တစ်လုံးတွင် ထည့်သွင်းပါ။",
   "boot.startupTimeout": "မြှုပ်သွင်းထားသော ဆာဗာ စတင်ရန် အချိန်ကြာလွန်းနေသည်။ အက်ပ်ကို ပိတ်ပြီး ပြန်ဖွင့်ပါ။",
   "boot.keyClearUnknown": "စက်၏ ကုဒ်ဝှက်သော့ကို ရှင်းလင်းစဉ် အမည်မသိ အမှား။",

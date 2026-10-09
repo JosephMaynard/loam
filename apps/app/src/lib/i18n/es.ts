@@ -154,6 +154,8 @@ export const es: Partial<AppCatalog> = {
   "common.dismiss": "Descartar",
   "common.unknownError": "error desconocido",
   "common.unknown": "desconocido",
+  "qr.unavailable": "Código QR no disponible: usa el texto de abajo.",
+  "qr.label": "Código QR: {value}",
   "boot.notAndroid": "El anfitrión integrado funciona en Android. Compila e instala el APK en un dispositivo para ejecutarlo.",
   "boot.startupTimeout": "El servidor integrado tarda demasiado en iniciarse. Cierra la aplicación y vuelve a abrirla.",
   "boot.keyClearUnknown": "Error desconocido al eliminar la clave de cifrado del dispositivo.",

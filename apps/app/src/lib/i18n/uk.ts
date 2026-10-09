@@ -154,6 +154,8 @@ export const uk: Partial<AppCatalog> = {
   "common.dismiss": "Приховати",
   "common.unknownError": "невідома помилка",
   "common.unknown": "невідомо",
+  "qr.unavailable": "QR-код недоступний: скористайтеся текстом нижче.",
+  "qr.label": "QR-код: {value}",
   "boot.notAndroid": "Вбудований хост працює на Android. Щоб його запустити, зберіть і встановіть APK на пристрій.",
   "boot.startupTimeout": "Вбудований сервер запускається надто довго. Закрийте застосунок і відкрийте його знову.",
   "boot.keyClearUnknown": "Невідома помилка під час видалення ключа шифрування пристрою.",

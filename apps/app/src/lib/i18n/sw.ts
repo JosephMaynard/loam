@@ -154,6 +154,8 @@ export const sw: Partial<AppCatalog> = {
   "common.dismiss": "Funga",
   "common.unknownError": "hitilafu isiyojulikana",
   "common.unknown": "haijulikani",
+  "qr.unavailable": "Msimbo wa QR haupatikani: tumia maandishi yaliyo hapa chini.",
+  "qr.label": "Msimbo wa QR: {value}",
   "boot.notAndroid": "Mwenyeji aliyejengwa ndani hufanya kazi kwenye Android. Jenga na usakinishe APK kwenye kifaa ili kumwendesha.",
   "boot.startupTimeout": "Seva iliyojengwa ndani inachukua muda mrefu mno kuanza. Funga programu kisha uifungue tena.",
   "boot.keyClearUnknown": "Hitilafu isiyojulikana wakati wa kufuta ufunguo wa usimbaji wa kifaa.",

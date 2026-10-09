@@ -154,6 +154,8 @@ export const pt: Partial<AppCatalog> = {
   "common.dismiss": "Dispensar",
   "common.unknownError": "erro desconhecido",
   "common.unknown": "desconhecido",
+  "qr.unavailable": "Código QR indisponível: use o texto abaixo.",
+  "qr.label": "Código QR: {value}",
   "boot.notAndroid": "O anfitrião integrado funciona no Android. Compile e instale o APK em um dispositivo para executá-lo.",
   "boot.startupTimeout": "O servidor integrado está demorando demais para iniciar. Feche e abra o app de novo.",
   "boot.keyClearUnknown": "Erro desconhecido ao remover a chave de criptografia do dispositivo.",

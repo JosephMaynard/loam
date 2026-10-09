@@ -154,6 +154,8 @@ export const ar: Partial<AppCatalog> = {
   "common.dismiss": "تجاهل",
   "common.unknownError": "خطأ غير معروف",
   "common.unknown": "غير معروف",
+  "qr.unavailable": "رمز QR غير متاح: استخدم النص أدناه.",
+  "qr.label": "رمز QR: {value}",
   "boot.notAndroid": "يعمل المضيف المضمّن على Android. ابنِ ملف APK وثبّته على جهاز لتشغيله.",
   "boot.startupTimeout": "يستغرق الخادم المضمّن وقتًا طويلًا جدًا للبدء. أغلق التطبيق ثم افتحه مجددًا.",
   "boot.keyClearUnknown": "خطأ غير معروف أثناء حذف مفتاح تشفير الجهاز.",

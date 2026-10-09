@@ -154,6 +154,8 @@ export const tr: Partial<AppCatalog> = {
   "common.dismiss": "Kapat",
   "common.unknownError": "bilinmeyen hata",
   "common.unknown": "bilinmiyor",
+  "qr.unavailable": "QR kodu kullanılamıyor: aşağıdaki metni kullanın.",
+  "qr.label": "QR kodu: {value}",
   "boot.notAndroid": "Gömülü sunucu Android'de çalışır. Çalıştırmak için APK'yı derleyip bir cihaza kurun.",
   "boot.startupTimeout": "Gömülü sunucunun başlaması çok uzun sürüyor. Uygulamayı kapatıp yeniden açın.",
   "boot.keyClearUnknown": "Cihaz şifreleme anahtarı temizlenirken bilinmeyen hata.",

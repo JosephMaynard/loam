@@ -154,6 +154,8 @@ export const prs: Partial<AppCatalog> = {
   "common.dismiss": "بستن",
   "common.unknownError": "خطای نامعلوم",
   "common.unknown": "نامعلوم",
+  "qr.unavailable": "کد QR در دسترس نیست: از متن پایین استفاده کنید.",
+  "qr.label": "کد QR: {value}",
   "boot.notAndroid": "میزبان تعبیه‌شده روی اندروید اجرا می‌شود. برای اجرای آن، APK را بسازید و روی یک دستگاه نصب کنید.",
   "boot.startupTimeout": "آغاز سرور تعبیه‌شده بیش از حد طول کشیده است. برنامه را ببندید و دوباره باز کنید.",
   "boot.keyClearUnknown": "خطای نامعلوم در پاک کردن کلید رمزگذاری دستگاه.",

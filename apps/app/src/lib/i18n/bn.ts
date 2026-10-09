@@ -154,6 +154,8 @@ export const bn: Partial<AppCatalog> = {
   "common.dismiss": "সরিয়ে দিন",
   "common.unknownError": "অজানা ত্রুটি",
   "common.unknown": "অজানা",
+  "qr.unavailable": "QR কোড পাওয়া যাচ্ছে না: নিচের লেখাটি ব্যবহার করুন।",
+  "qr.label": "QR কোড: {value}",
   "boot.notAndroid": "এমবেডেড হোস্ট অ্যান্ড্রয়েডে চলে। চালাতে APK তৈরি করে একটি ডিভাইসে ইনস্টল করুন।",
   "boot.startupTimeout": "এমবেডেড সার্ভার চালু হতে বেশি সময় নিচ্ছে। অ্যাপ বন্ধ করে আবার খুলুন।",
   "boot.keyClearUnknown": "ডিভাইসের এনক্রিপশন চাবি মুছতে অজানা ত্রুটি।",

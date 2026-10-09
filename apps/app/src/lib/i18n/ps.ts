@@ -154,6 +154,8 @@ export const ps: Partial<AppCatalog> = {
   "common.dismiss": "بندول",
   "common.unknownError": "نامعلومه تېروتنه",
   "common.unknown": "نامعلوم",
+  "qr.unavailable": "QR کوډ نشته: لاندې متن وکاروئ.",
+  "qr.label": "QR کوډ: {value}",
   "boot.notAndroid": "داخلي کوربه په اندروید چلېږي. د چلولو لپاره APK جوړ کړئ او په یوې وسیلې کې یې نصب کړئ.",
   "boot.startupTimeout": "داخلي سرور په پیلېدو ډېر وخت نیسي. اپ بند کړئ او بیا یې پرانیزئ.",
   "boot.keyClearUnknown": "د وسیلې د کوډ کولو کیلي په پاکولو کې نامعلومه تېروتنه.",

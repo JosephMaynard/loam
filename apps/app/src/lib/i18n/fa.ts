@@ -154,6 +154,8 @@ export const fa: Partial<AppCatalog> = {
   "common.dismiss": "بستن",
   "common.unknownError": "خطای ناشناخته",
   "common.unknown": "نامعلوم",
+  "qr.unavailable": "کد QR در دسترس نیست: از متن زیر استفاده کنید.",
+  "qr.label": "کد QR: {value}",
   "boot.notAndroid": "میزبان توکار روی اندروید اجرا می‌شود. برای اجرای آن، APK را بسازید و روی یک دستگاه نصب کنید.",
   "boot.startupTimeout": "راه‌اندازی سرور توکار بیش از حد طول کشیده است. برنامه را ببندید و دوباره باز کنید.",
   "boot.keyClearUnknown": "خطای ناشناخته در پاک کردن کلید رمزگذاری دستگاه.",

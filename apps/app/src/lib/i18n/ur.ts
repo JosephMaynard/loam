@@ -154,6 +154,8 @@ export const ur: Partial<AppCatalog> = {
   "common.dismiss": "ہٹائیں",
   "common.unknownError": "نامعلوم خرابی",
   "common.unknown": "نامعلوم",
+  "qr.unavailable": "QR کوڈ دستیاب نہیں: نیچے دیا گیا متن استعمال کریں۔",
+  "qr.label": "QR کوڈ: {value}",
   "boot.notAndroid": "ایمبیڈڈ میزبان اینڈرائیڈ پر چلتا ہے۔ اسے چلانے کے لیے APK بنا کر کسی ڈیوائس پر انسٹال کریں۔",
   "boot.startupTimeout": "ایمبیڈڈ سرور شروع ہونے میں بہت وقت لے رہا ہے۔ ایپ بند کر کے دوبارہ کھولیں۔",
   "boot.keyClearUnknown": "ڈیوائس کی انکرپشن کی کلید صاف کرنے میں نامعلوم خرابی۔",
