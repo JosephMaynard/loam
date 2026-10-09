@@ -19,17 +19,15 @@ import { LocationProvider, useLocation } from "preact-iso";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import loamMark from "./assets/loam.svg";
-import { AdminView } from "./components/AdminView";
 import { ConversationView } from "./components/ConversationView";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { lazyView } from "./components/LazyView";
 import { PinChangePrompt } from "./components/PinChangePrompt";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { Sidebar } from "./components/Sidebar";
 import { ToastStack, type ToastItem } from "./components/ToastStack";
-import { MeshView } from "./views/MeshView";
 import { PeopleView } from "./views/PeopleView";
-import { PrivacyView } from "./views/PrivacyView";
 import { RulesView } from "./views/RulesView";
 import { forgetRememberedSearch, SearchView } from "./views/SearchView";
 import { SettingsView } from "./views/SettingsView";
@@ -135,6 +133,11 @@ import {
 
 /** The node's bootstrap plus this browser's confirmed identity (see `lib/protocol.ts`). */
 type Config = ConfigResponse;
+
+/** Screens most people never open, each loaded into its own chunk on first use. */
+const AdminView = lazyView(() => import("./components/AdminView").then((module) => module.AdminView));
+const MeshView = lazyView(() => import("./views/MeshView").then((module) => module.MeshView));
+const PrivacyView = lazyView(() => import("./views/PrivacyView").then((module) => module.PrivacyView));
 
 const CURRENT_USER_KEY = "loam.currentUserId";
 const CURRENT_USER_CREATED_AT_KEY = "loam.currentUserCreatedAt";
