@@ -35,7 +35,11 @@ owner-only channel included; a peer message's `createdAt`/`editedAt` are **clamp
 five minutes** (never refused for skew: off-grid clocks drift; unclamped, a far-future stamp would sort
 newest forever and never expire under retention, and a far-future `editedAt` would win every later edit);
 **channel imports are capped** at 200 new channels a round and 2 000 channels of synced origin in all
-(`synced_channels`; past either, the rest are skipped and the round logs once), and edits
+(`synced_channels`; past either, the rest are skipped and the round logs once). The digest lists a message by
+id alone, so a message in a channel the per-round cap put off is still fetched that round; it is *deferred*,
+not remembered as refused, and the round that imports its channel fetches it again. A message in a channel
+beyond the node-wide ceiling, like one in a channel the peer never listed, is refused and remembered (see
+*Refused offers*). Edits
 apply only when
 strictly newer **and only to the same message** — an incoming record that reuses an existing id must match
 its type, author, `createdAt` and routing (channel / parent / target), checked before any attachment is
@@ -98,7 +102,8 @@ sealed id this node fetched or received, whatever became of it, goes into a dura
 either digest list, nor imported as a channel (docs/16 §9). The mark also carries the mail's replay key, so
 the same mail re-offered under a fresh id is fetched but never carried. A round imports its sealed batches
 only after its last request to every peer, so the request timing can't show which batches held local mail. A reply/reaction whose
-parent/target is still on offer this round is deferred, not remembered. Refused replies are cached, not
+parent/target is still on offer this round is deferred, not remembered, and so is a message whose channel the
+per-round channel cap put off to a later round. Refused replies are cached, not
 tombstoned: a tombstone is node-wide and durable, and the id is peer-chosen. The kill switch clears it; a
 restart re-fetches each refused public offer once. A change to the local policy that decided a refusal also
 clears it (`forgetRefusedOffers()`, which keeps the transport sessions and downgrade history): every admin

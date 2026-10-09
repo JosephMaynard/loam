@@ -1119,19 +1119,34 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   type ImportVerdict = "import" | "refuse" | "defer";
 
   /**
+   * What a round has still to take in from a peer, so a record that is merely EARLY is deferred (fetched again
+   * next round) rather than refused and remembered for {@link REFUSED_TTL_MS}.
+   */
+  type PendingOffers = {
+    /** Every message id the round asked the peer for: a reply parent or reaction target among them may land
+     *  in a later batch of the same round. */
+    ids: ReadonlySet<string>;
+    /** Public channels the digest listed that the per-round channel cap put off to a later round. The digest
+     *  names a message by id alone, so their messages are fetched regardless; they can land once their channel
+     *  has. Channels beyond the node-wide ceiling are NOT here: those won't import next round either. */
+    deferredChannelIds: ReadonlySet<string>;
+  };
+
+  /**
    * Every check a public-arm peer message (post / reply / reaction) must pass to land here, against the node's
    * CURRENT state. Synchronous on purpose: `importPeerMessages` runs it before the attachment work and again
    * right before committing, after every await (review 2026-09-25 #3) — a moderator removal, a delete, an
    * archive, a policy change or a parent removal that lands while attachments are in flight must win, and a
    * moderator removal is an in-place edit that a reference-equality check alone can't see.
    *
-   * "defer" means the reply parent / reaction target hasn't arrived YET but is still on offer this round.
+   * "defer" means the message is only early: its reply parent / reaction target hasn't arrived YET but is still
+   * on offer this round, or its channel was put off to a later round by the per-round channel cap.
    */
   function vetPeerImport(
     message: Message,
     existing: Message | undefined,
     usersById: ReadonlyMap<string, User>,
-    pendingIds: ReadonlySet<string>,
+    pending: PendingOffers,
   ): ImportVerdict {
     if (message.type === "dm" || message.type === "sealed" || message.meta?.streaming || rt.tombstones.has(message.id)) {
       return "refuse";
@@ -1215,7 +1230,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
       // The reaction's target must exist locally and be public-audience (no DM/private targets). A target
       // still on offer this round may simply not have landed yet — retry next round, don't remember it.
       if (!target) {
-        return pendingIds.has(message.targetMessageId) && !rt.tombstones.has(message.targetMessageId) ? "defer" : "refuse";
+        return pending.ids.has(message.targetMessageId) && !rt.tombstones.has(message.targetMessageId) ? "defer" : "refuse";
       }
       if (rt.messageAudienceUserIds(message) !== undefined) {
         return "refuse";
@@ -1240,7 +1255,14 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
 
     const channel = rt.ensureChannel(message.channelId);
 
-    if (!channel || channel.visibility !== "public" || channel.archived) {
+    // No such channel here. One the digest listed but this round's channel cap put off is only early: defer the
+    // message (never remember it as refused), so the round that imports the channel fetches it again. A channel
+    // the peer never listed, or one beyond the node-wide ceiling, is a real refusal: nothing the next round does
+    // will make the message importable.
+    if (!channel) {
+      return pending.deferredChannelIds.has(message.channelId) ? "defer" : "refuse";
+    }
+    if (channel.visibility !== "public" || channel.archived) {
       return "refuse";
     }
 
@@ -1271,7 +1293,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
       const parent = rt.data.messages.find((candidate) => candidate.id === message.parentMessageId);
 
       if (!parent) {
-        return pendingIds.has(message.parentMessageId) && !rt.tombstones.has(message.parentMessageId) ? "defer" : "refuse";
+        return pending.ids.has(message.parentMessageId) && !rt.tombstones.has(message.parentMessageId) ? "defer" : "refuse";
       }
       if (parent.type !== "channelPost" || parent.channelId !== message.channelId) {
         return "refuse";
@@ -1338,16 +1360,17 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
    * commit, after the last await — so a moderator removal, delete or policy change that landed meanwhile
    * wins, and whatever the discarded import wrote is removed ({@link discardImportedAttachments}).
    *
-   * Returns the number imported plus the ids refused only because their reply parent / reaction target
-   * hasn't arrived YET but is still on offer this round (`pendingIds`) — the caller must not remember those
-   * as refused; everything else this batch asked for and didn't end up holding is a real refusal.
+   * Returns the number imported plus the ids skipped only because they are early (`pending`): their reply
+   * parent / reaction target hasn't arrived YET but is still on offer this round, or their channel waits for a
+   * later round's channel cap. The caller must not remember those as refused; everything else this batch asked
+   * for and didn't end up holding is a real refusal.
    */
   async function importPeerMessages(
     peerUrl: string,
     messages: Message[],
     users: User[],
     generation: number,
-    pendingIds: ReadonlySet<string>,
+    pending: PendingOffers,
     batch: { ids: ReadonlySet<string>; kind: "public" | "sealed"; seenAt: number },
     meter?: { wastedBytes: number },
   ): Promise<{ imported: number; deferred: Set<string> }> {
@@ -1381,7 +1404,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
       const message = clampPeerStamps(offered, stampHorizon);
 
       const existing = rt.data.messages.find((candidate) => candidate.id === message.id);
-      const verdict = vetPeerImport(message, existing, usersById, pendingIds);
+      const verdict = vetPeerImport(message, existing, usersById, pending);
       if (verdict !== "import") {
         if (verdict === "defer") {
           deferred.add(message.id);
@@ -1417,7 +1440,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
       // its parent may be gone; the channel may have been archived or locked. Any of those discards the
       // import (the caller then remembers it as refused) together with the files it wrote.
       const current = rt.data.messages.find((candidate) => candidate.id === message.id);
-      if (current !== existing || vetPeerImport(message, existing, usersById, pendingIds) !== "import") {
+      if (current !== existing || vetPeerImport(message, existing, usersById, pending) !== "import") {
         await discardImportedAttachments(message, written);
         if (rt.wipeGeneration !== generation) {
           return { imported, deferred };
@@ -1485,7 +1508,12 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
       }
 
       let newChannels = 0;
-      let channelsOverCap = 0;
+      let channelsOverCeiling = 0;
+      // The channels the per-round cap put off to a later round. The digest lists a message by id alone, so
+      // their messages are fetched this round anyway; `vetPeerImport` defers (never remembers as refused) a
+      // message whose channel is in here, and the round that imports the channel fetches it again. At most
+      // ten rounds of this (the ceiling is 2 000) before the rest become refusals like any unknown channel's.
+      const deferredChannelIds = new Set<string>();
       for (const channel of digest.channels) {
         if (channel.visibility !== "public") {
           continue;
@@ -1513,9 +1541,16 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
           if (channel.archived) {
             continue;
           }
-          // Bounded: so many new channels a round, so many of synced origin in all (see the constants).
-          if (newChannels >= MAX_NEW_CHANNELS_PER_ROUND || rt.syncedChannelIds.size >= MAX_SYNCED_CHANNELS) {
-            channelsOverCap += 1;
+          // Bounded: so many new channels a round, so many of synced origin in all (see the constants). The
+          // ceiling is checked first: a channel beyond it won't import next round either, so its messages are
+          // refused and remembered like any unknown channel's, while one the per-round cap puts off is only
+          // early and its messages are deferred (`deferredChannelIds`).
+          if (rt.syncedChannelIds.size >= MAX_SYNCED_CHANNELS) {
+            channelsOverCeiling += 1;
+            continue;
+          }
+          if (newChannels >= MAX_NEW_CHANNELS_PER_ROUND) {
+            deferredChannelIds.add(channel.id);
             continue;
           }
           newChannels += 1;
@@ -1577,9 +1612,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
         Object.assign(existing, merged);
         rt.broadcast({ type: "channelUpserted", channel: existing });
       }
-      if (channelsOverCap) {
+      if (deferredChannelIds.size || channelsOverCeiling) {
         rt.log.warn(
-          `Sync: peer ${peer.url} listed ${channelsOverCap} new channel(s) beyond the import cap (${MAX_NEW_CHANNELS_PER_ROUND} a round, ${MAX_SYNCED_CHANNELS} of synced origin in all); skipped this round`,
+          `Sync: peer ${peer.url} listed ${deferredChannelIds.size + channelsOverCeiling} new channel(s) beyond the import cap: ${deferredChannelIds.size} wait for a later round (${MAX_NEW_CHANNELS_PER_ROUND} a round), ${channelsOverCeiling} exceed the ${MAX_SYNCED_CHANNELS} channels of synced origin this node holds in all`,
         );
       }
 
@@ -1668,11 +1703,12 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
         }
       }
 
-      const pendingIds: ReadonlySet<string> = new Set(offers.keys());
+      const pending: PendingOffers = { ids: new Set(offers.keys()), deferredChannelIds };
 
       /** After a batch: remember, per peer, every PUBLIC offer it asked for and didn't end up holding (unless it
-       *  was only deferred for a parent/target still on offer), so the next round doesn't fetch it again — and
-       *  record every SEALED offer it asked for as seen, whatever its outcome (see the sealed pull above). */
+       *  was only deferred: a parent/target still on offer, or a channel waiting for a later round), so the next
+       *  round doesn't fetch it again — and record every SEALED offer it asked for as seen, whatever its outcome
+       *  (see the sealed pull above). */
       const settleBatch = (ids: string[], deferred: ReadonlySet<string>) => {
         const settledAt = Date.now();
         const held = new Map(rt.data.messages.map((message) => [message.id, message]));
@@ -1764,7 +1800,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
           return { imported: 0 };
         }
         const wastedBefore = meter.wastedBytes;
-        const result = await importPeerMessages(peer.url, payload.messages, payload.users, generation, pendingIds, {
+        const result = await importPeerMessages(peer.url, payload.messages, payload.users, generation, pending, {
           ids: new Set(ids),
           kind,
           seenAt: now,
@@ -1831,7 +1867,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
               if (rt.wipeGeneration !== generation) {
                 return;
               }
-              const result = await importPeerMessages(peer.url, payload.messages, payload.users, generation, pendingIds, {
+              const result = await importPeerMessages(peer.url, payload.messages, payload.users, generation, pending, {
                 ids: new Set(ids),
                 kind: "sealed",
                 seenAt: now,

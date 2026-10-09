@@ -64,7 +64,6 @@ type FakePeer = { url: string; requests: { path: string; body: unknown }[] };
 async function fakePeer(respond: (path: string, body: unknown) => unknown): Promise<FakePeer> {
   const requests: FakePeer["requests"] = [];
   const server = createServer((req, res) => {
-    req.socket.on("error", () => undefined);
     res.on("error", () => undefined);
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -83,6 +82,8 @@ async function fakePeer(respond: (path: string, body: unknown) => unknown): Prom
       }
     });
   });
+  // Once per connection, not per request: a keep-alive socket carries a whole test's requests.
+  server.on("connection", (socket) => socket.on("error", () => undefined));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, requests };
@@ -116,11 +117,15 @@ function post(id: string, body: string, overrides: Record<string, unknown> = {})
   return { id, type: "channelPost", authorId: PEER_AUTHOR.id, channelId: "general", createdAt: 1_000, body, ...overrides };
 }
 
-/** A peer serving `records()` as its public offer, with `users` beside them. */
-async function recordsPeer(records: () => Record<string, unknown>[], users: () => unknown[] = () => [PEER_AUTHOR]): Promise<FakePeer> {
+/** A peer serving `records()` as its public offer, with `users` beside them and `channels()` in its digest. */
+async function recordsPeer(
+  records: () => Record<string, unknown>[],
+  users: () => unknown[] = () => [PEER_AUTHOR],
+  channels: () => unknown[] = () => [],
+): Promise<FakePeer> {
   return fakePeer((path, body) => {
     if (path === "/api/sync/digest") {
-      return { channels: [], messages: records().map((record) => ({ id: record.id, ...(record.editedAt !== undefined ? { editedAt: record.editedAt } : {}) })) };
+      return { channels: channels(), messages: records().map((record) => ({ id: record.id, ...(record.editedAt !== undefined ? { editedAt: record.editedAt } : {}) })) };
     }
     if (path === "/api/sync/messages") {
       const ids = new Set((body as { ids: string[] }).ids);
@@ -169,14 +174,18 @@ describe("channel imports are bounded", () => {
     };
   }
 
+  /** The channel ids this node holds. */
+  function heldChannelIds(app: LoamApp): Set<string> {
+    return new Set(app.store.loadChannels().map((channel) => channel.id));
+  }
+
   it("takes at most 200 new channels a round and 2 000 of synced origin in all, logging once per round", async () => {
     const channels = Array.from({ length: 2_100 }, (_, index) => channelRecord(index));
-    const peer = await fakePeer((path) => {
-      if (path === "/api/sync/digest") {
-        return { channels, messages: [] };
-      }
-      return path === "/api/sync/messages" ? { messages: [], users: [] } : undefined;
-    });
+    // A post in the 2 100th channel: fetched again each round while its channel merely waits its turn,
+    // refused and remembered once the node-wide ceiling means the channel will never import.
+    const lastChannelId = channels[2_099]?.id as string;
+    const overCeiling = post("msg_over_ceiling", "in a channel beyond the ceiling", { channelId: lastChannelId });
+    const peer = await recordsPeer(() => [overCeiling], () => [PEER_AUTHOR], () => channels);
     const { app, logs } = await makeLoggedApp(syncConfig(peer.url));
     const { cookie } = await newSession(app);
     const synced = () => app.store.loadChannels().filter((channel) => channel.id.startsWith("chan_")).length;
@@ -185,16 +194,64 @@ describe("channel imports are bounded", () => {
     expect(await syncRound(app, cookie)).toBeUndefined();
     expect(synced()).toBe(200);
     expect(capWarnings()).toBe(1);
+    expect(requestedIds(peer)).toEqual(["msg_over_ceiling"]);
 
-    for (let round = 2; round <= 10; round += 1) {
+    for (let round = 2; round <= 9; round += 1) {
       expect(await syncRound(app, cookie)).toBeUndefined();
     }
+    // Round ten reaches the ceiling: the post's channel is now beyond it, so this fetch is the last.
+    let mark = peer.requests.length;
+    expect(await syncRound(app, cookie)).toBeUndefined();
     expect(synced()).toBe(2_000);
+    expect(requestedIds(peer, mark)).toEqual(["msg_over_ceiling"]);
+    expect(heldIds(app).has("msg_over_ceiling")).toBe(false);
 
-    // The node-wide ceiling: a further round takes none of the hundred still on offer.
+    // The node-wide ceiling: a further round takes none of the hundred still on offer, nor asks for the post again.
+    mark = peer.requests.length;
     expect(await syncRound(app, cookie)).toBeUndefined();
     expect(synced()).toBe(2_000);
     expect(capWarnings()).toBe(11);
+    expect(requestedIds(peer, mark)).toEqual([]);
+  });
+
+  it("fetches again, in the round that imports its channel, a message whose channel the per-round cap put off", async () => {
+    // 201 channels and one post in the last: round one imports 200 channels and fetches the post, which has
+    // no channel here yet. It must be deferred, not remembered as refused, or round two would import the
+    // channel and leave the post out for the hour the refused-offer memory lasts.
+    const channels = Array.from({ length: 201 }, (_, index) => channelRecord(index));
+    const lastChannelId = channels[200]?.id as string;
+    const inLast = post("msg_in_last_channel", "posted in the 201st channel", { channelId: lastChannelId });
+    const peer = await recordsPeer(() => [inLast], () => [PEER_AUTHOR], () => channels);
+    const { app } = await makeApp(syncConfig(peer.url));
+    const { cookie } = await newSession(app);
+
+    expect(await syncRound(app, cookie)).toBeUndefined();
+    expect(heldChannelIds(app).has(lastChannelId)).toBe(false);
+    expect(requestedIds(peer)).toEqual(["msg_in_last_channel"]);
+    expect(heldIds(app).has("msg_in_last_channel")).toBe(false);
+
+    const mark = peer.requests.length;
+    expect(await syncRound(app, cookie)).toBeUndefined();
+    expect(heldChannelIds(app).has(lastChannelId)).toBe(true);
+    expect(requestedIds(peer, mark)).toEqual(["msg_in_last_channel"]);
+    expect(heldIds(app).has("msg_in_last_channel")).toBe(true);
+  });
+
+  it("refuses, and remembers for the hour, a message in a channel the peer never listed", async () => {
+    const stray = post("msg_unlisted_channel", "into a channel this node has never heard of", { channelId: "chan_unlisted" });
+    const peer = await recordsPeer(() => [stray], () => [PEER_AUTHOR], () => [channelRecord(0)]);
+    const { app } = await makeApp(syncConfig(peer.url));
+    const { cookie } = await newSession(app);
+
+    expect(await syncRound(app, cookie)).toBeUndefined();
+    expect(heldChannelIds(app).has("chan_0000")).toBe(true);
+    expect(requestedIds(peer)).toEqual(["msg_unlisted_channel"]);
+    expect(heldIds(app).has("msg_unlisted_channel")).toBe(false);
+
+    const mark = peer.requests.length;
+    expect(await syncRound(app, cookie)).toBeUndefined();
+    expect(requestedIds(peer, mark)).toEqual([]);
+    expect(heldIds(app).has("msg_unlisted_channel")).toBe(false);
   });
 });
 
