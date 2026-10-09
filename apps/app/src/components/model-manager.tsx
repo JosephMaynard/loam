@@ -50,7 +50,7 @@ import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
 import {
   dispositionFromLoad,
   migrateLegacyCustomSourceUrls,
-  MODEL_LIST_UNREADABLE_MESSAGE,
+  modelListUnreadableMessage,
   mutateModelManagerState,
   pendingProtectedUris,
   readModelManagerState,
@@ -244,7 +244,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
             // `sweepReady`, so the "Preparing…" note clears while downloads stay gated by `loadFailed`.
             if (!cancelled) {
               setLoadFailed(true);
-              setStatusMessage(reconciled.message ?? MODEL_LIST_UNREADABLE_MESSAGE);
+              setStatusMessage(reconciled.message ?? modelListUnreadableMessage());
             }
             return;
           }
@@ -732,7 +732,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
                     })}
                   </ThemedText>
                   <ThemedText type="small" themeColor="textSecondary">
-                    {capabilities.acceleratorNote}
+                    {t('model.acceleratorNote')}
                   </ThemedText>
                 </ThemedView>
               ) : null}
@@ -900,9 +900,9 @@ function CatalogRow({
       <ThemedText type="small" themeColor="textSecondary">
         {entry.params} · {entry.quant} · {formatBytes(entry.sizeBytes)}
       </ThemedText>
-      {entry.note ? (
+      {entry.noteKey ? (
         <ThemedText type="small" themeColor="textSecondary">
-          {entry.note}
+          {t(entry.noteKey)}
         </ThemedText>
       ) : null}
       {ramVerdict === 'insufficient' ? (

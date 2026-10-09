@@ -5,6 +5,7 @@
 // JSON file is enough here (small, infrequently written); no AsyncStorage dependency needed.
 import * as FileSystem from 'expo-file-system/legacy';
 
+import { t } from '@/lib/i18n';
 import { isWithinModelsDir, redactCustomSourceUrl } from '@/lib/model-download';
 
 export type DownloadedModel = {
@@ -130,9 +131,11 @@ export async function loadModelManagerState(): Promise<ModelManagerState> {
 }
 
 /** Recovery copy surfaced when the manager can't read its state. No destructive action is taken,
- * so the message reassures the operator their model files are left untouched. */
-export const MODEL_LIST_UNREADABLE_MESSAGE =
-  "Couldn't read the model list: not touching your files. Reopen the model manager to try again.";
+ * so the message reassures the operator their model files are left untouched. A function, so it reads
+ * the language active when it is shown. */
+export function modelListUnreadableMessage(): string {
+  return t('model.listUnreadable');
+}
 
 /**
  * What the manager's open-effect should do given a load result: the state to adopt, whether the
@@ -151,7 +154,7 @@ export type ManagerLoadDisposition = {
 
 export function dispositionFromLoad(loaded: LoadModelManagerResult): ManagerLoadDisposition {
   if (loaded.status === 'error') {
-    return { state: EMPTY_STATE, canSweep: false, controlsBlocked: true, message: MODEL_LIST_UNREADABLE_MESSAGE };
+    return { state: EMPTY_STATE, canSweep: false, controlsBlocked: true, message: modelListUnreadableMessage() };
   }
   return {
     state: loaded.status === 'ok' ? loaded.state : EMPTY_STATE,

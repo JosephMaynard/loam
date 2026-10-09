@@ -852,7 +852,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       );
     } else {
       log.warn(
-        "Wipe resume: migrated a pre-round-8 `.loam-wipe-pending` marker to `.loam-wipe-phase=delete-pending`; " +
+        "Wipe resume: migrated a legacy `.loam-wipe-pending` marker to `.loam-wipe-phase=delete-pending`; " +
           "deletion will be re-run and verified before any device-key clear.",
       );
     }
@@ -1184,7 +1184,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
             log.warn(
               "Found a leftover pre-migration DB backup whose owning migration already SUCCEEDED (the live " +
                 "database opens under the current key) — discarding the stale backup and preserving the live " +
-                "database and its WAL rather than restoring the stale snapshot over it (RF6-b).",
+                "database and its WAL rather than restoring the stale snapshot over it.",
             );
           } else {
             // Genuine interrupted rekey (or a plaintext boot that can't probe): restore the intact single-
@@ -1599,7 +1599,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     }
     log.error(
       "Kill switch: failed to DURABLY persist config.json ahead of the encrypted wipe after a retry — giving up " +
-        "(the caller proceeds with the wipe regardless and reports a distinct notice)",
+        "(the caller refuses to finish the wipe and locks the node until a restart can restore config from the wipe journal)",
     );
     return false;
   }

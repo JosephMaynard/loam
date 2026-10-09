@@ -2,6 +2,8 @@ import { encodeQR, type QRErrorCorrectionLevel } from '@loam/qr';
 import { memo, useMemo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
+import { t } from '@/lib/i18n';
+
 type QRCodeProps = {
   /** The string to encode (a `WIFI:` payload or a URL). */
   value: string;
@@ -54,7 +56,7 @@ export const QRCode = memo(function QRCode({ value, size = 220, ecLevel }: QRCod
   if (!rows) {
     return (
       <View style={[styles.fallback, { width: size, height: size }]}>
-        <Text style={styles.fallbackText}>QR unavailable: use the text below</Text>
+        <Text style={styles.fallbackText}>{t('qr.unavailable')}</Text>
       </View>
     );
   }
@@ -67,7 +69,7 @@ export const QRCode = memo(function QRCode({ value, size = 220, ecLevel }: QRCod
   return (
     <View
       accessibilityRole="image"
-      accessibilityLabel={`QR code encoding ${value}`}
+      accessibilityLabel={t('qr.label', { value })}
       style={[styles.frame, { width: size, height: size, backgroundColor: LIGHT }]}>
       {rows.grid.map((row, y) => (
         // eslint-disable-next-line react/no-array-index-key -- rows are a fixed positional grid

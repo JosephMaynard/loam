@@ -7,9 +7,6 @@
     "icon": "./assets/images/loam-icon.png",
     "scheme": "loam",
     "userInterfaceStyle": "automatic",
-    "ios": {
-      "icon": "./assets/images/loam-icon.png"
-    },
     "android": {
       "package": "com.loamnet.host",
       "versionCode": 8,
@@ -25,10 +22,6 @@
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.RECORD_AUDIO"
       ]
-    },
-    "web": {
-      "output": "static",
-      "favicon": "./assets/images/loam-icon.png"
     },
     "plugins": [
       "expo-router",

@@ -16,14 +16,12 @@
 //
 //   3. Declare the WiFi + location permissions the LocalOnlyHotspot native module needs (see
 //      modules/loam-hotspot). LocalOnlyHotspot is location-gated below API 33, so ACCESS_FINE_LOCATION
-//      is mandatory there, and ACCESS_COARSE_LOCATION is declared beside it because Android 12+ requires
+//      is mandatory there, and ACCESS_COARSE_LOCATION is declared beside it because Android 12 requires
 //      a fine request to carry coarse in the same dialog (a fine-only request is ignored on some Android
-//      12 releases, and a runtime request for an undeclared permission auto-denies). NEARBY_WIFI_DEVICES
-//      gates the call on API 33+, and CHANGE/ACCESS_WIFI_STATE are needed to start and read the hotspot.
-//      The runtime grant is requested from JS before starting (src/lib/hotspot-permissions.ts holds the
-//      list + grant rule). ACCESS_FINE_LOCATION is declared on ALL supported API levels (no
-//      `maxSdkVersion` cap); the "REGRESSION NOTE" comment below says why capping it at API 32
-//      silently broke the hotspot on API 33+.
+//      12 releases). From API 33 NEARBY_WIFI_DEVICES gates the call instead and is all the JS side asks
+//      for, so both location permissions are capped at `maxSdkVersion="32"` (see "Location stops at
+//      API 32" below). CHANGE/ACCESS_WIFI_STATE are needed to start and read the hotspot. The runtime
+//      grant is requested from JS before starting (src/lib/hotspot-permissions.ts holds the list + rule).
 //
 //   4. Keep the on-device data off every backup/transfer path (allowBackup=false + fullBackupContent=false
 //      below API 31, and a data_extraction_rules.xml excluding every domain for BOTH cloud backup and
@@ -58,10 +56,10 @@ const ABIS = "arm64-v8a";
 const MARKER = "// loam-host: arm-only ABIs";
 
 // Manifest permissions the hotspot module requires (docs/04). ACCESS_FINE_LOCATION is mandatory for
-// LocalOnlyHotspot below API 33, and ACCESS_COARSE_LOCATION must be declared with it: Android 12+ only
-// honours a fine request that asks for coarse in the same dialog, and the JS side requests both on every
-// API level (src/lib/hotspot-permissions.ts). NEARBY_WIFI_DEVICES is what gates the call on API 33+; the
-// WIFI_STATE pair lets the app start and query the hotspot.
+// LocalOnlyHotspot below API 33, and ACCESS_COARSE_LOCATION must be declared with it: Android 12 only
+// honours a fine request that asks for coarse in the same dialog. Both are capped at API 32 afterwards
+// (LOCATION_PERMISSIONS below). NEARBY_WIFI_DEVICES is what gates the call on API 33+; the WIFI_STATE pair
+// lets the app start and query the hotspot.
 const HOTSPOT_PERMISSIONS = [
   "android.permission.ACCESS_FINE_LOCATION",
   "android.permission.ACCESS_COARSE_LOCATION",
@@ -83,8 +81,9 @@ const HOTSPOT_PERMISSIONS = [
 
 // Opportunistic-mesh transport permissions (docs/16 §5, docs/17 — modules/loam-mesh-transport).
 // Android 12+ split Bluetooth into the ADVERTISE/SCAN/CONNECT trio (advertise a LOAM beacon, scan for
-// peers, connect for the GATT control/fallback path). NEARBY_WIFI_DEVICES + ACCESS_FINE_LOCATION
-// (already required by the hotspot) also gate Wi-Fi Aware and pre-12 BLE scanning. The `neverForLocation`
+// peers, connect for the GATT control/fallback path). NEARBY_WIFI_DEVICES (API 33+) and
+// ACCESS_FINE_LOCATION (API 29-32 for Wi-Fi Aware, below 31 for BLE scanning, so inside the hotspot's
+// API 32 cap) also gate the mesh radios. The `neverForLocation`
 // usage flag on SCAN keeps us out of the location-permission story where the OS allows it. The runtime
 // grant is requested from JS (src/mesh/mesh-transport.ts) before the radios start.
 const MESH_PERMISSIONS = [
@@ -381,8 +380,8 @@ function withMeshManifest(config) {
     // Stamp `neverForLocation` on BOTH BLUETOOTH_SCAN and NEARBY_WIFI_DEVICES — we never derive physical
     // location from BLE scanning or Wi-Fi Aware. Critically for NEARBY_WIFI_DEVICES (API 33+): without this
     // flag Android *also* requires ACCESS_FINE_LOCATION to be granted, so a fresh MESH-ONLY startup (which
-    // requests only NEARBY_WIFI_DEVICES) would fail unless the hotspot flow had separately granted location
-    // first. The hotspot keeps its own ACCESS_FINE_LOCATION declaration, so this is additive.
+    // requests only NEARBY_WIFI_DEVICES) would fail, and so would the hotspot, which asks only for
+    // NEARBY_WIFI_DEVICES there and has no location permission declared on 33+.
     const perms = manifest["uses-permission"] ?? [];
     for (const name of ["android.permission.BLUETOOTH_SCAN", "android.permission.NEARBY_WIFI_DEVICES"]) {
       const entry = perms.find((permission) => permission.$?.["android:name"] === name);
@@ -394,21 +393,44 @@ function withMeshManifest(config) {
   });
 }
 
-// --- Why ACCESS_FINE_LOCATION has no maxSdkVersion cap -------------------------------------------
-// `WifiManager.startLocalOnlyHotspot()` accepts NEARBY_WIFI_DEVICES instead of ACCESS_FINE_LOCATION on
+// --- Location stops at API 32 ---------------------------------------------------------------------
+// `WifiManager.startLocalOnlyHotspot()` takes NEARBY_WIFI_DEVICES instead of ACCESS_FINE_LOCATION on
 // API 33+ (developer.android.com/develop/connectivity/wifi/wifi-permissions,
-// developer.android.com/develop/connectivity/wifi/localonlyhotspot), so a `maxSdkVersion="32"` cap on
-// ACCESS_FINE_LOCATION looks safe. It isn't while the runtime request still asks for location there: the
-// JS side (src/lib/hotspot-permissions.ts, used by use-hotspot.ts) requests ACCESS_FINE_LOCATION and
-// ACCESS_COARSE_LOCATION on every API level (plus NEARBY_WIFI_DEVICES on 33+), and
-// `PermissionsAndroid.requestMultiple` silently auto-denies a permission the manifest doesn't declare for
-// the running API level (no dialog). A capped manifest once made the hotspot impossible to start on every
-// API 33+ device ("Host stopped / location permission is needed"). The coarse entry in HOTSPOT_PERMISSIONS
-// above exists for the same reason: Android 12+ ignores a fine-only request on some releases.
+// developer.android.com/develop/connectivity/wifi/localonlyhotspot), and the JS side
+// (src/lib/hotspot-permissions.ts) asks only for NEARBY_WIFI_DEVICES there, so both location permissions
+// carry `maxSdkVersion="32"`: an API 33+ install never holds location at all.
 //
-// On API 33+ the JS side gates the start on NEARBY_WIFI_DEVICES alone, as Android does, so a denied
-// location answer there doesn't block the hotspot. Dropping the location request on 33+ (and then
-// letting the cap come back) is the follow-up noted in docs/04.
+// The two sides must move together. `PermissionsAndroid.requestMultiple` silently auto-denies a permission
+// the manifest doesn't declare for the running API level (no dialog), and an earlier build that capped
+// fine location while JS still requested it on 33+ could not start the hotspot on any API 33+ device
+// ("Host stopped / location permission is needed"). src/__tests__/with-loam-host.test.ts checks that every
+// permission the JS side requests on each API level is declared and not capped below it.
+const LOCATION_PERMISSIONS = ["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"];
+const LOCATION_MAX_SDK = "32";
+
+/** Cap each LOCATION_PERMISSIONS entry on a parsed manifest at API 32 (pure, tested). Run after
+ * withPermissions has declared them; a missing one is declared capped. */
+function capLocationPermissions(manifest) {
+  manifest["uses-permission"] = manifest["uses-permission"] ?? [];
+  for (const name of LOCATION_PERMISSIONS) {
+    const existing = manifest["uses-permission"].filter((permission) => permission.$?.["android:name"] === name);
+    if (existing.length === 0) {
+      manifest["uses-permission"].push({ $: { "android:name": name, "android:maxSdkVersion": LOCATION_MAX_SDK } });
+    }
+    for (const permission of existing) {
+      permission.$["android:maxSdkVersion"] = LOCATION_MAX_SDK;
+    }
+  }
+  return manifest;
+}
+
+/** Apply `capLocationPermissions` to the app manifest. */
+function withLocationCap(config) {
+  return withAndroidManifest(config, (cfg) => {
+    capLocationPermissions(cfg.modResults.manifest);
+    return cfg;
+  });
+}
 // -------------------------------------------------------------------------------------------------
 
 // --- Stale-prebuild guard ------------------------------------------------------------------------
@@ -510,8 +532,9 @@ module.exports = function withLoamHost(config) {
   config = withArmOnlyAbiFilters(config);
   config = withArmOnlyReactNativeArchitectures(config);
   // Merge (de-duped) the hotspot + foreground-service + mesh-transport permissions into the manifest.
-  // ACCESS_FINE_LOCATION is declared plainly (no maxSdkVersion cap) — see the regression note above.
+  // The location pair is then capped at API 32 (withLocationCap; see "Location stops at API 32" above).
   config = AndroidConfig.Permissions.withPermissions(config, [...HOTSPOT_PERMISSIONS, ...MESH_PERMISSIONS]);
+  config = withLocationCap(config);
   config = withMeshManifest(config);
   config = withHostService(config);
   config = withStalePrebuildGuard(config);
@@ -526,10 +549,13 @@ module.exports._internal = {
   FINGERPRINT_FILE,
   HOTSPOT_PERMISSIONS,
   LEGACY_BLUETOOTH_PERMISSIONS,
+  LOCATION_MAX_SDK,
+  LOCATION_PERMISSIONS,
   NETWORK_SECURITY_CONFIG_RESOURCE,
   OPTIONAL_FEATURES,
   STALE_GUARD_GRADLE,
   addLegacyBluetoothPermissions,
+  capLocationPermissions,
   addOptionalFeatures,
   applyApplicationAttributes,
   applyMainActivityAttributes,

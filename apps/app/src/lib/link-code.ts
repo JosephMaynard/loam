@@ -6,6 +6,7 @@
  */
 import { addOwnListener } from './bridge-listener';
 import type { BridgeChannel } from './db-encryption';
+import { hostErrorText, hostNoResponseText } from './host-errors';
 
 export type LinkCodeResult = { ok: true; code: string; expiresAt: number } | { ok: false; error: string };
 
@@ -27,18 +28,20 @@ export function requestLinkCode(channel: BridgeChannel, timeoutMs = 10_000): Pro
     };
 
     const onResult = (payload: unknown): void => {
-      const result = payload as { requestId?: unknown; ok?: unknown; code?: unknown; expiresAt?: unknown; error?: unknown } | undefined;
+      const result = payload as
+        | { requestId?: unknown; ok?: unknown; code?: unknown; expiresAt?: unknown; error?: unknown; errorCode?: unknown; status?: unknown }
+        | undefined;
       if (!result || result.requestId !== requestId) {
         return;
       }
       if (result.ok === true && typeof result.code === 'string' && CODE_PATTERN.test(result.code) && typeof result.expiresAt === 'number') {
         finish({ ok: true, code: result.code, expiresAt: result.expiresAt });
       } else {
-        finish({ ok: false, error: typeof result.error === 'string' ? result.error : 'unknown error' });
+        finish({ ok: false, error: hostErrorText(result) });
       }
     };
 
-    const timer = setTimeout(() => finish({ ok: false, error: 'The host did not answer in time.' }), timeoutMs);
+    const timer = setTimeout(() => finish({ ok: false, error: hostNoResponseText() }), timeoutMs);
     const removeListener = addOwnListener(channel, 'loam-link-code-result', onResult);
     try {
       channel.post('loam-link-code', { requestId });
