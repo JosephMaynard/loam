@@ -365,6 +365,40 @@ describe("transport encryption foundation", () => {
     // The oldest session was evicted: its id is now unknown, refused exactly like any expired session.
     expect(usingFirst.statusCode).toBe(401);
   });
+
+  it("evicts anonymous sessions before bound ones, so a handshake flood can't push out a signed-in device", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } }, { transportSessionCap: 3 });
+    const signedIn = await openTransport08(app);
+    expect((await resumeIdentity(app, signedIn, 1)).status).toBe(200);
+    const flood: { sessionId: string; key: string }[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      flood.push(await openTransport08(app));
+    }
+
+    // The bound session survives the flood and still reaches content through the tunnel...
+    const users = await tunnelInner(app, signedIn, 2, { m: "GET", p: "/api/users" });
+    expect(users.outerStatus).toBe(200);
+    expect(users.status).toBe(200);
+    // ...while the oldest anonymous ones made room for the newest.
+    const evicted = await app.server.inject({
+      method: "POST",
+      url: "/api/session/resume",
+      headers: { "x-loam-enc": flood[0]!.sessionId, "content-type": "application/json" },
+      payload: { enc: sealSeq(flood[0]!.key, 1, "POST /api/session/resume", {}) },
+    });
+    expect(evicted.statusCode).toBe(401);
+    expect((await resumeIdentity(app, flood[5]!, 1)).status).toBe(200);
+  });
+
+  it("answers a repeat resume on a bound session with the cached identity, never a second one", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const session = await openTransport08(app);
+    const first = await resumeIdentity(app, session, 1);
+    const again = await resumeIdentity(app, session, 2);
+    expect(again.status).toBe(200);
+    expect(again.currentUser.id).toBe(first.currentUser.id);
+    expect(again.token).toBe(first.token);
+  });
 });
 
 describe("transport encryption transparent round-trip", () => {
@@ -1042,7 +1076,8 @@ describe("transport encryption WebSocket frames", () => {
 
   it("closes a confirmed socket when its transport session is evicted", async () => {
     // A confirmed socket must not outlive its session key. Drive the session cap low, confirm a socket,
-    // then open enough fresh handshakes to evict its (oldest) session — the socket should be closed.
+    // then open (and bind, since anonymous sessions are evicted first) enough fresh sessions to evict its
+    // (oldest) session — the socket should be closed.
     const app = await makeApp(
       { security: { profile: "custom", transportEncryption: "required" } },
       { transportSessionCap: 2 },
@@ -1057,9 +1092,10 @@ describe("transport encryption WebSocket frames", () => {
     try {
       expect(client.connectionId()).not.toBe(""); // confirmed and admitted
 
-      // Each new handshake prunes+evicts; with cap 2 the socket's (oldest) session is evicted quickly.
+      // Each new handshake prunes+evicts; with cap 2 and only bound sessions in the map, the socket's
+      // (oldest) session is evicted quickly.
       for (let i = 0; i < 4; i += 1) {
-        await openTransport08(app);
+        await resumeIdentity(app, await openTransport08(app), 1);
       }
       const deadline = Date.now() + 2_000;
       while (!closed && Date.now() < deadline) {

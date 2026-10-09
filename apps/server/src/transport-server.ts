@@ -28,7 +28,9 @@ export interface TransportSession {
   // `/api/session/resume` promotes it to `bound` and records the user it authenticates + the hash of
   // the identity token that bound it. A `bound` session is what makes the secure rules apply (content
   // only via the tunnel, no cookie, WS key-confirmation) — independent of the node's global mode.
-  // `resumeResult` caches the sealed resume payload so a fresh-sequence retry is idempotent.
+  // `resumeResult` caches the sealed resume payload so a fresh-sequence retry is idempotent; the resume
+  // handler is the only place that binds a session and sets it in the same synchronous step, so it is
+  // present exactly when `authMode` is "bound".
   authMode: "anonymous" | "bound";
   userId?: string;
   identityTokenHash?: string;
@@ -807,6 +809,22 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
 
 /** Register the handshake, sealed resume, logout, and path-hiding tunnel routes. */
 export function registerTransportRoutes(ctx: AppContext): void {
+  /**
+   * The transport session to evict when the session map is at its cap: the oldest anonymous one (a
+   * handshake that never resumed an identity, which is all an unauthenticated flood can create), else the
+   * oldest bound one. Undefined only when the map is empty.
+   */
+  function oldestEvictableTransportSession(): string | undefined {
+    let oldestBound: string | undefined;
+    for (const [id, session] of ctx.transportSessions) {
+      if (session.authMode === "anonymous") {
+        return id;
+      }
+      oldestBound ??= id;
+    }
+    return oldestBound;
+  }
+
   // Transport handshake (docs/08): client sends its ephemeral X25519 public key; the host derives a
   // session key against its static transport key + a fresh ephemeral and returns its ephemeral public
   // + a session id (used in `x-loam-enc` on subsequent encrypted requests). Unauthenticated (it's
@@ -836,10 +854,12 @@ export function registerTransportRoutes(ctx: AppContext): void {
       }
 
       // Prune expired sessions on every handshake (cheap — handshakes are already rate-limited per
-      // IP), then enforce a hard cap: if still at/over it, evict the oldest live sessions to make room
-      // rather than letting the map grow without bound. Map iteration order is insertion order, and
-      // every session shares the same TTL, so the earliest-inserted entries are also the
-      // earliest-expiring — evicting from the front is a reasonable least-recently-established policy.
+      // IP), then enforce a hard cap: if still at/over it, evict live sessions to make room rather than
+      // letting the map grow without bound. The handshake is unauthenticated, so a flood of them must not
+      // push out the people already using the node: the oldest ANONYMOUS session (one that never resumed an
+      // identity) goes first, and a bound session only when no anonymous one is left. Map iteration order
+      // is insertion order, and every session shares the same TTL, so within each kind the earliest-inserted
+      // entry is also the earliest-expiring.
       const now = Date.now();
       for (const [id, existingSession] of ctx.transportSessions) {
         if (existingSession.expiresAt <= now) {
@@ -848,12 +868,12 @@ export function registerTransportRoutes(ctx: AppContext): void {
         }
       }
       while (ctx.transportSessions.size >= ctx.TRANSPORT_SESSION_CAP) {
-        const oldest = ctx.transportSessions.keys().next().value;
-        if (oldest === undefined) {
+        const victim = oldestEvictableTransportSession();
+        if (victim === undefined) {
           break;
         }
-        ctx.transportSessions.delete(oldest);
-        ctx.closeSocketsForTransportSession(oldest);
+        ctx.transportSessions.delete(victim);
+        ctx.closeSocketsForTransportSession(victim);
       }
 
       const sessionId = randomUUID();
@@ -892,10 +912,9 @@ export function registerTransportRoutes(ctx: AppContext): void {
     // The user is read live, never from the cached result: the identity was bound with whatever the record
     // said then, and an admin claim or a join approval since would otherwise be undone on the client's next
     // boot pass (the host's own WebView looped back into the queue that way).
-    if (activeSession.authMode === "bound") {
-      if (!activeSession.resumeResult) {
-        return reply.code(409).send(errorBody("Session already bound"));
-      }
+    // `resumeResult` is set in the same synchronous step that binds the session (below), and nothing else
+    // binds one, so a cached result is exactly "this session is bound".
+    if (activeSession.resumeResult) {
       const liveUser = ctx.data.users.find((user) => user.id === activeSession.userId);
       return {
         ...activeSession.resumeResult,

@@ -275,7 +275,6 @@ export const ERROR_CODES: Record<string, ServerErrorCode> = {
   "Invalid identity token": "invalid_token",
   "Transport session expired": "session_invalid",
   "Replayed or out-of-order encrypted request": "session_invalid",
-  "Session already bound": "session_invalid",
   "This channel has messages from other people: only an admin can delete it": "channel_delete_admin_required",
   "Location sharing is disabled on this LOAM node": "location_disabled",
   "You are timed out by a moderator and cannot post right now": "timed_out",
