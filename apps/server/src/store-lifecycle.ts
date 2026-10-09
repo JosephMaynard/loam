@@ -549,6 +549,9 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   // pre-wipe data. Migrated forward to `.loam-wipe-phase=delete-pending`; both names are cleared together
   // only once the whole wipe protocol completes.
   const legacyWipePendingMarkerPath = join(dataDir, ".loam-wipe-pending");
+  // Left behind by a fixed-key Emergency Reset that had to strip a configured `sync.token` from the config it
+  // carries across the restart (and so turned sync off), read and removed by the next boot that serves.
+  const syncOffAfterResetMarkerPath = join(dataDir, ".loam-sync-off-after-reset");
 
   /**
    * fsync a directory so a create/rename/unlink INSIDE it is durable across power-loss (the directory
@@ -635,10 +638,45 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
   // closed (locks WITHOUT clearing/rewriting the journal), so if the journal is the only durable copy of the
   // admin config it is never silently dropped and reverted to defaults (CodeRabbit/Sol round-11/12).
 
-  /** Strip the one plaintext bearer secret (`sync.token`) before it is written to `.loam-wipe-phase` or
-   *  config.json — both are plain, unprotected files (scrypt-hashed secrets are safe to persist as-is). */
+  /**
+   * Strip the one plaintext bearer secret (`sync.token`) before it is written to `.loam-wipe-phase` or
+   * config.json: both are plain, unprotected files (scrypt-hashed secrets are safe to persist as-is). A node
+   * that was syncing WITH a token must not come back syncing WITHOUT one (pulling unauthenticated, and its
+   * own `/api/sync/*` open to anyone), so when a token is stripped sync is turned off in the same snapshot;
+   * the operator sets a new token and turns it on again. Idempotent: a config with no token is unchanged.
+   */
   function sanitizeConfigForRestart(config: LoamConfig): LoamConfig {
-    return { ...config, sync: { ...config.sync, token: undefined } };
+    return {
+      ...config,
+      sync: { ...config.sync, token: undefined, enabled: restartDisablesSync(config) ? false : config.sync.enabled },
+    };
+  }
+
+  /** Whether carrying `config` across a restart turns sync off: it is on and relies on a token that can't ride along. */
+  function restartDisablesSync(config: LoamConfig): boolean {
+    return config.sync.enabled && config.sync.token !== undefined;
+  }
+
+  /**
+   * Leave a note for the next boot that the reset turned sync off (see `sanitizeConfigForRestart`), so the
+   * operator learns why their peers went quiet instead of finding sync silently off. Best-effort and durable
+   * like the config write; the notice is a courtesy, never a gate on the wipe.
+   */
+  function noteSyncDisabledByReset(): boolean {
+    return durableWriteFileSync(syncOffAfterResetMarkerPath, `${Date.now()}\n`);
+  }
+
+  /** Read and remove the "sync turned off by the reset" note; true when one was there. */
+  function consumeSyncDisabledByResetNotice(): boolean {
+    if (!existsSync(syncOffAfterResetMarkerPath)) {
+      return false;
+    }
+    try {
+      rmSync(syncOffAfterResetMarkerPath, { force: true });
+    } catch (error) {
+      log.warn(error, `Could not remove ${syncOffAfterResetMarkerPath}; the notice repeats on the next boot`);
+    }
+    return true;
   }
 
   /**
@@ -1450,7 +1488,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
    * unparseable file. Blanks `sync.token`, the one plaintext bearer secret in `LoamConfig`
    * (`admin.passphrase`/`killSwitch.panicToken` are already scrypt-hashed and safe to persist as-is) —
    * `config.json` is a plain, unprotected file, unlike the DB `config` table it would otherwise only
-   * ever have lived in.
+   * ever have lived in — and turns sync off when that token was in use (`sanitizeConfigForRestart`).
    *
    * Retries once on failure (a transient fs error shouldn't cost the operator their config) and returns
    * whether it EVENTUALLY succeeded. FULLY SYNCHRONOUS (P1-4, Sol round-9): the caller must persist config
@@ -1461,8 +1499,7 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
    * lockdown and the phase write.
    */
   function persistConfigForRestart(config: LoamConfig): boolean {
-    const sanitized: LoamConfig = { ...config, sync: { ...config.sync, token: undefined } };
-    const contents = JSON.stringify(sanitized, null, 2);
+    const contents = JSON.stringify(sanitizeConfigForRestart(config), null, 2);
     // DURABLE write (P2-1, Sol round-8): staging write + file fsync + atomic rename + parent-dir fsync, via
     // `durableWriteFileSync`. A bare writeFile+rename is atomic but NOT power-loss-durable — it could return
     // "success" while a crash then discards the new bytes or the rename, silently reverting admin settings
@@ -1497,6 +1534,9 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
     deleteAndVerifyAllWipeArtifactsDurable,
     durableWriteFileSync,
     sanitizeConfigForRestart,
+    restartDisablesSync,
+    noteSyncDisabledByReset,
+    consumeSyncDisabledByResetNotice,
     writeWipeJournal,
     clearWipePhase,
     resumeWipePhaseThenOpenStore,

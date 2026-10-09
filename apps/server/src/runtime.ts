@@ -4,19 +4,10 @@
 // reload is observed immediately, plus the hoisted helper functions the subsystems call back into.
 import type { FastifyBaseLogger } from "fastify";
 
-import type { Channel, LoamConfig, Message, MessageCreateRequest, StreamEvent, TransportEncryption, User } from "@loam/schema";
+import type { Channel, LoamConfig, Message, StreamEvent, TransportEncryption, User } from "@loam/schema";
 
 import type { LoamStore, StoreQuarantine } from "./db.js";
 import type { AppData, AppOptions, ClientEvent } from "./types.js";
-
-/** What `createMessage` returns: the stored message, a deleted one (a reaction toggle-off), or an error. */
-export type CreateMessageResult = {
-  message?: Message;
-  deletedMessage?: Message;
-  deletedMessageId?: string;
-  error?: string;
-  forbidden?: boolean;
-};
 
 export type Runtime = {
   /** The effective config (live — re-read on every access). */
@@ -47,12 +38,9 @@ export type Runtime = {
   broadcast(event: ClientEvent): void;
   sendEventToUsers(audience: Set<string>, event: ClientEvent): void;
   broadcastStreamEvent(audience: Set<string>, event: StreamEvent): void;
-  createMessage(input: MessageCreateRequest, authorId: string): CreateMessageResult;
   updateMessage(message: Message, nextBody: string, streaming: boolean): Message;
   ensureChannel(id: string): Channel | undefined;
-  ensureUser(id: string, isAdmin?: boolean, pending?: boolean): User;
   publicUser(user: User): User;
-  visibleUsers(viewer: User): User[];
   channelPostingError(channel: Channel, authorId: string, isReply: boolean): string | undefined;
   isLocallyAuthoritative(userId: string): boolean;
   messageAudienceUserIds(message: Message): Set<string> | undefined;

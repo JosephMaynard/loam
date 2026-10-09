@@ -264,7 +264,7 @@ export function securityProfilePreset(profile: SecurityProfile): SecurityProfile
   return profile === "custom" ? null : SECURITY_PROFILE_PRESETS[profile];
 }
 
-export const ChannelVisibilitySchema = z.enum(["public", "private", "adminInbox"]);
+export const ChannelVisibilitySchema = z.enum(["public", "private"]);
 export type ChannelVisibility = z.infer<typeof ChannelVisibilitySchema>;
 
 export const ChannelPostingPolicySchema = z.enum(["everyone", "owner", "admins"]);
@@ -458,7 +458,8 @@ export const OllamaConfigSchema = z.object({
   // Same bound as `UserSchema.displayName`: the bot is a user record, so a longer name would persist in
   // config and then fail the bot user's own validation (a 500 now, a failed boot later).
   botDisplayName: z.string().min(1).max(80),
-  systemPrompt: z.string().min(1).optional(),
+  // Same bound as the admin update schema, so a prompt that is accepted on save also validates at boot.
+  systemPrompt: z.string().min(1).max(4000).optional(),
 });
 export type OllamaConfig = z.infer<typeof OllamaConfigSchema>;
 
@@ -701,9 +702,13 @@ export const UserUpdateRequestSchema = z.object({
 });
 export type UserUpdateRequest = z.infer<typeof UserUpdateRequestSchema>;
 
-/** Admin request to set a user's granted roles (replaces the whole set). */
+/** Admin request to set a user's granted roles (replaces the whole set). Bounded to the number of roles
+ * that exist, and a repeated role counts once. */
 export const RolesUpdateRequestSchema = z.object({
-  roles: z.array(RoleSchema),
+  roles: z
+    .array(RoleSchema)
+    .max(2)
+    .transform((roles) => Array.from(new Set(roles))),
 });
 export type RolesUpdateRequest = z.infer<typeof RolesUpdateRequestSchema>;
 
@@ -828,7 +833,7 @@ export const DmInboxSchema = z.object({
   conversations: z.array(
     z.object({
       userId: IdSchema,
-      lastMessageAt: z.number(),
+      lastMessageAt: TimestampSchema,
       lastAuthorId: IdSchema,
     }),
   ),
@@ -885,10 +890,15 @@ export type MessageAttachment = z.infer<typeof MessageAttachmentSchema>;
  * the report): a moderator sees exactly the message that was reported, and nothing else from that
  * conversation. Once the message is deleted or expires, the queue shows that it's gone.
  */
+/** The most of a reported message's text the moderation queue carries; a longer body is cut and flagged `truncated`. */
+export const REPORTED_MESSAGE_BODY_MAX_LENGTH = 20_000;
+
 export const ReportedMessageSchema = z.object({
   authorId: IdSchema,
   /** The text, empty for a reaction or an attachment-only message. */
-  body: z.string().max(20_000),
+  body: z.string().max(REPORTED_MESSAGE_BODY_MAX_LENGTH),
+  /** The text was longer than the queue carries and was cut; the stored message is intact. */
+  truncated: z.boolean().optional(),
   /**
    * Its pictures and files. While the report is open, the moderators who can see it may fetch them, even from
    * a direct message or a private channel they're not in (`GET /api/attachments`), so they can judge them.
@@ -1342,6 +1352,12 @@ export const SyncPeerStatusSchema = z.object({
   lastSuccessAt: TimestampSchema.optional(),
   lastError: z.string().optional(),
   imported: z.number().int().nonnegative(),
+  /**
+   * An unpinned peer answered a later handshake this boot with a different transport key than before. Its
+   * public data is still pulled, but `sync.token` is withheld from it until this node restarts or the
+   * peer is pinned (docs/11).
+   */
+  keyChanged: z.boolean().optional(),
 });
 export type SyncPeerStatus = z.infer<typeof SyncPeerStatusSchema>;
 

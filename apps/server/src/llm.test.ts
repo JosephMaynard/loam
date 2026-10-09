@@ -297,7 +297,10 @@ describe("LLM streaming — Ollama-unreachable handling (docs/15 #15)", () => {
     const finalUpdate = userSocket.events.find(
       (event) => event.type === "messageUpdated" && event.message?.authorId === BOT_ID,
     );
-    expect(finalUpdate?.message?.body).toContain("LLM error");
+    // One plain sentence for the member; the connection error itself is logged, not shown.
+    expect(finalUpdate?.message?.body).toContain("could not answer this time");
+    expect(finalUpdate?.message?.body).not.toMatch(/ECONNREFUSED|fetch failed|127\.0\.0\.1/);
+    expect(userSocket.events.find((event) => event.type === "error")?.error).toContain("could not answer this time");
 
     // Graceful degradation: the node did not crash — it still serves requests afterwards.
     const health = await app.server.inject({ method: "GET", url: "/api/health" });
@@ -331,7 +334,9 @@ describe("LLM streaming — Ollama-unreachable handling (docs/15 #15)", () => {
     const update = userSocket.events.find(
       (event) => event.type === "messageUpdated" && event.message?.authorId === BOT_ID,
     );
-    expect(update?.message?.body).toContain("500");
+    // The HTTP status is backend detail: logged, never written into the member's DM.
+    expect(update?.message?.body).toContain("could not answer this time");
+    expect(update?.message?.body).not.toContain("500");
   });
 });
 

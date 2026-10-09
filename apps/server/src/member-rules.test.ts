@@ -6,7 +6,7 @@ import { MEMBER_RULES_VERSION, ModerationReportSchema, UserSchema } from "@loam/
 import { afterEach, describe, expect, it } from "vitest";
 
 import { buildApp, type LoamApp } from "./app.js";
-import type { AppOptions } from "./types.js";
+import type { AppOptions, SocketSession } from "./types.js";
 
 /**
  * The member rules (the client's Welcome screen, Google Play's UGC policy) and the moderation queue that
@@ -57,6 +57,67 @@ function agree(app: LoamApp, cookie: string): Promise<InjectResponse> {
 function post(app: LoamApp, cookie: string, body: string): Promise<InjectResponse> {
   return request(app, cookie, "POST", "/api/messages", { type: "channelPost", channelId: "general", body });
 }
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Every user id the node still holds. */
+function userIds(app: LoamApp): string[] {
+  return app.store.loadUsers().map((user) => user.id);
+}
+
+describe("identities nobody ever used", () => {
+  it("removes a never-agreed, never-used identity once it is older than the window, and keeps everyone with a reason to stay", async () => {
+    const app = await makeApp({ unusedIdentityMaxAgeMs: 60 });
+    const admin = await newSession(app); // the admin never agrees, but admins are never ghosts
+    const agreed = await newSession(app);
+    await agree(app, agreed.cookie);
+    const greeter = await newSession(app); // never agreed, holds a role
+    expect((await request(app, admin.cookie, "PATCH", `/api/admin/users/${greeter.userId}/roles`, { roles: ["greeter"] })).statusCode).toBe(200);
+    const recipient = await newSession(app); // never agreed, but someone wrote to them
+    expect((await request(app, agreed.cookie, "POST", "/api/messages", { type: "dm", recipientUserId: recipient.userId, body: "hello" })).statusCode).toBe(201);
+    const connected = await newSession(app); // never agreed, but has a socket open right now
+    const fakeSocket: SocketSession = {
+      userId: connected.userId,
+      socket: { readyState: 1, OPEN: 1, send: () => undefined, close: () => undefined } as unknown as SocketSession["socket"],
+    };
+    app.sockets.add(fakeSocket);
+    const ghost = await newSession(app); // a probe: never agreed, never did anything
+
+    await sleep(120);
+    const young = await newSession(app); // the same, but still within the window
+
+    app.reapUnusedIdentities();
+
+    const remaining = userIds(app);
+    expect(remaining).not.toContain(ghost.userId);
+    for (const kept of [admin, agreed, greeter, recipient, connected, young]) {
+      expect(remaining).toContain(kept.userId);
+    }
+
+    // The ghost's cookie names nobody now: the next request mints afresh, and its session row is gone.
+    expect(app.store.loadSessions().some((session) => session.userId === ghost.userId)).toBe(false);
+    const back = await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: ghost.cookie } });
+    expect(back.statusCode).toBe(200);
+    expect((back.json() as { currentUser: { id: string } }).currentUser.id).not.toBe(ghost.userId);
+
+    // Once the socket is gone, the connected one is a ghost like any other on the next pass.
+    app.sockets.delete(fakeSocket);
+    app.reapUnusedIdentities();
+    expect(userIds(app)).not.toContain(connected.userId);
+    for (const kept of [admin, agreed, greeter, recipient]) {
+      expect(userIds(app)).toContain(kept.userId);
+    }
+  });
+
+  it("removes nothing while the rules gate is off, since nothing then tells a probe from a person", async () => {
+    const app = await makeApp({ requireRulesAcceptance: false, unusedIdentityMaxAgeMs: 1 });
+    await newSession(app);
+    const member = await newSession(app);
+    await sleep(10);
+    app.reapUnusedIdentities();
+    expect(userIds(app)).toContain(member.userId);
+  });
+});
 
 describe("member rules", () => {
   it("refuses posts, uploads and new channels until the person agrees", async () => {

@@ -298,6 +298,13 @@ export interface LoamStore {
    */
   loadOpenReports(onReport?: (report: StoredRowReport) => void): Report[];
   /**
+   * The still-open (open or escalated) reports about one target, newest first, by the indexed `target_id`
+   * column, so a per-message check ("is this in a moderator's queue?") never loads the whole table.
+   */
+  loadOpenReportsForTarget(targetId: string): Report[];
+  /** How many reports are still open (open or escalated): node-wide, or filed by one reporter. */
+  countOpenReports(reporterUserId?: string): number;
+  /**
    * Record that a channel was IMPORTED from a sync peer (C1 provenance) — local-only, never exported.
    * Only channels marked here are eligible for peer-driven metadata re-sync; a locally-created channel
    * (including the seeded defaults, which every node shares an id for) is never in this set, so a peer
@@ -672,6 +679,30 @@ function migrateTombstonesCreatedAt(db: SqliteConnection): void {
 }
 
 /**
+ * Add the indexed `reports.target_id` and `reports.reporter_user_id` columns to a database created before
+ * they existed, filled from each row's JSON. They let the per-message queue check and the per-reporter cap
+ * query one target or one reporter instead of parsing the whole table; the JSON stays the record of truth
+ * (`upsertReport` writes both). A row whose JSON lacks the field keeps NULL and simply never matches.
+ */
+function migrateReportsTargetColumns(db: SqliteConnection): void {
+  const columns = db.prepare("PRAGMA table_info(reports)").all() as { name: string }[];
+  const has = (name: string): boolean => columns.some((column) => column.name === name);
+
+  if (!has("target_id")) {
+    db.exec("ALTER TABLE reports ADD COLUMN target_id TEXT");
+  }
+  if (!has("reporter_user_id")) {
+    db.exec("ALTER TABLE reports ADD COLUMN reporter_user_id TEXT");
+  }
+  db.exec(
+    "UPDATE reports SET target_id = json_extract(data, '$.targetId'), reporter_user_id = json_extract(data, '$.reporterUserId') " +
+      "WHERE (target_id IS NULL OR reporter_user_id IS NULL) AND json_valid(data)",
+  );
+  db.exec("CREATE INDEX IF NOT EXISTS idx_reports_target ON reports (target_id, status)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_reports_reporter ON reports (reporter_user_id, status)");
+}
+
+/**
  * Backfill the `missing_attachments.last_attempt_at` column onto a database created before
  * retry-backoff existed (docs/15 A6 / F1). `0` (never attempted) is the correct backfill for
  * existing rows — the retry pass treats it as "due immediately", which is the same behaviour those
@@ -804,7 +835,9 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       id TEXT PRIMARY KEY,
       status TEXT NOT NULL,
       created_at INTEGER NOT NULL DEFAULT 0,
-      data TEXT NOT NULL
+      data TEXT NOT NULL,
+      target_id TEXT,
+      reporter_user_id TEXT
     );
     CREATE TABLE IF NOT EXISTS synced_channels (
       channel_id TEXT PRIMARY KEY
@@ -832,6 +865,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   migrateTombstonesCreatedAt(db);
   migrateMissingAttachmentsLastAttempt(db);
   migrateMissingAttachmentsNextAttempt(db);
+  migrateReportsTargetColumns(db);
   createSealedOffersSeenTable(db);
 
   const upsertUserStmt = db.prepare(
@@ -901,12 +935,20 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     "UPDATE missing_attachments SET attempts = attempts + 1, last_attempt_at = ?, next_attempt_at = ? WHERE message_id = ? AND attachment_id = ?",
   );
   const upsertReportStmt = db.prepare(
-    `INSERT INTO reports (id, status, created_at, data) VALUES (?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET status = excluded.status, data = excluded.data`,
+    `INSERT INTO reports (id, status, created_at, data, target_id, reporter_user_id) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET status = excluded.status, data = excluded.data,
+       target_id = excluded.target_id, reporter_user_id = excluded.reporter_user_id`,
   );
   const getReportStmt = db.prepare("SELECT data FROM reports WHERE id = ?");
   const loadOpenReportsStmt = db.prepare(
     "SELECT id, data FROM reports WHERE status IN ('open', 'escalated') ORDER BY created_at DESC, rowid DESC",
+  );
+  const loadOpenReportsForTargetStmt = db.prepare(
+    "SELECT id, data FROM reports WHERE target_id = ? AND status IN ('open', 'escalated') ORDER BY created_at DESC, rowid DESC",
+  );
+  const countOpenReportsStmt = db.prepare("SELECT COUNT(*) AS total FROM reports WHERE status IN ('open', 'escalated')");
+  const countOpenReportsByReporterStmt = db.prepare(
+    "SELECT COUNT(*) AS total FROM reports WHERE reporter_user_id = ? AND status IN ('open', 'escalated')",
   );
   const markChannelSyncedStmt = db.prepare(
     "INSERT INTO synced_channels (channel_id) VALUES (?) ON CONFLICT(channel_id) DO NOTHING",
@@ -1231,7 +1273,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       return !row || row.total === 0;
     },
     upsertReport(report) {
-      upsertReportStmt.run(report.id, report.status, report.createdAt, JSON.stringify(report));
+      upsertReportStmt.run(report.id, report.status, report.createdAt, JSON.stringify(report), report.targetId, report.reporterUserId);
     },
     getReport(id) {
       const row = getReportStmt.get(id) as { data: string } | undefined;
@@ -1249,6 +1291,15 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       const { loaded, report } = scanStoredRows(loadOpenReportsStmt.all(), parseStoredReport, new Set());
       reportStoredRows(report, onReport);
       return loaded;
+    },
+    loadOpenReportsForTarget(targetId) {
+      return scanStoredRows(loadOpenReportsForTargetStmt.all(targetId), parseStoredReport, new Set()).loaded;
+    },
+    countOpenReports(reporterUserId) {
+      const row = (reporterUserId === undefined
+        ? countOpenReportsStmt.get()
+        : countOpenReportsByReporterStmt.get(reporterUserId)) as { total: number } | undefined;
+      return Number(row?.total ?? 0);
     },
     markChannelSynced(channelId) {
       markChannelSyncedStmt.run(channelId);

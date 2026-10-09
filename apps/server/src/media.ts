@@ -36,12 +36,36 @@ export function isImageAttachmentMime(mimeType: string | undefined): mimeType is
 /**
  * Sanitise a user-supplied attachment filename before it goes into a `Content-Disposition` header (and the
  * client's escaped display): strip path separators, quotes, and control chars (header-injection / traversal
- * vectors), bound the length, and fall back to `file` if nothing usable remains.
+ * vectors), bound the length, drop any unpaired surrogate (a lone half of a UTF-16 pair is not encodable,
+ * so `encodeURIComponent` would throw on it), and fall back to `file` if nothing usable remains.
  */
 export function sanitizeAttachmentName(name: string | undefined): string {
-  // eslint-disable-next-line no-control-regex
-  const cleaned = (name ?? "").replace(/["\\/\u0000-\u001f]/g, "_").trim().slice(0, 255);
+  const cleaned = (name ?? "")
+    // eslint-disable-next-line no-control-regex
+    .replace(/["\\/\u0000-\u001f]/g, "_")
+    .trim()
+    .slice(0, 255)
+    // After the length cut, which can itself split a pair: a high surrogate with no low one after it, or a
+    // low surrogate with no high one before it.
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "_");
   return cleaned || "file";
+}
+
+/**
+ * The `Content-Disposition` value for a download: RFC 6266's ASCII-folded `filename=` (a header value may not
+ * carry a byte above 0xFF, which would make Node throw for any CJK/emoji/Cyrillic name) plus a `filename*`
+ * that percent-encodes the real UTF-8 name, so modern browsers still show the international name. Never
+ * throws: a name the encoder still refuses falls back to the plain `file`, so a stored attachment record can
+ * never turn its own download into a 500.
+ */
+export function attachmentContentDisposition(name: string | undefined): string {
+  const downloadName = sanitizeAttachmentName(name);
+  const asciiName = downloadName.replace(/[^\x20-\x7e]/g, "_");
+  try {
+    return `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(downloadName)}`;
+  } catch {
+    return 'attachment; filename="file"';
+  }
 }
 
 /** The on-disk file name for an attachment (id plus the extension its MIME type maps to). */

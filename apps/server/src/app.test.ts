@@ -27,6 +27,9 @@ import {
 } from "@loam/crypto";
 import {
   MeshIdentityCardSchema,
+  MessageSchema,
+  REPORTED_MESSAGE_BODY_MAX_LENGTH,
+  ReportedMessageSchema,
   SERVER_ERROR_CODES,
   TransportHandshakeResponseSchema,
   type MeshIdentityCard,
@@ -34,7 +37,10 @@ import {
 
 import { ALL_ERROR_CODES, buildApp, type AppOptions, type LoamApp } from "./app.js";
 import { openStore } from "./db.js";
-import { makeSessionToken, makeSessionUserId } from "./identity.js";
+import { makeSessionToken, makeSessionUserId, makeUser } from "./identity.js";
+import { attachmentContentDisposition, sanitizeAttachmentName } from "./media.js";
+import { OPEN_REPORTS_PER_REPORTER_MAX, reportedMessageBody } from "./routes-users.js";
+import type { SocketSession } from "./types.js";
 
 // RF4: a single-shot fault-injection seam for `node:fs`'s `renameSync`, used ONLY by the "marker-
 // confirmed recovery failure" test below to make `openInitialStore`'s rename-aside step throw
@@ -1050,6 +1056,55 @@ describe("kill switch", () => {
     expect(existsSync(targetDir) ? readdirSync(targetDir) : []).toEqual([]);
   });
 
+  it("reports an incomplete wipe (503, clients told to purge, node locked) when the store throws partway, never a 500", async () => {
+    const app = await makeApp({ killSwitch: { enabled: true } });
+    const admin = await newSession(app);
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: admin.cookie },
+          payload: { type: "channelPost", channelId: "general", body: "still here" },
+        })
+      ).statusCode,
+    ).toBe(201);
+
+    // A connected client, as the realtime layer sees it: it must be told to purge and then be closed.
+    const sent: string[] = [];
+    let closed = false;
+    app.sockets.add({
+      userId: admin.userId,
+      socket: {
+        readyState: 1,
+        OPEN: 1,
+        send: (payload: string) => {
+          sent.push(payload);
+        },
+        close: () => {
+          closed = true;
+        },
+      } as unknown as SocketSession["socket"],
+    });
+
+    // The plaintext wipe's one store call fails (a full disk, a locked file).
+    app.store.wipeAll = () => {
+      throw new Error("disk full");
+    };
+
+    const wipe = await postKillSwitch(app, admin.cookie);
+    expect(wipe.statusCode).toBe(503);
+    expect((wipe.json() as { error: string }).error).toMatch(/could not be completed/);
+
+    expect(sent.map((payload) => (JSON.parse(payload) as { type: string }).type)).toContain("wipe");
+    expect(closed).toBe(true);
+    expect(app.sockets.size).toBe(0);
+
+    // Locked down: nothing but the liveness probe answers, so the surviving rows are never served.
+    expect((await app.server.inject({ method: "GET", url: "/api/config", headers: { cookie: admin.cookie } })).statusCode).toBe(503);
+    expect((await app.server.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
+  });
+
   it("keeps the kill switch enabled after a wipe so it can fire again", async () => {
     const app = await makeApp({ killSwitch: { enabled: true } });
     const admin = await newSession(app);
@@ -1401,6 +1456,41 @@ describe("message retention (ephemeral messages)", () => {
 });
 
 describe("message authorization", () => {
+  it("refuses a DM to a mesh sender artifact or to a bot that isn't the enabled assistant, with the generic DM answer", async () => {
+    const botId = "llm.bot.test";
+    const { app, dataDir } = await makeApp({
+      llm: { ollama: { enabled: true, baseUrl: "http://localhost:11434", model: "m", botId, botDisplayName: "Bot" } },
+    });
+    const admin = await newSession(app);
+    // A mesh sender's display record (sealed mail is delivered as a DM from it) and a bot the config no longer
+    // enables are both records nobody reads: a DM to either would be stored and delivered to no one. The row
+    // is planted and the node reopened so it loads like any stored record; the admin's session survives that.
+    app.store.upsertUser(makeUser("mesh.0123456789abcdef0123456789abcdef"));
+    const reopened = await reopenApp(app, dataDir);
+    expect(
+      (
+        await reopened.server.inject({
+          method: "PATCH",
+          url: "/api/admin/config",
+          headers: { cookie: admin.cookie },
+          payload: { llm: { ollama: { enabled: false } } },
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    for (const recipientUserId of ["mesh.0123456789abcdef0123456789abcdef", botId]) {
+      const dm = await reopened.server.inject({
+        method: "POST",
+        url: "/api/messages",
+        headers: { cookie: admin.cookie },
+        payload: { type: "dm", recipientUserId, body: "anyone there?" },
+      });
+      expect(dm.statusCode).toBe(403);
+      expect(dm.json()).toMatchObject({ code: "dm_unavailable" });
+    }
+    expect(reopened.store.loadMessages().filter((message) => message.type === "dm")).toEqual([]);
+  });
+
   it("blocks reactions on DMs from non-participants", async () => {
     const app = await makeApp();
     const alice = await newSession(app);
@@ -2123,7 +2213,8 @@ describe("encryption at rest + key-discard kill switch", () => {
           method: "PATCH",
           url: "/api/admin/config",
           headers: { cookie: admin.cookie },
-          payload: { sync: { enabled: true, token: "a-plaintext-bearer-sync-token-x" } },
+          // No token: a tokenless sync setting rides across unchanged (a token turns sync off, see the next test).
+          payload: { sync: { enabled: true } },
         })
       ).statusCode,
     ).toBe(200);
@@ -2145,7 +2236,8 @@ describe("encryption at rest + key-discard kill switch", () => {
       sync: { enabled: boolean; token?: string };
     };
     expect(persisted.sync.enabled).toBe(true);
-    expect(persisted.sync.token).toBeUndefined(); // plaintext bearer secret blanked
+    expect(persisted.sync.token).toBeUndefined();
+    expect(existsSync(join(dataDir, ".loam-sync-off-after-reset"))).toBe(false);
 
     // Simulate the launcher's verified restart with a rotated key: the fresh DB's config table is empty, so
     // config.json is the ONLY carrier of the DB-only sync change into the new boot.
@@ -2157,6 +2249,65 @@ describe("encryption at rest + key-discard kill switch", () => {
       await restarted.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: restartedAdmin.cookie } })
     ).json() as { sync: { enabled: boolean } };
     expect(config.sync.enabled).toBe(true);
+  });
+
+  it("turns sync off in the config a hooked fixed-key wipe carries across the restart when its token had to be stripped, and the next boot says so", async () => {
+    const hook = installFakeWipeRestartHook();
+    const { app, dataDir } = await makeEncryptedApp(
+      { dbEncryptionKey: "key A", dbEncryptionMode: "persistent" },
+      { killSwitch: { enabled: true } },
+    );
+    const admin = await session(app);
+    expect(
+      (
+        await app.server.inject({
+          method: "PATCH",
+          url: "/api/admin/config",
+          headers: { cookie: admin.cookie },
+          payload: { sync: { enabled: true, token: "a-plaintext-bearer-sync-token-z" } },
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    const wipe = await app.server.inject({
+      method: "POST",
+      url: "/api/admin/kill-switch",
+      headers: { cookie: admin.cookie },
+      payload: { confirm: "wipe" },
+    });
+    expect(wipe.statusCode).toBe(200);
+    expect(hook.calls).toBe(1);
+
+    // The bearer token can't ride in a plain file, and sync without the token it relied on would pull
+    // unauthenticated and leave this node's own sync routes open: so the snapshot turns sync off too.
+    const persisted = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")) as {
+      sync: { enabled: boolean; token?: string };
+    };
+    expect(persisted.sync.token).toBeUndefined();
+    expect(persisted.sync.enabled).toBe(false);
+    expect(existsSync(join(dataDir, ".loam-sync-off-after-reset"))).toBe(true);
+
+    // The launcher clears the journal and restarts under a rotated key: that boot logs why sync is off and
+    // consumes the note, so it is said once.
+    rmSync(join(dataDir, ".loam-wipe-phase"), { force: true });
+    const lines: string[] = [];
+    const restarted = await buildApp({
+      requireRulesAcceptance: false,
+      dataDir,
+      logStream: { write: (line) => void lines.push(line) },
+      dbEncryptionKey: "key B",
+      dbEncryptionMode: "persistent",
+    });
+    cleanups.push(() => restarted.close());
+    expect(lines.join("")).toContain("Sync was turned off by the Emergency Reset");
+    expect(existsSync(join(dataDir, ".loam-sync-off-after-reset"))).toBe(false);
+
+    const restartedAdmin = await session(restarted);
+    const config = (
+      await restarted.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: restartedAdmin.cookie } })
+    ).json() as { sync: { enabled: boolean; token?: string } };
+    expect(config.sync.enabled).toBe(false);
+    expect(config.sync.token).toBeUndefined();
   });
 
   it("P1-4 (Sol round 9): the NO-HOOK fixed-key wipe persists config.json (with DB-only admin changes) BEFORE the phase, so it survives even though the wipe deletes the DB", async () => {
@@ -2867,9 +3018,11 @@ describe("encryption at rest + key-discard kill switch", () => {
           })
         ).json() as { killSwitch: { enabled: boolean }; sync: { enabled: boolean; token?: string } };
 
-        // Not silently reverted to config.json-absent/defaults — the armed kill switch survives.
+        // Not silently reverted to config.json-absent/defaults — the armed kill switch survives. Sync does
+        // not stay on without the token it relied on: the snapshot turned it off (the operator sets a new
+        // token and turns it on again).
         expect(config.killSwitch.enabled).toBe(true);
-        expect(config.sync.enabled).toBe(true);
+        expect(config.sync.enabled).toBe(false);
         expect(config.sync.token).toBeUndefined();
       } finally {
         await restarted.close();
@@ -4189,6 +4342,48 @@ describe("message deletion API", () => {
 
   const remainingIds = (app: LoamApp): string[] => app.store.loadMessages().map((message) => message.id);
 
+  it("refuses a reply whose parent is itself a reply, and still cascades a nested reply an older database holds", async () => {
+    const { app, dataDir } = await makeApp();
+    await newSession(app);
+    const author = await newSession(app);
+    const rootId = await postId(app, author.cookie, { type: "channelPost", channelId: "general", body: "root" });
+    const replyId = await postId(app, author.cookie, {
+      type: "channelReply",
+      channelId: "general",
+      parentMessageId: rootId,
+      body: "reply",
+    });
+
+    // Threads are one level deep: a reply can only hang off a channel post.
+    const nested = await postMessage(app, author.cookie, {
+      type: "channelReply",
+      channelId: "general",
+      parentMessageId: replyId,
+      body: "reply to a reply",
+    });
+    expect(nested.statusCode).toBe(400);
+    expect(nested.json()).toMatchObject({ code: "parent_not_found" });
+
+    // A database written before that rule may hold one. Deleting the middle reply takes it along instead of
+    // leaving it pointing at a parent that no longer exists.
+    app.store.insertMessage(
+      MessageSchema.parse({
+        id: "msg_legacynested00",
+        type: "channelReply",
+        channelId: "general",
+        parentMessageId: replyId,
+        authorId: author.userId,
+        body: "orphan in waiting",
+        createdAt: Date.now(),
+      }),
+    );
+    const reopened = await reopenApp(app, dataDir);
+    const deleted = await deleteMessage(reopened, author.cookie, replyId);
+    expect(deleted.statusCode).toBe(200);
+    expect((deleted.json() as { deletedIds: string[] }).deletedIds.sort()).toEqual([replyId, "msg_legacynested00"].sort());
+    expect(remainingIds(reopened)).toEqual([rootId]);
+  });
+
   it("lets an author delete their own message", async () => {
     const app = await makeApp();
     await newSession(app); // burn the firstUser=admin slot so the author below is a plain user
@@ -4327,6 +4522,45 @@ describe("message editing API", () => {
     expect((await editMessage(app, author.cookie, id, { body: "   " })).statusCode).toBe(400);
     expect((await editMessage(app, author.cookie, "msg_missing", { body: "hi" })).statusCode).toBe(404);
   });
+
+  it("answers an outsider editing a private-channel message with the same 404 as an unknown id, like DELETE does", async () => {
+    const app = await makeApp();
+    await newSession(app);
+    const owner = await newSession(app);
+    const member = await newSession(app);
+    const outsider = await newSession(app);
+    const channelId = (
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/channels",
+          headers: { cookie: owner.cookie },
+          payload: { name: "Quiet", visibility: "private" },
+        })
+      ).json() as { id: string }
+    ).id;
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: `/api/channels/${channelId}/members`,
+          headers: { cookie: owner.cookie },
+          payload: { userId: member.userId },
+        })
+      ).statusCode,
+    ).toBe(200);
+    const id = await postId(app, owner.cookie, { type: "channelPost", channelId, body: "ours" });
+
+    // Not a member: the message does not exist as far as they can tell (a 403 would confirm it does).
+    const outside = await editMessage(app, outsider.cookie, id, { body: "theirs" });
+    expect(outside.statusCode).toBe(404);
+    expect(outside.json()).toEqual((await editMessage(app, outsider.cookie, "msg_missing", { body: "x" })).json());
+
+    // A member who isn't the author still gets the authorship answer.
+    const inside = await editMessage(app, member.cookie, id, { body: "theirs" });
+    expect(inside.statusCode).toBe(403);
+    expect(inside.json()).toMatchObject({ code: "edit_own_only" });
+  });
 });
 
 describe("roles, moderation, and join policy", () => {
@@ -4392,6 +4626,30 @@ describe("roles, moderation, and join policy", () => {
   }
 
   describe("roles", () => {
+    it("counts a repeated role once, refuses more roles than exist, and treats the assistant bot like an unknown user", async () => {
+      const app = await makeApp({
+        llm: { ollama: { enabled: true, baseUrl: "http://localhost:11434", model: "m", botId: "llm.bot.test", botDisplayName: "Bot" } },
+      });
+      const admin = await newSession(app);
+      const member = await newSession(app);
+
+      const repeated = await setRoles(app, admin.cookie, member.userId, ["moderator", "moderator"]);
+      expect(repeated.statusCode).toBe(200);
+      expect((repeated.json() as { roles?: string[] }).roles).toEqual(["moderator"]);
+
+      expect((await setRoles(app, admin.cookie, member.userId, ["moderator", "greeter", "moderator"])).statusCode).toBe(400);
+
+      // Roles and moderation are for people: the bot answers like an unknown user on both routes.
+      const botRoles = await setRoles(app, admin.cookie, "llm.bot.test", ["moderator"]);
+      expect(botRoles.statusCode).toBe(404);
+      expect(botRoles.json()).toMatchObject({ code: "user_not_found" });
+      const botBan = await moderate(app, admin.cookie, "llm.bot.test", { banned: true });
+      expect(botBan.statusCode).toBe(404);
+      expect(botBan.json()).toMatchObject({ code: "user_not_found" });
+      expect(app.store.loadUsers().find((user) => user.id === "llm.bot.test")).toMatchObject({ type: "bot" });
+      expect(app.store.loadUsers().find((user) => user.id === "llm.bot.test")?.banned).toBeUndefined();
+    });
+
     it("lets an admin set a member's roles", async () => {
       const app = await makeApp();
       const admin = await newSession(app);
@@ -5283,6 +5541,36 @@ describe("private channels", () => {
     expect(body.ownerUserId).toBe(member.userId);
     expect(new Set(body.memberUserIds)).toEqual(new Set([owner.userId, member.userId]));
   });
+
+  it("leaves banned and still-pending members off the member list, like the roster", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const owner = await newSession(app);
+    const member = await newSession(app);
+    const channel = await createPrivateChannel(app, owner.cookie);
+    expect((await addMember(app, owner.cookie, channel.id, member.userId)).statusCode).toBe(200);
+
+    const list = async (): Promise<string[]> =>
+      (
+        (await app.server.inject({ method: "GET", url: `/api/channels/${channel.id}/members`, headers: { cookie: owner.cookie } })).json() as {
+          id: string;
+        }[]
+      ).map((user) => user.id);
+    expect(await list()).toEqual(expect.arrayContaining([owner.userId, member.userId]));
+
+    expect(
+      (
+        await app.server.inject({
+          method: "PATCH",
+          url: `/api/moderation/users/${member.userId}`,
+          headers: { cookie: admin.cookie },
+          payload: { banned: true },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(await list()).toContain(owner.userId);
+    expect(await list()).not.toContain(member.userId);
+  });
 });
 
 describe("message search", () => {
@@ -5441,9 +5729,145 @@ describe("member reports + timeout + honest tombstone (docs/26)", () => {
       payload: { type: "channelPost", channelId, body },
     });
   }
-  function fileReport(app: LoamApp, cookie: string, payload: Record<string, unknown>): Promise<InjectResponse> {
-    return app.server.inject({ method: "POST", url: "/api/reports", headers: { cookie }, payload });
+  function fileReport(app: LoamApp, cookie: string, payload: Record<string, unknown>, remoteAddress?: string): Promise<InjectResponse> {
+    return app.server.inject({ method: "POST", url: "/api/reports", headers: { cookie }, payload, ...(remoteAddress ? { remoteAddress } : {}) });
   }
+  async function queue(app: LoamApp, cookie: string): Promise<{ id: string; reason: string; note?: string; reporterUserId: string }[]> {
+    const response = await app.server.inject({ method: "GET", url: "/api/moderation/reports", headers: { cookie } });
+    expect(response.statusCode).toBe(200);
+    return response.json() as { id: string; reason: string; note?: string; reporterUserId: string }[];
+  }
+
+  it("keeps one open report per reporter and target: filing again updates the reason and note instead of adding a row", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const author = await newSession(app);
+    const reporter = await newSession(app);
+    const other = await newSession(app);
+    const msgId = ((await postChannel(app, author.cookie, "general", "hmm")).json() as { message: { id: string } }).message.id;
+
+    const first = await fileReport(app, reporter.cookie, { targetType: "message", targetId: msgId, reason: "spam" });
+    expect(first.statusCode).toBe(201);
+    const { id } = first.json() as { id: string };
+    expect(id).toMatch(/^rpt_/);
+
+    const again = await fileReport(app, reporter.cookie, { targetType: "message", targetId: msgId, reason: "harassment", note: "and rude" });
+    expect(again.statusCode).toBe(200);
+    expect(again.json()).toEqual({ ok: true, id });
+
+    let reports = await queue(app, admin.cookie);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({ id, reason: "harassment", note: "and rude", reporterUserId: reporter.userId });
+
+    // Another person reporting the same message is a report of its own.
+    expect((await fileReport(app, other.cookie, { targetType: "message", targetId: msgId, reason: "spam" })).statusCode).toBe(201);
+    reports = await queue(app, admin.cookie);
+    expect(reports).toHaveLength(2);
+  });
+
+  it("caps how many reports one person may have open at once, and resolving one makes room", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const author = await newSession(app);
+    const reporter = await newSession(app);
+    const messageIds: string[] = [];
+    for (let index = 0; index <= OPEN_REPORTS_PER_REPORTER_MAX; index += 1) {
+      messageIds.push(((await postChannel(app, author.cookie, "general", `post ${index}`)).json() as { message: { id: string } }).message.id);
+    }
+
+    // Each request from its own address: the route's per-address rate limit is a different bound from the
+    // per-reporter cap under test, which follows the account, not the address.
+    let address = 0;
+    const fromFreshAddress = (payload: Record<string, unknown>) => {
+      address += 1;
+      return fileReport(app, reporter.cookie, payload, `10.9.${Math.floor(address / 250)}.${address % 250}`);
+    };
+    for (const targetId of messageIds.slice(0, OPEN_REPORTS_PER_REPORTER_MAX)) {
+      expect((await fromFreshAddress({ targetType: "message", targetId, reason: "spam" })).statusCode).toBe(201);
+    }
+    const extra = messageIds[OPEN_REPORTS_PER_REPORTER_MAX] ?? "";
+    const refused = await fromFreshAddress({ targetType: "message", targetId: extra, reason: "spam" });
+    expect(refused.statusCode).toBe(429);
+    expect(refused.json()).toMatchObject({ code: "too_many_attempts" });
+    // Updating one already filed is not a new report, so it still goes through.
+    expect((await fromFreshAddress({ targetType: "message", targetId: messageIds[0] ?? "", reason: "other" })).statusCode).toBe(200);
+
+    const [oldest] = await queue(app, admin.cookie);
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: `/api/moderation/reports/${oldest?.id ?? ""}/resolve`,
+          headers: { cookie: admin.cookie },
+          payload: { resolution: "dismissed" },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect((await fromFreshAddress({ targetType: "message", targetId: extra, reason: "spam" })).statusCode).toBe(201);
+  });
+
+  it("serves a reported message's private attachment to a moderator outside the conversation only while the report is in their queue", async () => {
+    const app = await makeApp();
+    const admin = await newSession(app);
+    const owner = await newSession(app);
+    const channelId = ((await app.server.inject({
+      method: "POST",
+      url: "/api/channels",
+      headers: { cookie: owner.cookie },
+      payload: { name: "Ops", visibility: "private" },
+    })).json() as { id: string }).id;
+    const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]).toString("base64");
+    const uploaded = await app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie: owner.cookie },
+      payload: { mimeType: "image/png", data: png, width: 1, height: 1 },
+    });
+    expect(uploaded.statusCode).toBe(201);
+    const attachment = uploaded.json() as { id: string; mimeType: string };
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: owner.cookie },
+      payload: { type: "channelPost", channelId, body: "look", attachments: [attachment] },
+    });
+    expect(posted.statusCode).toBe(201);
+    const msgId = (posted.json() as { message: { id: string } }).message.id;
+    const fetchAsAdmin = () =>
+      app.server.inject({ method: "GET", url: `/api/attachments/${attachment.id}.png`, headers: { cookie: admin.cookie } });
+
+    // Not a member, no report: the file does not exist for the admin.
+    expect((await fetchAsAdmin()).statusCode).toBe(404);
+
+    expect((await fileReport(app, owner.cookie, { targetType: "message", targetId: msgId, reason: "other" })).statusCode).toBe(201);
+    const whileOpen = await fetchAsAdmin();
+    expect(whileOpen.statusCode).toBe(200);
+    expect(whileOpen.headers["cache-control"]).toBe("no-store");
+    // Only reports about THIS message count: one about another message opens nothing here.
+    const otherId = ((await postChannel(app, owner.cookie, channelId, "other")).json() as { message: { id: string } }).message.id;
+    expect((await fileReport(app, owner.cookie, { targetType: "message", targetId: otherId, reason: "other" })).statusCode).toBe(201);
+
+    const [report] = (await queue(app, admin.cookie)).filter((entry) => (entry as { targetId?: string }).targetId === msgId);
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: `/api/moderation/reports/${report?.id ?? ""}/resolve`,
+          headers: { cookie: admin.cookie },
+          payload: { resolution: "dismissed" },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect((await fetchAsAdmin()).statusCode).toBe(404);
+  });
+
+  it("cuts a reported body longer than the queue carries and says so, leaving shorter ones alone", () => {
+    expect(reportedMessageBody("short")).toEqual({ body: "short" });
+    const long = "x".repeat(REPORTED_MESSAGE_BODY_MAX_LENGTH + 5);
+    const cut = reportedMessageBody(long);
+    expect(cut).toEqual({ body: "x".repeat(REPORTED_MESSAGE_BODY_MAX_LENGTH), truncated: true });
+    expect(ReportedMessageSchema.shape.body.safeParse(cut.body).success).toBe(true);
+  });
 
   it("keeps reports moderator-private: filed but never broadcast, queue is mod-only, reporter id shown only there", async () => {
     const app = await makeApp();
@@ -6070,6 +6494,48 @@ describe("message attachments", () => {
       payload: { mimeType, data, width: 1, height: 1 },
     });
   }
+
+  it("keeps a lone surrogate in a file name from failing the download header", async () => {
+    // The sanitiser drops an unpaired half of a UTF-16 pair (it has no UTF-8 form, so `encodeURIComponent`
+    // throws on it), including one created by the length cut; the header builder never throws regardless.
+    expect(sanitizeAttachmentName("bad\uD83Dname.txt")).toBe("bad_name.txt");
+    expect(sanitizeAttachmentName("\uDE00start.txt")).toBe("_start.txt");
+    expect(sanitizeAttachmentName("ok😀.txt")).toBe("ok😀.txt");
+    expect(sanitizeAttachmentName(`${"a".repeat(254)}😀`)).toBe(`${"a".repeat(254)}_`);
+    expect(() => attachmentContentDisposition("\uD83D")).not.toThrow();
+    expect(attachmentContentDisposition("报告.txt")).toBe(`attachment; filename="__.txt"; filename*=UTF-8''${encodeURIComponent("报告.txt")}`);
+
+    const app = await makeApp();
+    const session = await newSession(app);
+    const uploaded = await app.server.inject({
+      method: "POST",
+      url: "/api/attachments",
+      headers: { cookie: session.cookie },
+      payload: { mimeType: "text/plain", data: Buffer.from("hello").toString("base64"), name: "bad\uD83Dname.txt" },
+    });
+    expect(uploaded.statusCode).toBe(201);
+    const attachment = uploaded.json() as { id: string; name?: string };
+    expect(attachment.name).toBe("bad_name.txt");
+    // The download name comes from the owning message's attachment record.
+    expect(
+      (
+        await app.server.inject({
+          method: "POST",
+          url: "/api/messages",
+          headers: { cookie: session.cookie },
+          payload: { type: "channelPost", channelId: "general", body: "a file", attachments: [attachment] },
+        })
+      ).statusCode,
+    ).toBe(201);
+
+    const served = await app.server.inject({
+      method: "GET",
+      url: `/api/attachments/${attachment.id}.bin`,
+      headers: { cookie: session.cookie },
+    });
+    expect(served.statusCode).toBe(200);
+    expect(String(served.headers["content-disposition"])).toContain("filename*=UTF-8''bad_name.txt");
+  });
 
   it("uploads a non-image file, serves it as a forced download, and rejects a script/XSS type (P11)", async () => {
     const app = await makeApp();
@@ -7949,9 +8415,10 @@ describe("on-device LLM provider", () => {
       payload: { type: "dm", recipientUserId: BOT_ID, body: "hi" },
     });
 
+    // The member sees one plain sentence; the backend's own words go to the log only.
     const reply = await assistantReply(app, user.cookie);
-    expect(reply).toMatch(/LLM error/i);
-    expect(reply).toMatch(/not available/i);
+    expect(reply).toMatch(/could not answer this time/i);
+    expect(reply).not.toMatch(/not available|hook|error:/i);
   });
 
   it("keeps the bot hidden and does not respond when no backend is enabled (default)", async () => {
@@ -8002,7 +8469,8 @@ describe("Ollama LLM streaming (docs/15 #15)", () => {
     expect(dm.statusCode).toBe(201);
 
     const reply = await settledAssistantReply(app, user.cookie);
-    expect(reply?.body).toMatch(/LLM error/i);
+    expect(reply?.body).toMatch(/could not answer this time/i);
+    expect(reply?.body).not.toMatch(/ECONNREFUSED|fetch|127\.0\.0\.1/i);
 
     // The server itself stayed healthy — an unrelated request right after still succeeds.
     expect((await app.server.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);

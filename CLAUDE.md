@@ -138,6 +138,8 @@ request protocol, not `NODE_ENV`).
 `packages/schema` is the source of truth for wire types. Both ends validate with Zod:
 
 - **Message** is a discriminated union on `type`: `channelPost`, `channelReply`, `dm`, `reaction`.
+  A `channelReply`'s parent must be a `channelPost` (replies to replies are refused with `parent_not_found`);
+  `collectDeletionSet` still follows `parentMessageId` chains to any depth for rows an older build wrote.
   A separate `MessageCreateRequest` union is what clients POST (server assigns `id`, `authorId`,
   `createdAt`, `meta`).
 - **Channel** carries `visibility` (`public` | `private`) and, for private channels, `memberUserIds`
@@ -291,7 +293,14 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   `.loam-recovery-*` snapshots (a start-fresh's moved-aside DB + media): fail-closed in the encrypted
   branches, best-effort (warns on a survivor) in the plaintext one. A client that was offline during the
   wipe purges its cache on reconnect, because its server-confirmed identity changed (`lib/identity.ts`).
-  Optional unauthenticated panic token (`killSwitch.panicToken`) fires it via `POST /api/panic`.
+  Optional unauthenticated panic token (`killSwitch.panicToken`) fires it via `POST /api/panic`. Everything
+  after the synchronous 503 gate runs in one try/catch: a throw (`wipeAll`, the reopen, `loadData`) goes through
+  `lockDownAndReportIncomplete` and answers `{ complete: false }` (503, `wipe` broadcast, node locked), never a
+  500. A hooked fixed-key reset that had to strip `sync.token` from the restart config also sets
+  `sync.enabled: false` and leaves a `.loam-sync-off-after-reset` note the next boot logs and consumes. Both
+  entry points treat an undeclared real `LOAM_DB_KEY` as `passphrase` (`resolveDbEncryptionMode`), so
+  `loamnet --encrypt` takes the journaled fixed-key branch; only a direct `buildApp` embedder with a key and no
+  mode reaches the legacy branch.
 - **Broadcast filtering**: `broadcast()` sends to all sockets but `socketCanReceiveEvent` restricts DM
   and DM-reaction events to their participants and **everything about a private channel (the channel
   upsert, its messages, and reactions on them) to its members** (`messageAudienceUserIds` resolves the
@@ -481,7 +490,12 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
 - **Report queue**: `GET /api/moderation/reports` returns `ModerationReport`s: open ones, plus `escalated` ones for
   admins; a message report carries the reported message read live (`reportedMessage`), or `messageGone`.
   "Escalate" sets `status: "escalated"` (admins only can then resolve). Moderators/admins get a content-free
-  `reportsChanged` socket event (never broadcast) that drives the People badge.
+  `reportsChanged` socket event (never broadcast) that drives the People badge. `POST /api/reports` keeps ONE
+  open report per (reporter, target): a repeat updates its reason/note (200), a new one is 201; at most 20 open
+  reports per reporter and 2 000 node-wide (429 `too_many_attempts`). The `reports` table carries indexed
+  `target_id` + `reporter_user_id` columns (migrated and backfilled from the JSON on older DBs), so
+  `reportVisibleTo` is a targeted query and the queue is one pass over a `Map` of messages; a reported body
+  longer than `REPORTED_MESSAGE_BODY_MAX_LENGTH` is cut with `truncated: true` rather than dropped.
 - **User blocking** (docs/30 B3): a member's private block list in the `user_blocks` DAL table (write-
   through, read straight from the DB; `deleteUser` drops rows on both sides, `wipeAll`/kill switch clears
   it; never synced, broadcast or put on a user record; `UserBlockListSchema { blockedUserIds }`). Only a
@@ -621,7 +635,12 @@ kill switch. See `docs/09-security-profiles.md`.
   pre-token behaviour). Sync pulls ride the same transport encryption as clients (docs/08, docs/11).
 - **Anonymous-user creation is bounded**: `getSessionUserId` mints a new identity only within a per-IP
   budget (`maxNewIdentitiesPerWindow`, default 60 / 10 min; `AppOptions`), throwing a `429` past it —
-  a client that keeps its session cookie never touches it, and on a LAN each device has its own IP.
+  a client that keeps its session cookie never touches it, and on a LAN each device has its own IP. **Ghost
+  identities are reaped**: `reapUnusedIdentities()` (on the 30 s reaper tick) deletes a human user who never
+  agreed to the rules, holds no role or moderation state, authored or received no message, owns or belongs to
+  no channel, is on no socket, and is older than `unusedIdentityMaxAgeMs` (24 h; `AppOptions`), dropping its
+  sessions/tokens too; nothing is broadcast (clients drop it on the next `reconcileRoster`). A no-op when
+  `requireRulesAcceptance` is off.
 - **Release signing**: `pnpm --filter app keystore` generates a real signing key;
   `plugins/with-release-signing.js` injects the release `signingConfig` at prebuild **only when
   `keystore.properties` exists**. Without it, `pnpm --filter app aab` refuses to build (sets

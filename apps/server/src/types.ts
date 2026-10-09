@@ -196,6 +196,14 @@ export type AppOptions = {
   /** Sliding window (ms) for `maxNewIdentitiesPerWindow`. Defaults to 10 minutes. */
   identityWindowMs?: number;
   /**
+   * How long (ms) an identity that nobody ever used may exist before the reaper removes it. Every cookie-less
+   * request to `/api/config` (a monitoring probe, a curl, a HEAD) mints and persists a user record; one that
+   * never agreed to the member rules, never posted or received a message, holds no role and has no open
+   * socket is a ghost on the People list. Defaults to 24 hours; tests shorten it. Only applies while
+   * `requireRulesAcceptance` is on (without the rules gate there is no "never agreed" signal).
+   */
+  unusedIdentityMaxAgeMs?: number;
+  /**
    * Hard cap on live transport-encryption sessions (docs/08) — `POST /api/transport/handshake` is
    * deliberately unauthenticated (it's the bootstrap step before any session exists), so without a
    * real bound a flood of handshakes could grow the session map without limit. Expired sessions are
@@ -245,6 +253,8 @@ export type LoamApp = {
   getAdminSetupCode(): string | undefined;
   /** Delete messages older than the configured retention TTL now (also runs on a timer). */
   reapExpiredMessages(): void;
+  /** Remove identities nobody ever used, older than `unusedIdentityMaxAgeMs` (also runs on the reaper timer). */
+  reapUnusedIdentities(): void;
   /** Delete unreferenced/abandoned attachment files now (also runs on the reaper timer). */
   reapOrphanedAttachments(): Promise<void>;
   /** Delete avatar image files no user references now (also runs once at boot). */

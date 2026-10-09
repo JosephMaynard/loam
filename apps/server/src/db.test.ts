@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import type { Channel, Message, User } from "@loam/schema";
+import type { Channel, Message, Report, User } from "@loam/schema";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { assertNotPlaintextSqliteFile, importLegacyJsonData, openStore, type LoamStore } from "./db.js";
@@ -429,6 +429,66 @@ describe("openStore", () => {
       }
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("reports", () => {
+  function makeReport(id: string, targetId: string, reporterUserId: string, status: Report["status"] = "open"): Report {
+    return { id, targetType: "message", targetId, reporterUserId, reason: "spam", createdAt: 1_704_067_200_000, status };
+  }
+
+  it("finds the open reports about one target and counts open ones per reporter and node-wide", () => {
+    const store = openStore(":memory:");
+    try {
+      store.upsertReport(makeReport("rpt_000000000000000a", "msg_1", "user.rep"));
+      store.upsertReport(makeReport("rpt_000000000000000b", "msg_1", "user.other", "escalated"));
+      store.upsertReport(makeReport("rpt_000000000000000c", "msg_2", "user.rep"));
+      store.upsertReport(makeReport("rpt_000000000000000d", "msg_1", "user.rep", "resolved"));
+
+      expect(store.loadOpenReportsForTarget("msg_1").map((report) => report.id).sort()).toEqual([
+        "rpt_000000000000000a",
+        "rpt_000000000000000b",
+      ]);
+      expect(store.loadOpenReportsForTarget("msg_none")).toEqual([]);
+      expect(store.countOpenReports()).toBe(3);
+      expect(store.countOpenReports("user.rep")).toBe(2);
+      expect(store.countOpenReports("user.nobody")).toBe(0);
+
+      // Resolving moves a report out of every open count and lookup.
+      store.upsertReport(makeReport("rpt_000000000000000a", "msg_1", "user.rep", "resolved"));
+      expect(store.loadOpenReportsForTarget("msg_1").map((report) => report.id)).toEqual(["rpt_000000000000000b"]);
+      expect(store.countOpenReports("user.rep")).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("adds the indexed target and reporter columns to a reports table written before them, filled from the stored JSON", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loam-db-reports-"));
+    const path = join(dir, "loam.db");
+    try {
+      const raw = new DatabaseSync(path);
+      raw.exec(
+        "CREATE TABLE reports (id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL)",
+      );
+      const old = makeReport("rpt_000000000000000e", "msg_old", "user.old");
+      raw.prepare("INSERT INTO reports (id, status, created_at, data) VALUES (?, ?, ?, ?)").run(old.id, old.status, old.createdAt, JSON.stringify(old));
+      // A row whose JSON is unreadable must not stop the migration (it simply never matches a lookup).
+      raw.prepare("INSERT INTO reports (id, status, created_at, data) VALUES (?, ?, ?, ?)").run("rpt_000000000000000f", "open", 1, "{not json");
+      raw.close();
+
+      const store = openStore(path);
+      try {
+        expect(store.loadOpenReportsForTarget("msg_old").map((report) => report.id)).toEqual([old.id]);
+        expect(store.countOpenReports("user.old")).toBe(1);
+        const columns = (new DatabaseSync(path).prepare("PRAGMA table_info(reports)").all() as { name: string }[]).map((column) => column.name);
+        expect(columns).toEqual(expect.arrayContaining(["target_id", "reporter_user_id"]));
+      } finally {
+        store.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
