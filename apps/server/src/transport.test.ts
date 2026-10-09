@@ -390,6 +390,76 @@ describe("transport encryption foundation", () => {
     expect((await resumeIdentity(app, flood[5]!, 1)).status).toBe(200);
   });
 
+  it("binds at most four sessions to one identity token: a fifth evicts that token's own oldest", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const other = await openTransport08(app);
+    expect((await resumeIdentity(app, other, 1)).status).toBe(200);
+    const first = await openTransport08(app);
+    const { token } = await resumeIdentity(app, first, 1);
+    const sessions = [first];
+    for (let i = 0; i < 5; i += 1) {
+      const next = await openTransport08(app);
+      expect((await resumeIdentity(app, next, 1, token)).status).toBe(200);
+      sessions.push(next);
+    }
+
+    const live = async (session: { sessionId: string; key: string }, seq: number) =>
+      (await tunnelInner(app, session, seq, { m: "GET", p: "/api/users" })).outerStatus === 200;
+    expect(await live(sessions[0]!, 2)).toBe(false);
+    expect(await live(sessions[1]!, 2)).toBe(false);
+    for (const session of sessions.slice(2)) {
+      expect(await live(session, 2)).toBe(true);
+    }
+    // Another identity's session is untouched.
+    expect(await live(other, 2)).toBe(true);
+  });
+
+  it("a flood resuming one token (or a few) at the cap never evicts another person's bound session", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } }, { transportSessionCap: 6 });
+    const person = await openTransport08(app);
+    expect((await resumeIdentity(app, person, 1)).status).toBe(200);
+
+    // Resuming an existing token costs no identity budget: two attacker tokens, then twenty binds.
+    const tokens: string[] = [];
+    for (let i = 0; i < 2; i += 1) {
+      tokens.push((await resumeIdentity(app, await openTransport08(app), 1)).token);
+    }
+    for (let i = 0; i < 20; i += 1) {
+      expect((await resumeIdentity(app, await openTransport08(app), 1, tokens[i % 2])).status).toBe(200);
+    }
+
+    const users = await tunnelInner(app, person, 2, { m: "GET", p: "/api/users" });
+    expect(users.outerStatus).toBe(200);
+    expect(users.status).toBe(200);
+  });
+
+  it("an anonymous flood from one source evicts its own sessions, not another client's older one", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } }, { transportSessionCap: 4 });
+    const handshakeFrom = async (remoteAddress: string) => {
+      const hello = transportClientHello();
+      const res = await app.server.inject({
+        method: "POST",
+        url: "/api/transport/handshake",
+        remoteAddress,
+        payload: { clientEphemeralPublic: hello.ephemeralPublic },
+      });
+      return TransportHandshakeResponseSchema.parse(res.json()).sessionId;
+    };
+    // An unpinned cookie client on the LAN: its session stays anonymous for its whole life.
+    const member = await newSession(app);
+    const memberSession = await handshakeFrom("192.168.4.20");
+    for (let i = 0; i < 10; i += 1) {
+      await handshakeFrom("192.168.4.66");
+    }
+
+    const read = await app.server.inject({
+      method: "GET",
+      url: "/api/users",
+      headers: { cookie: member.cookie, "x-loam-enc": memberSession },
+    });
+    expect(read.statusCode).toBe(200);
+  });
+
   it("answers a repeat resume on a bound session with the cached identity, never a second one", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
     const session = await openTransport08(app);
