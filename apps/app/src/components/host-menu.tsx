@@ -1,5 +1,5 @@
 import { Fragment } from 'react';
-import { Modal, Pressable, StyleSheet, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { SymbolView, type AndroidSymbol, type SFSymbol } from 'expo-symbols';
 
 import { ThemedText } from '@/components/themed-text';
@@ -55,31 +55,36 @@ export function HostMenu({
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <Pressable style={styles.backdrop} onPress={onClose} accessibilityRole="button" accessibilityLabel={t('common.close')}>
         <View style={[styles.cardWrap, { paddingTop: top }]}>
-          {/* A Pressable that swallows taps, so a tap on the card's padding doesn't close the menu. */}
-          <Pressable>
+          {/* A Pressable that swallows taps, so a tap on the card's padding doesn't close the menu. Not a
+              keyboard focus stop itself: the items are. */}
+          <Pressable focusable={false} style={styles.cardPress}>
             <ThemedView type="backgroundElement" style={[styles.card, { borderColor: theme.border }]}>
-              {GROUPS.map((group, index) => (
-                <Fragment key={group[0]!.action}>
-                  {index > 0 ? <View style={[styles.divider, { backgroundColor: theme.border }]} /> : null}
-                  {group.map((item) => {
-                    const danger = item.action === 'reset';
-                    const tint = danger ? theme.danger : theme.primaryInk;
-                    return (
-                      <Pressable
-                        key={item.action}
-                        onPress={() => {
-                          onClose();
-                          onSelect(item.action);
-                        }}
-                        accessibilityRole="button"
-                        style={({ pressed }) => [styles.item, pressed && { backgroundColor: theme.backgroundSelected }]}>
-                        <SymbolView name={item.icon} size={22} tintColor={tint} type="monochrome" />
-                        <ThemedText style={[styles.label, danger && { color: theme.danger }]}>{t(item.label)}</ThemedText>
-                      </Pressable>
-                    );
-                  })}
-                </Fragment>
-              ))}
+              {/* Scrolls when the window is shorter than the list (a landscape phone, a small laptop window),
+                  so Emergency reset at the bottom stays reachable. */}
+              <ScrollView bounces={false} contentContainerStyle={styles.items}>
+                {GROUPS.map((group, index) => (
+                  <Fragment key={group[0]!.action}>
+                    {index > 0 ? <View style={[styles.divider, { backgroundColor: theme.border }]} /> : null}
+                    {group.map((item) => {
+                      const danger = item.action === 'reset';
+                      const tint = danger ? theme.danger : theme.primaryInk;
+                      return (
+                        <Pressable
+                          key={item.action}
+                          onPress={() => {
+                            onClose();
+                            onSelect(item.action);
+                          }}
+                          accessibilityRole="button"
+                          style={({ pressed }) => [styles.item, pressed && { backgroundColor: theme.backgroundSelected }]}>
+                          <SymbolView name={item.icon} size={22} tintColor={tint} type="monochrome" />
+                          <ThemedText style={[styles.label, danger && { color: theme.danger }]}>{t(item.label)}</ThemedText>
+                        </Pressable>
+                      );
+                    })}
+                  </Fragment>
+                ))}
+              </ScrollView>
             </ThemedView>
           </Pressable>
         </View>
@@ -90,8 +95,11 @@ export function HostMenu({
 
 const styles = StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
-  cardWrap: { alignItems: 'flex-end', paddingRight: Spacing.two, marginTop: Spacing.one },
-  card: { minWidth: 240, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, paddingVertical: Spacing.one, overflow: 'hidden' },
+  // The wrap fills the backdrop and the card may shrink inside it, which is what bounds the ScrollView.
+  cardWrap: { flex: 1, alignItems: 'flex-end', paddingRight: Spacing.two, paddingBottom: Spacing.two, marginTop: Spacing.one },
+  cardPress: { flexShrink: 1, maxHeight: '100%' },
+  card: { minWidth: 240, flexShrink: 1, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, overflow: 'hidden' },
+  items: { paddingVertical: Spacing.one },
   item: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 18, paddingVertical: 13 },
   label: { fontSize: 16, lineHeight: 22, fontWeight: 500 },
   divider: { height: StyleSheet.hairlineWidth, marginVertical: Spacing.one },

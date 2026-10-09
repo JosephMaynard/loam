@@ -109,9 +109,11 @@ device checks below, and size headroom before a production track.
   in `plugins/with-loam-host.js` (still device-unverified, like the rest of Phase 3).
 - **Themed icon.** `monochromeImage` **added** (a white wordmark on transparent). Still open: a proper
   adaptive foreground layer (the same PNG serves icon, adaptive foreground and favicon).
-- **Device filtering — fixed.** Wi-Fi, Wi-Fi Aware, location (+ GPS/network), Bluetooth/BLE and the
-  portrait screen (implied by `orientation: "portrait"`) are declared `uses-feature … required="false"`, so
-  tablets/Chromebooks without them see the listing (no hotspot / no mesh there).
+- **Device filtering — fixed.** Wi-Fi, Wi-Fi Aware, location (+ GPS/network), Bluetooth/BLE, the camera
+  and the touchscreen (`touchscreen` + `faketouch`) are declared `uses-feature … required="false"`, so
+  tablets, Chromebooks and Android laptops without them see the listing (no hotspot / no mesh / no scanner
+  there). No orientation is locked, so no screen-orientation feature is implied (see "Large screens and
+  Android laptops" below).
 - **`versionCode` — checked in CI.** Still hand-edited in `app.json`, but `scripts/check-versions.mjs
   --release-tag` fails a tag build unless the tag's `X.Y.Z` equals the manifest version and `versionCode`
   is greater than that of **every** earlier release tag (read from each tag's `app.json`); `ci.yml` checks
@@ -127,6 +129,41 @@ device checks below, and size headroom before a production track.
   fails without them and runs `pnpm test` + the app typecheck before building. Dependabot bumps the pinned
   action SHAs weekly (`github-actions` ecosystem).
 - Predictive back is opted out (`predictiveBackGestureEnabled: false`) — fine for now, revisit later.
+
+## Large screens and Android laptops
+
+What the build declares (read it back in the generated `apps/app/android/app/src/main/AndroidManifest.xml`
+after a prebuild):
+
+- **No orientation lock.** `app.json` `orientation: "default"` → `android:screenOrientation="unspecified"`,
+  so the host runs in portrait and landscape. Play ranks and badges apps that resize well, aren't
+  letterboxed and support both orientations, and warns on listings that lock one; Android 16 ignores an
+  orientation lock, `resizeableActivity` and aspect-ratio limits on displays of 600dp and up for apps
+  targeting API 36 (LOAM does), so the old portrait lock was already a no-op on tablets and laptops.
+- **`android:resizeableActivity="true"`** on `MainActivity` (`plugins/with-loam-host.js`), Expo's
+  `configChanges` kept, so split-screen, freeform and desktop windows resize the app without recreating it.
+- **`android.hardware.touchscreen` and `android.hardware.faketouch` `required="false"`**, as Google's
+  Chromebook/laptop guidance asks: every app implies a required touchscreen otherwise, which hides it from
+  devices with only a keyboard and trackpad. Every native control is a `Pressable`/`TextInput` with a role
+  (mouse clicks, keyboard focus, Enter on the text fields); the WebView handles both itself.
+- **Nothing else that would exclude a laptop or tablet**: no `supports-screens`, no `telephony`, no
+  required radio or camera (all optional, above), no screen-orientation feature.
+- A LocalOnlyHotspot on a laptop depends on its Wi-Fi hardware, so **Wi-Fi mode is the expected path
+  there**; with no Wi-Fi it hosts on the laptop's wired network (docs/04 "Hosting modes").
+
+**Owner (Play Console):**
+
+1. In the app's form factors, declare **Tablet** and **Chromebook** support beside Phone (Android laptops
+   fall under the same large-screen program).
+2. Upload at least **four tablet** screenshots (the 7-inch and 10-inch sets) and at least **four
+   Chromebook** screenshots, each **16:9**, of the host in landscape with the WebView showing the client's
+   desktop layout (the join screen, display mode, a channel, the admin area), beside the phone set.
+3. After uploading the bundle, read the **pre-launch report**'s large-screen quality section
+   (letterboxing, orientation, resizing, keyboard and mouse) and the large-screen warnings on the listing
+   dashboard, and fix what it flags before promoting.
+4. Add a tablet and a Chromebook or Android laptop (or the emulator's tablet and desktop profiles) to the
+   device run (docs/21): rotate while hosting, resize with display mode on, open the menu and the recovery
+   screens in a short window, and host from a wired-only laptop in Wi-Fi mode.
 
 ## Still needs a physical device
 

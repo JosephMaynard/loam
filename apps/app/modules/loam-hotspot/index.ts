@@ -75,8 +75,8 @@ export async function readHotspotAddressCandidates(): Promise<HotspotAddressCand
 /**
  * The phone's Wi-Fi client state for Wi-Fi hosting mode (docs/04 "Hosting modes"). Resolves
  * `{ connected: false }` when unsupported, when the native read fails, or when it answers with something
- * malformed — never rejects — so the share screen shows "connect to a Wi-Fi network first", not an error.
- * Never asks for a permission.
+ * malformed — never rejects — so the share screen shows "connect to Wi-Fi or a wired network first", not an
+ * error. Never asks for a permission.
  */
 export async function readWifiStationInfo(): Promise<WifiStationInfo> {
   if (!LoamHotspotModule) {
@@ -91,6 +91,7 @@ export async function readWifiStationInfo(): Promise<WifiStationInfo> {
       connected: info.connected === true,
       address: typeof info.address === 'string' && info.address.length > 0 ? info.address : null,
       ssid: typeof info.ssid === 'string' && info.ssid.length > 0 ? info.ssid : null,
+      wired: info.wired === true,
     };
   } catch {
     return { connected: false };

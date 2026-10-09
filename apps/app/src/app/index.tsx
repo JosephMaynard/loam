@@ -12,6 +12,7 @@ import {
   Linking,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   TextInput,
   View,
@@ -1236,289 +1237,312 @@ function HostScreen() {
   // derived above the ready-return, beside `dbLocked`, because the lockedMode effect needs it too.)
 
   return (
-    <ThemedView style={styles.center}>
-      <ThemedText type="title">{t('host.title')}</ThemedText>
-      {/* Persistent boot notice (AF2/P1-4), shown here too so it's visible even while still "starting"
-          or on the generic timeout/error screen — independent of `status`. Never carries
-          `DB_UNREADABLE_CODE` any more (P1-1) — that gets the dedicated FATAL block below instead,
-          since (unlike every other notice code) it means boot did NOT keep running. */}
-      {notice && !noticeDismissed ? (
-        <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">{t('boot.noticeDowngraded')}</ThemedText>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {notice.message ?? t('boot.seeEncryptionSettings')}
-          </ThemedText>
-          <ThemedView style={styles.noticeBannerActions}>
-            <Pressable onPress={() => setNoticeDismissed(true)} accessibilityRole="button" hitSlop={Spacing.two}>
-              <ThemedText type="link">{t('common.dismiss')}</ThemedText>
-            </Pressable>
-          </ThemedView>
-        </ThemedView>
-      ) : null}
-      {/* FATAL, NOT dismissible (P1-1, Sol round 3, AF8/design#1) — an existing encrypted database the
-          current key can't open. The server refuses to auto-replace an unreadable DB, so "Preserve old
-          database & start fresh" (an explicit, one-shot operator confirmation) is the only way forward
-          short of reinstalling; a subsequent `ready` (the in-process retry succeeding) clears this. */}
-      {dbUnreadable ? (
-        <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">{t('boot.unreadableTitle')}</ThemedText>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {errorMessage ?? t('boot.seeEncryptionSettings')}
-          </ThemedText>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {t('boot.unreadableBody')}
-          </ThemedText>
-          {lockedMode === 'passphrase' ? (
-            // A wrong passphrase is the common cause here now that it is asked for at EVERY start (review
-            // 2026-09-04): offer a retry with the same candidate flow as the locked screen — the new entry is
-            // tried on the intact database, never committed, and nothing is deleted.
-            <>
-              <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-                {t('boot.unreadablePassphraseHint')}
-              </ThemedText>
-              <TextInput
-                value={unlockPassphraseInput}
-                onChangeText={setUnlockPassphraseInput}
-                placeholder={t('boot.passphrasePlaceholder')}
-                placeholderTextColor={theme.textSecondary}
-                autoCapitalize="none"
-                autoCorrect={false}
-                secureTextEntry
-                style={[styles.textInput, { color: theme.text, borderColor: theme.textSecondary }]}
-              />
-              <ThemedView style={styles.noticeBannerActions}>
-                <Pressable
-                  onPress={() => void handleUnlockWithPassphrase()}
-                  disabled={unlockBusy || startFreshBusy || !unlockPassphraseInput}
-                  accessibilityRole="button">
-                  <ThemedView type="backgroundElement" style={styles.retry}>
-                    <ThemedText type="link">{unlockBusy ? t('boot.retrying') : t('boot.retryWithPassphrase')}</ThemedText>
-                  </ThemedView>
-                </Pressable>
-              </ThemedView>
-              {unlockMessage ? (
+    <ThemedView style={styles.flex}>
+      <SafeAreaView style={styles.flex} edges={['top', 'bottom']}>
+        {/* A scrolling column: the recovery blocks below (a passphrase field, two or three actions and their
+            messages, on top of the notice) outgrow a landscape phone or a short laptop window, and the
+            keyboard takes half of what is left; `padding` here for the same edge-to-edge reason as the
+            WebView's avoiding view above. */}
+        <KeyboardAvoidingView behavior="padding" style={styles.flex}>
+          <ScrollView contentContainerStyle={styles.center} keyboardShouldPersistTaps="handled">
+            <ThemedText type="title">{t('host.title')}</ThemedText>
+            {/* Persistent boot notice (AF2/P1-4), shown here too so it's visible even while still "starting"
+                or on the generic timeout/error screen — independent of `status`. Never carries
+                `DB_UNREADABLE_CODE` any more (P1-1) — that gets the dedicated FATAL block below instead,
+                since (unlike every other notice code) it means boot did NOT keep running. */}
+            {notice && !noticeDismissed ? (
+              <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
+                <ThemedText type="smallBold">{t('boot.noticeDowngraded')}</ThemedText>
                 <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-                  {unlockMessage}
+                  {notice.message ?? t('boot.seeEncryptionSettings')}
                 </ThemedText>
-              ) : null}
-            </>
-          ) : null}
-          <ThemedView style={styles.noticeBannerActions}>
-            <Pressable onPress={() => void handleStartFresh()} disabled={startFreshBusy} accessibilityRole="button">
-              <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">
-                  {startFreshBusy ? t('boot.confirming') : t('boot.preserveStartFresh')}
+                <ThemedView style={styles.noticeBannerActions}>
+                  <Pressable onPress={() => setNoticeDismissed(true)} accessibilityRole="button" hitSlop={Spacing.two}>
+                    <ThemedText type="link">{t('common.dismiss')}</ThemedText>
+                  </Pressable>
+                </ThemedView>
+              </ThemedView>
+            ) : null}
+            {/* FATAL, NOT dismissible (P1-1, Sol round 3, AF8/design#1) — an existing encrypted database the
+                current key can't open. The server refuses to auto-replace an unreadable DB, so "Preserve old
+                database & start fresh" (an explicit, one-shot operator confirmation) is the only way forward
+                short of reinstalling; a subsequent `ready` (the in-process retry succeeding) clears this. */}
+            {dbUnreadable ? (
+              <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
+                <ThemedText type="smallBold">{t('boot.unreadableTitle')}</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                  {errorMessage ?? t('boot.seeEncryptionSettings')}
                 </ThemedText>
-              </ThemedView>
-            </Pressable>
-          </ThemedView>
-          {startFreshMessage ? (
-            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-              {startFreshMessage}
-            </ThemedText>
-          ) : null}
-        </ThemedView>
-      ) : null}
-      {/* FATAL, NOT dismissible (P1-1, Sol round 4) — a `persistent`/`passphrase` boot found no usable
-          key at all and refused to start the server rather than silently fall back to plaintext.
-          Passphrase mode gets an inline "enter passphrase to unlock" input; persistent mode (or
-          passphrase mode too, e.g. after saving the passphrase) gets a plain Retry. A subsequent `ready`
-          clears this the same way it clears `dbUnreadable` above. */}
-      {dbLocked ? (
-        <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">{t('boot.lockedTitle')}</ThemedText>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {errorMessage ?? t('boot.lockedBody')}
-          </ThemedText>
-          {lockedMode === 'passphrase' ? (
-            <>
-              <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-                {t('boot.lockedPassphraseHint')}
-              </ThemedText>
-              <TextInput
-                value={unlockPassphraseInput}
-                onChangeText={setUnlockPassphraseInput}
-                placeholder={t('boot.passphrasePlaceholder')}
-                placeholderTextColor={theme.textSecondary}
-                autoCapitalize="none"
-                autoCorrect={false}
-                secureTextEntry
-                style={[styles.textInput, { color: theme.text, borderColor: theme.textSecondary }]}
-              />
-              <ThemedView style={styles.noticeBannerActions}>
-                <Pressable
-                  onPress={() => void handleUnlockWithPassphrase()}
-                  disabled={unlockBusy || !unlockPassphraseInput}
-                  accessibilityRole="button">
-                  <ThemedView type="backgroundElement" style={styles.retry}>
-                    <ThemedText type="link">{unlockBusy ? t('boot.unlocking') : t('boot.unlock')}</ThemedText>
-                  </ThemedView>
-                </Pressable>
-              </ThemedView>
-            </>
-          ) : null}
-          <ThemedView style={styles.noticeBannerActions}>
-            <Pressable onPress={() => void handleRetryUnlock()} disabled={unlockBusy} accessibilityRole="button">
-              <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">{unlockBusy ? t('boot.retrying') : t('common.retry')}</ThemedText>
-              </ThemedView>
-            </Pressable>
-          </ThemedView>
-          {unlockMessage ? (
-            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-              {unlockMessage}
-            </ThemedText>
-          ) : null}
-        </ThemedView>
-      ) : null}
-      {/* FATAL, NOT dismissible (P1-4-RN, Sol round 8) — an encrypted mode is selected but an existing
-          PLAINTEXT database is on disk. There is no in-place plaintext→encrypted conversion, so the host
-          must NEVER silently serve plaintext under an encrypted selection: the operator must explicitly
-          choose to delete the existing data and start a fresh encrypted database, or switch encryption
-          back off to keep the existing unencrypted data. A subsequent `ready` clears this (onStatus). */}
-      {dbPlaintextUnconverted ? (
-        <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">{t('boot.plaintextTitle')}</ThemedText>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {errorMessage ?? t('boot.plaintextBody')}
-          </ThemedText>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {t('boot.plaintextChoices')}
-          </ThemedText>
-          <ThemedView style={styles.noticeBannerActions}>
-            <Pressable onPress={() => void handleStartFresh()} disabled={startFreshBusy || revertBusy} accessibilityRole="button">
-              <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">
-                  {startFreshBusy ? t('setup.starting') : t('boot.deleteStartEncrypted')}
+                <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                  {t('boot.unreadableBody')}
                 </ThemedText>
+                {lockedMode === 'passphrase' ? (
+                  // A wrong passphrase is the common cause here now that it is asked for at EVERY start (review
+                  // 2026-09-04): offer a retry with the same candidate flow as the locked screen — the new entry is
+                  // tried on the intact database, never committed, and nothing is deleted.
+                  <>
+                    <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                      {t('boot.unreadablePassphraseHint')}
+                    </ThemedText>
+                    <TextInput
+                      value={unlockPassphraseInput}
+                      onChangeText={setUnlockPassphraseInput}
+                      placeholder={t('boot.passphrasePlaceholder')}
+                      placeholderTextColor={theme.textSecondary}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      secureTextEntry
+                      returnKeyType="done"
+                      onSubmitEditing={() => {
+                        if (!unlockBusy && !startFreshBusy && unlockPassphraseInput) {
+                          void handleUnlockWithPassphrase();
+                        }
+                      }}
+                      style={[styles.textInput, { color: theme.text, borderColor: theme.textSecondary }]}
+                    />
+                    <ThemedView style={styles.noticeBannerActions}>
+                      <Pressable
+                        onPress={() => void handleUnlockWithPassphrase()}
+                        disabled={unlockBusy || startFreshBusy || !unlockPassphraseInput}
+                        accessibilityRole="button">
+                        <ThemedView type="backgroundElement" style={styles.retry}>
+                          <ThemedText type="link">{unlockBusy ? t('boot.retrying') : t('boot.retryWithPassphrase')}</ThemedText>
+                        </ThemedView>
+                      </Pressable>
+                    </ThemedView>
+                    {unlockMessage ? (
+                      <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                        {unlockMessage}
+                      </ThemedText>
+                    ) : null}
+                  </>
+                ) : null}
+                <ThemedView style={styles.noticeBannerActions}>
+                  <Pressable onPress={() => void handleStartFresh()} disabled={startFreshBusy} accessibilityRole="button">
+                    <ThemedView type="backgroundElement" style={styles.retry}>
+                      <ThemedText type="link">
+                        {startFreshBusy ? t('boot.confirming') : t('boot.preserveStartFresh')}
+                      </ThemedText>
+                    </ThemedView>
+                  </Pressable>
+                </ThemedView>
+                {startFreshMessage ? (
+                  <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                    {startFreshMessage}
+                  </ThemedText>
+                ) : null}
               </ThemedView>
-            </Pressable>
-            <Pressable onPress={() => void handleRevertToOff()} disabled={startFreshBusy || revertBusy} accessibilityRole="button">
-              <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">{revertBusy ? t('boot.switching') : t('boot.switchBackOff')}</ThemedText>
+            ) : null}
+            {/* FATAL, NOT dismissible (P1-1, Sol round 4) — a `persistent`/`passphrase` boot found no usable
+                key at all and refused to start the server rather than silently fall back to plaintext.
+                Passphrase mode gets an inline "enter passphrase to unlock" input; persistent mode (or
+                passphrase mode too, e.g. after saving the passphrase) gets a plain Retry. A subsequent `ready`
+                clears this the same way it clears `dbUnreadable` above. */}
+            {dbLocked ? (
+              <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
+                <ThemedText type="smallBold">{t('boot.lockedTitle')}</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                  {errorMessage ?? t('boot.lockedBody')}
+                </ThemedText>
+                {lockedMode === 'passphrase' ? (
+                  <>
+                    <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                      {t('boot.lockedPassphraseHint')}
+                    </ThemedText>
+                    <TextInput
+                      value={unlockPassphraseInput}
+                      onChangeText={setUnlockPassphraseInput}
+                      placeholder={t('boot.passphrasePlaceholder')}
+                      placeholderTextColor={theme.textSecondary}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      secureTextEntry
+                      returnKeyType="done"
+                      onSubmitEditing={() => {
+                        if (!unlockBusy && unlockPassphraseInput) {
+                          void handleUnlockWithPassphrase();
+                        }
+                      }}
+                      style={[styles.textInput, { color: theme.text, borderColor: theme.textSecondary }]}
+                    />
+                    <ThemedView style={styles.noticeBannerActions}>
+                      <Pressable
+                        onPress={() => void handleUnlockWithPassphrase()}
+                        disabled={unlockBusy || !unlockPassphraseInput}
+                        accessibilityRole="button">
+                        <ThemedView type="backgroundElement" style={styles.retry}>
+                          <ThemedText type="link">{unlockBusy ? t('boot.unlocking') : t('boot.unlock')}</ThemedText>
+                        </ThemedView>
+                      </Pressable>
+                    </ThemedView>
+                  </>
+                ) : null}
+                <ThemedView style={styles.noticeBannerActions}>
+                  <Pressable onPress={() => void handleRetryUnlock()} disabled={unlockBusy} accessibilityRole="button">
+                    <ThemedView type="backgroundElement" style={styles.retry}>
+                      <ThemedText type="link">{unlockBusy ? t('boot.retrying') : t('common.retry')}</ThemedText>
+                    </ThemedView>
+                  </Pressable>
+                </ThemedView>
+                {unlockMessage ? (
+                  <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                    {unlockMessage}
+                  </ThemedText>
+                ) : null}
               </ThemedView>
-            </Pressable>
-          </ThemedView>
-          {startFreshMessage ? (
-            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-              {startFreshMessage}
-            </ThemedText>
-          ) : null}
-          {revertMessage ? (
-            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-              {revertMessage}
-            </ThemedText>
-          ) : null}
-        </ThemedView>
-      ) : null}
-      {/* FATAL, NOT dismissible — encrypted storage can't load on this device, and the host refuses to start
-          unencrypted under an encrypted selection. Retry re-probes the driver; "Start without encryption"
-          is the only way to plaintext, behind a confirmation. A subsequent `ready` clears this (onStatus). */}
-      {dbDriverMissing ? (
-        <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">{t('boot.driverMissingTitle')}</ThemedText>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {errorMessage ?? t('boot.driverMissingBody')}
-          </ThemedText>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {t('boot.driverMissingChoices')}
-          </ThemedText>
-          <ThemedView style={styles.noticeBannerActions}>
-            <Pressable onPress={() => void handleRetryUnlock()} disabled={unlockBusy || revertBusy} accessibilityRole="button">
-              <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">{unlockBusy ? t('boot.retrying') : t('common.retry')}</ThemedText>
+            ) : null}
+            {/* FATAL, NOT dismissible (P1-4-RN, Sol round 8) — an encrypted mode is selected but an existing
+                PLAINTEXT database is on disk. There is no in-place plaintext→encrypted conversion, so the host
+                must NEVER silently serve plaintext under an encrypted selection: the operator must explicitly
+                choose to delete the existing data and start a fresh encrypted database, or switch encryption
+                back off to keep the existing unencrypted data. A subsequent `ready` clears this (onStatus). */}
+            {dbPlaintextUnconverted ? (
+              <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
+                <ThemedText type="smallBold">{t('boot.plaintextTitle')}</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                  {errorMessage ?? t('boot.plaintextBody')}
+                </ThemedText>
+                <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                  {t('boot.plaintextChoices')}
+                </ThemedText>
+                <ThemedView style={styles.noticeBannerActions}>
+                  <Pressable onPress={() => void handleStartFresh()} disabled={startFreshBusy || revertBusy} accessibilityRole="button">
+                    <ThemedView type="backgroundElement" style={styles.retry}>
+                      <ThemedText type="link">
+                        {startFreshBusy ? t('setup.starting') : t('boot.deleteStartEncrypted')}
+                      </ThemedText>
+                    </ThemedView>
+                  </Pressable>
+                  <Pressable onPress={() => void handleRevertToOff()} disabled={startFreshBusy || revertBusy} accessibilityRole="button">
+                    <ThemedView type="backgroundElement" style={styles.retry}>
+                      <ThemedText type="link">{revertBusy ? t('boot.switching') : t('boot.switchBackOff')}</ThemedText>
+                    </ThemedView>
+                  </Pressable>
+                </ThemedView>
+                {startFreshMessage ? (
+                  <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                    {startFreshMessage}
+                  </ThemedText>
+                ) : null}
+                {revertMessage ? (
+                  <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                    {revertMessage}
+                  </ThemedText>
+                ) : null}
               </ThemedView>
-            </Pressable>
-            <Pressable onPress={handleStartUnencryptedPress} disabled={unlockBusy || revertBusy} accessibilityRole="button">
-              <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">{revertBusy ? t('boot.switching') : t('boot.startUnencrypted')}</ThemedText>
+            ) : null}
+            {/* FATAL, NOT dismissible — encrypted storage can't load on this device, and the host refuses to start
+                unencrypted under an encrypted selection. Retry re-probes the driver; "Start without encryption"
+                is the only way to plaintext, behind a confirmation. A subsequent `ready` clears this (onStatus). */}
+            {dbDriverMissing ? (
+              <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
+                <ThemedText type="smallBold">{t('boot.driverMissingTitle')}</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                  {errorMessage ?? t('boot.driverMissingBody')}
+                </ThemedText>
+                <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                  {t('boot.driverMissingChoices')}
+                </ThemedText>
+                <ThemedView style={styles.noticeBannerActions}>
+                  <Pressable onPress={() => void handleRetryUnlock()} disabled={unlockBusy || revertBusy} accessibilityRole="button">
+                    <ThemedView type="backgroundElement" style={styles.retry}>
+                      <ThemedText type="link">{unlockBusy ? t('boot.retrying') : t('common.retry')}</ThemedText>
+                    </ThemedView>
+                  </Pressable>
+                  <Pressable onPress={handleStartUnencryptedPress} disabled={unlockBusy || revertBusy} accessibilityRole="button">
+                    <ThemedView type="backgroundElement" style={styles.retry}>
+                      <ThemedText type="link">{revertBusy ? t('boot.switching') : t('boot.startUnencrypted')}</ThemedText>
+                    </ThemedView>
+                  </Pressable>
+                </ThemedView>
+                {unlockMessage ? (
+                  <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                    {unlockMessage}
+                  </ThemedText>
+                ) : null}
+                {revertMessage ? (
+                  <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                    {revertMessage}
+                  </ThemedText>
+                ) : null}
               </ThemedView>
-            </Pressable>
-          </ThemedView>
-          {unlockMessage ? (
-            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-              {unlockMessage}
-            </ThemedText>
-          ) : null}
-          {revertMessage ? (
-            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-              {revertMessage}
-            </ThemedText>
-          ) : null}
-        </ThemedView>
-      ) : null}
-      {/* P1-2(b): a wipe-key-clear attempt failed and was NOT acked as complete — the launcher's durable
-          marker is still pending, so this must never look like a benign notice; it stays until a retry
-          succeeds. Shown in both the ready and non-ready views (see the matching block above) since a
-          wipe-restart signal can arrive at any time. */}
-      {wipeClearFailure ? (
-        <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
-          <ThemedText type="smallBold">{t('boot.keyClearTitle')}</ThemedText>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {wipeClearFailure}
-          </ThemedText>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {t('boot.keyClearBody')}
-          </ThemedText>
-          <ThemedView style={styles.noticeBannerActions}>
-            <Pressable onPress={() => void attemptWipeKeyClear()} disabled={wipeClearBusy} accessibilityRole="button">
-              <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">{wipeClearBusy ? t('boot.retrying') : t('common.retry')}</ThemedText>
+            ) : null}
+            {/* P1-2(b): a wipe-key-clear attempt failed and was NOT acked as complete — the launcher's durable
+                marker is still pending, so this must never look like a benign notice; it stays until a retry
+                succeeds. Shown in both the ready and non-ready views (see the matching block above) since a
+                wipe-restart signal can arrive at any time. */}
+            {wipeClearFailure ? (
+              <ThemedView type="backgroundSelected" style={styles.dbEncryptionNotice}>
+                <ThemedText type="smallBold">{t('boot.keyClearTitle')}</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                  {wipeClearFailure}
+                </ThemedText>
+                <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                  {t('boot.keyClearBody')}
+                </ThemedText>
+                <ThemedView style={styles.noticeBannerActions}>
+                  <Pressable onPress={() => void attemptWipeKeyClear()} disabled={wipeClearBusy} accessibilityRole="button">
+                    <ThemedView type="backgroundElement" style={styles.retry}>
+                      <ThemedText type="link">{wipeClearBusy ? t('boot.retrying') : t('common.retry')}</ThemedText>
+                    </ThemedView>
+                  </Pressable>
+                </ThemedView>
               </ThemedView>
-            </Pressable>
-          </ThemedView>
-        </ThemedView>
-      ) : null}
-      {status === 'starting' ? (
-        <>
-          <ActivityIndicator size="large" style={styles.spinner} />
-          <ThemedText type="subtitle">{t('host.starting')}</ThemedText>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {t('boot.startingBody')}
-          </ThemedText>
-        </>
-      ) : (
-        <>
-          <ThemedText type="subtitle">
-            {nodeStatus === 'ready' ? t('boot.loadFailedTitle') : t('boot.startFailedTitle')}
-          </ThemedText>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-            {errorMessage ?? t('boot.notReady')}
-          </ThemedText>
-          {nodeStatus === 'ready' ? (
-            // The server is up; a Retry just remounts the WebView for a fresh load.
+            ) : null}
+            {status === 'starting' ? (
+              <>
+                <ActivityIndicator size="large" style={styles.spinner} />
+                <ThemedText type="subtitle">{t('host.starting')}</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                  {t('boot.startingBody')}
+                </ThemedText>
+              </>
+            ) : (
+              <>
+                <ThemedText type="subtitle">
+                  {nodeStatus === 'ready' ? t('boot.loadFailedTitle') : t('boot.startFailedTitle')}
+                </ThemedText>
+                <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                  {errorMessage ?? t('boot.notReady')}
+                </ThemedText>
+                {nodeStatus === 'ready' ? (
+                  // The server is up; a Retry just remounts the WebView for a fresh load.
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => {
+                      setErrorMessage(undefined);
+                      setStatus('ready');
+                    }}>
+                    <ThemedView type="backgroundElement" style={styles.retry}>
+                      <ThemedText type="link">{t('common.retry')}</ThemedText>
+                    </ThemedView>
+                  </Pressable>
+                ) : dbUnreadable || dbLocked || dbPlaintextUnconverted || dbDriverMissing ? null : (
+                  // The embedded runtime can't restart in-process (nodejs-mobile is one-shot per process) —
+                  // except for `dbUnreadable` (P1-1, Sol round 3), `dbLocked` (P1-1, Sol round 4), and
+                  // `dbPlaintextUnconverted` (P1-4-RN, Sol round 8), all of which have their own in-app recovery
+                  // above and deliberately do NOT show this text: closing/reopening WITHOUT using that recovery
+                  // first would just hit the identical failure again (nothing changed), so this generic
+                  // instruction would be actively misleading.
+                  <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
+                    {t('boot.closeReopen')}
+                  </ThemedText>
+                )}
+              </>
+            )}
+            {/* Reachable even when the host never became ready (G2) — an unopenable/undecryptable DB under
+                an encrypted mode would otherwise lock the operator out with no way back to Off. */}
             <Pressable
-              onPress={() => {
-                setErrorMessage(undefined);
-                setStatus('ready');
-              }}>
+              onPress={() => setDbEncryptionOpen(true)}
+              accessibilityRole="button"
+              accessibilityLabel={t('boot.encryptionSettingsA11y')}>
               <ThemedView type="backgroundElement" style={styles.retry}>
-                <ThemedText type="link">{t('common.retry')}</ThemedText>
+                <ThemedText type="link">{t('boot.encryptionSettings')}</ThemedText>
               </ThemedView>
             </Pressable>
-          ) : dbUnreadable || dbLocked || dbPlaintextUnconverted || dbDriverMissing ? null : (
-            // The embedded runtime can't restart in-process (nodejs-mobile is one-shot per process) —
-            // except for `dbUnreadable` (P1-1, Sol round 3), `dbLocked` (P1-1, Sol round 4), and
-            // `dbPlaintextUnconverted` (P1-4-RN, Sol round 8), all of which have their own in-app recovery
-            // above and deliberately do NOT show this text: closing/reopening WITHOUT using that recovery
-            // first would just hit the identical failure again (nothing changed), so this generic
-            // instruction would be actively misleading.
-            <ThemedText type="small" themeColor="textSecondary" style={styles.centerText}>
-              {t('boot.closeReopen')}
-            </ThemedText>
-          )}
-        </>
-      )}
-      {/* Reachable even when the host never became ready (G2) — an unopenable/undecryptable DB under
-          an encrypted mode would otherwise lock the operator out with no way back to Off. */}
-      <Pressable
-        onPress={() => setDbEncryptionOpen(true)}
-        accessibilityRole="button"
-        accessibilityLabel={t('boot.encryptionSettingsA11y')}>
-        <ThemedView type="backgroundElement" style={styles.retry}>
-          <ThemedText type="link">{t('boot.encryptionSettings')}</ThemedText>
-        </ThemedView>
-      </Pressable>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
       {/* P1-1 (Sol round 7, hole 4): pass the bridge `channel` here too. Without it, a mode change made
           through this LOCKED/error-screen recovery UI couldn't write the mode-NAME hint at all — so an
           off→encrypted (or encrypted→off) change here left the hint stale and a later transient
@@ -1544,12 +1568,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  // The boot/recovery column: a ScrollView's content container (hence flexGrow, not flex), centred and
+  // capped in width on a tablet or laptop like every other native screen.
   center: {
-    flex: 1,
+    flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
     gap: Spacing.two,
     padding: Spacing.four,
+    width: '100%',
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
   },

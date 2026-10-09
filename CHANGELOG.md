@@ -7,6 +7,14 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Tablets, foldables and Android laptops.** The Android host runs in portrait and landscape and in
+  resizable windows: the portrait lock is gone, the main activity is declared resizable, and the
+  touchscreen is declared optional so an Android laptop with only a keyboard and trackpad (the Googlebook)
+  can install it. The boot and recovery screen and the host menu scroll in a short window, display mode puts
+  its two join codes side by side whenever that makes them larger, Enter submits the text fields, and every
+  native control takes keyboard focus and mouse clicks. Wi-Fi hosting mode works on a wired network too: a
+  laptop docked on Ethernet advertises its wired address and the share screen says so. README and the
+  website say "Android phone, tablet or laptop".
 - **ARCHITECTURE.md, CONTRIBUTING.md and a code of conduct.** A human-facing map of the codebase with a
   classified index of the design docs, a contributor guide (setup, the three gotchas, the deliberate
   no-linter policy, how AI is used), the Contributor Covenant 2.1, and GitHub issue and pull-request

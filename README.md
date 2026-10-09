@@ -62,7 +62,7 @@ soil. We picked the word first and worked out the letters afterwards.)*
 
 ## Start a network
 
-### On an Android phone
+### On an Android phone, tablet or laptop
 
 1. **Download [`loam-host.apk`](https://github.com/MagicZebraLtd/loam/releases/latest/download/loam-host.apk)**
    from the [latest release](https://github.com/MagicZebraLtd/loam/releases/latest) and open it to
@@ -70,6 +70,9 @@ soil. We picked the word first and worked out the letters afterwards.)*
 2. **Answer four questions:** your language, the kind of network (see [below](#kinds-of-network)),
    its name, and how people connect: **Hotspot** (the phone makes its own Wi-Fi, no router needed) or
    **Wi-Fi** (everyone on the Wi-Fi the phone is already on).
+   The same app runs on Android tablets and on Android laptops such as the Googlebook, in any window size or
+   orientation. A laptop that cannot start its own hotspot hosts in Wi-Fi mode, on the network it is
+   already on (wired or wireless).
 3. **Show the code.** The share screen shows what people scan. **Display mode** puts it full screen,
    keeps the screen on and pins LOAM in front, for a phone left where people can see it.
 

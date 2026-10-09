@@ -491,6 +491,9 @@ class LoamHotspotModule : Module() {
    *  - `address` the station's own IPv4 address (first of {@link stationAddresses}), or null.
    *  - `ssid` the network name, or null. Android redacts it to `<unknown ssid>` unless location permission
    *    was already granted (e.g. from an earlier hotspot start); this never asks for it, so null is normal.
+   *  - `wired` true when any network the device holds has `TRANSPORT_ETHERNET` (an Android laptop docked on
+   *    Ethernet, a USB adapter): with no Wi-Fi, Wi-Fi hosting mode then advertises that network's address
+   *    instead of asking for a Wi-Fi connection (src/lib/host-mode.ts).
    * Needs only ACCESS_WIFI_STATE / ACCESS_NETWORK_STATE (install-time). Never throws.
    */
   private fun wifiStationInfo(): Map<String, Any?> {
@@ -498,14 +501,17 @@ class LoamHotspotModule : Module() {
       val context = appContext.reactContext?.applicationContext ?: return mapOf("connected" to false)
       val address = stationAddresses().firstOrNull()
       var onWifi = false
+      var wired = false
       try {
         val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         if (connectivity != null) {
           // Same one-shot enumeration as upstreamInterfaceNames (deprecated on 31+, still answers).
           @Suppress("DEPRECATION")
           val networks = connectivity.allNetworks
-          onWifi = networks.any { network ->
-            connectivity.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+          for (network in networks) {
+            val caps = connectivity.getNetworkCapabilities(network) ?: continue
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) onWifi = true
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) wired = true
           }
         }
       } catch (error: Throwable) {
@@ -523,7 +529,7 @@ class LoamHotspotModule : Module() {
       } catch (error: Throwable) {
         Log.w(TAG, "Wi-Fi SSID lookup failed", error)
       }
-      return mapOf("connected" to (onWifi || address != null), "address" to address, "ssid" to ssid)
+      return mapOf("connected" to (onWifi || address != null), "address" to address, "ssid" to ssid, "wired" to wired)
     } catch (error: Throwable) {
       Log.w(TAG, "wifiStationInfo failed", error)
       return mapOf("connected" to false)

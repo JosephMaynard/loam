@@ -45,6 +45,11 @@ export type WifiStationInfo = {
   address?: string | null;
   /** The network name, or null/absent — Android redacts it unless location permission was already granted. */
   ssid?: string | null;
+  /**
+   * True when the device holds a wired (`TRANSPORT_ETHERNET`) network: an Android laptop docked on Ethernet,
+   * a USB adapter. Absent means false. With no Wi-Fi, Wi-Fi hosting mode advertises that network instead.
+   */
+  wired?: boolean;
 };
 
 /**

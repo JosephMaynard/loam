@@ -5,7 +5,7 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { Spacing } from '@/constants/theme';
+import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { t } from '@/lib/i18n';
 import {
@@ -710,6 +710,8 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    * them — OR when the persisted model list couldn't be read (P1-4, `loadFailed`): acting destructively
    * on an unknown model set risks deleting a file the launcher still points at. */
   const actionsBlocked = operationInFlight || pendingUnsettled || loadFailed;
+  /** "Add & download" (the button and the URL field's Enter key alike): nothing typed, or any gate above. */
+  const customDownloadDisabled = !customUrl.trim() || !sweepReady || actionsBlocked || downloadInFlight;
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
@@ -812,16 +814,19 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
                 autoCapitalize="none"
                 autoCorrect={false}
                 keyboardType="url"
+                returnKeyType="go"
+                onSubmitEditing={() => {
+                  if (!customDownloadDisabled) {
+                    handleAddCustomUrlPress();
+                  }
+                }}
                 style={[styles.textInput, { color: theme.text, borderColor: theme.textSecondary }]}
               />
               <Pressable
                 onPress={() => handleAddCustomUrlPress()}
-                disabled={!customUrl.trim() || !sweepReady || actionsBlocked || downloadInFlight}
+                disabled={customDownloadDisabled}
                 accessibilityRole="button"
-                style={[
-                  styles.button,
-                  (!customUrl.trim() || !sweepReady || actionsBlocked || downloadInFlight) && styles.buttonDisabled,
-                ]}>
+                style={[styles.button, customDownloadDisabled && styles.buttonDisabled]}>
                 <ThemedText type="smallBold" style={styles.buttonLabel}>
                   {downloadInFlight ? t('model.downloading') : t('model.addAndDownload')}
                 </ThemedText>
@@ -1054,6 +1059,9 @@ const styles = StyleSheet.create({
   },
   safeArea: {
     flex: 1,
+    width: '100%',
+    maxWidth: MaxContentWidth,
+    alignSelf: 'center',
   },
   header: {
     flexDirection: 'row',

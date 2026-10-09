@@ -29,8 +29,13 @@
 //      below API 31, and a data_extraction_rules.xml excluding every domain for BOTH cloud backup and
 //      Android 12+ device-to-device transfer, which allowBackup=false alone does NOT stop at targetSdk 31+).
 //
-//   5. Declare the implied hardware features (Wi-Fi, location/GPS, Bluetooth) as optional so Play doesn't
-//      hide the listing from tablets/Chromebooks without them — the app degrades (no hotspot / no mesh).
+//   5. Declare the implied hardware features (Wi-Fi, location/GPS, Bluetooth, camera) as optional so Play
+//      doesn't hide the listing from tablets/Chromebooks without them — the app degrades (no hotspot / no
+//      mesh / no scanner) — and declare the touchscreen (and faketouch) optional too, or Play hides the app
+//      from Android laptops with only a keyboard and trackpad. With it, `android:resizeableActivity="true"`
+//      on the main activity: the host runs in any orientation and any window size (tablets, foldables,
+//      laptops), which is what app.json `orientation: "default"` means and what Play's large-screen
+//      guidelines ask for (docs/04 "Large screens", docs/30).
 //
 //   6. Stamp the generated android/ project with a fingerprint of app.json + these plugins, and make the
 //      Gradle build fail when they no longer match — so a direct `./gradlew` on a STALE prebuild (old
@@ -213,6 +218,29 @@ function withApplicationAttributes(config) {
   });
 }
 
+/**
+ * Apply the large-screen attributes to a parsed main `<activity>` element (pure, tested): the host declares
+ * itself resizable, so it fills a tablet in either orientation and runs in a freeform or split window on a
+ * foldable or an Android laptop. Android 16 already ignores a fixed orientation and a non-resizable flag on
+ * displays of 600dp and up for apps targeting API 36, so this only makes explicit what those devices do
+ * anyway; Play's large-screen checks read the attribute. `configChanges` (orientation, screenSize,
+ * screenLayout, smallestScreenSize…) is Expo's template value and is left as it is: the activity handles a
+ * rotation or a resize without being recreated. `screenOrientation` is left to app.json (`"default"` →
+ * `unspecified`), never forced here.
+ */
+function applyMainActivityAttributes(activity) {
+  activity.$["android:resizeableActivity"] = "true";
+  return activity;
+}
+
+/** Force the large-screen attributes on the main activity. */
+function withMainActivityAttributes(config) {
+  return withAndroidManifest(config, (cfg) => {
+    applyMainActivityAttributes(AndroidConfig.Manifest.getMainActivityOrThrow(cfg.modResults));
+    return cfg;
+  });
+}
+
 /** Write res/xml/network_security_config.xml + data_extraction_rules.xml into the generated project (both
  * referenced from the manifest attributes above). */
 function withXmlResources(config) {
@@ -270,11 +298,15 @@ function withArmOnlyReactNativeArchitectures(config) {
 // Hardware the declared permissions IMPLY as required (CHANGE_WIFI_STATE → wifi, ACCESS_FINE_LOCATION →
 // location + location.gps, ACCESS_COARSE_LOCATION → location + location.network, BLUETOOTH_* →
 // bluetooth), plus the mesh radios. All optional: without Wi-Fi the
-// hotspot just can't start (the LAN join path remains), without BLE/Aware there is no mesh. Also the
-// portrait screen that app.json `orientation: "portrait"` implies — landscape-only devices (Chromebooks,
-// some TVs/tablets) would otherwise be filtered from Play; the app still runs there, letterboxed.
+// hotspot just can't start (the LAN join path remains), without BLE/Aware there is no mesh. The touchscreen
+// is the one Play assumes REQUIRED unless told otherwise (every app implies `android.hardware.touchscreen`),
+// which hides the listing from Android laptops and desktops that have only a keyboard and trackpad; declared
+// optional (with `faketouch`, the pointer-only form) because every native control here is a Pressable or a
+// TextInput, which take mouse clicks and keyboard focus, and the WebView handles both itself.
+// No screen-orientation feature any more: app.json `orientation: "default"` implies none.
 const OPTIONAL_FEATURES = [
-  "android.hardware.screen.portrait",
+  "android.hardware.touchscreen",
+  "android.hardware.faketouch",
   "android.hardware.bluetooth",
   "android.hardware.bluetooth_le",
   "android.hardware.wifi",
@@ -480,6 +512,7 @@ function withPrebuildFingerprint(config) {
 
 module.exports = function withLoamHost(config) {
   config = withApplicationAttributes(config);
+  config = withMainActivityAttributes(config);
   config = withXmlResources(config);
   config = withArmOnlyAbiFilters(config);
   config = withArmOnlyReactNativeArchitectures(config);
@@ -506,6 +539,7 @@ module.exports._internal = {
   addLegacyBluetoothPermissions,
   addOptionalFeatures,
   applyApplicationAttributes,
+  applyMainActivityAttributes,
   dataExtractionRulesXml,
   networkSecurityConfigXml,
   prebuildFingerprint,

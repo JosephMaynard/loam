@@ -81,11 +81,69 @@ describe('pickWifiAddress', () => {
         interfaces: [
           { name: 'ipsec1', address: '10.8.0.2' },
           { name: 'wlan1', address: '192.168.43.1' },
-          { name: 'eth0', address: '172.20.0.4' },
         ],
-        addresses: ['10.8.0.2', '192.168.43.1', '172.20.0.4'],
+        addresses: ['10.8.0.2', '192.168.43.1'],
       }),
     ).toBeUndefined();
+  });
+
+  it('advertises a wired adapter when Wi-Fi is off: a laptop docked on Ethernet', () => {
+    for (const name of ['eth0', 'ETH1', 'en0', 'enp0s3']) {
+      expect(
+        pickWifiAddress({
+          station: { connected: false },
+          interfaces: [
+            { name: 'ipsec1', address: '10.8.0.2' },
+            { name, address: '10.1.2.3' },
+          ],
+          addresses: ['10.8.0.2', '10.1.2.3'],
+        }),
+        name,
+      ).toBe('10.1.2.3');
+    }
+  });
+
+  it('ignores a wired adapter with a public, link-local or unspecified address', () => {
+    for (const address of ['8.8.8.8', '169.254.10.2', '0.0.0.0']) {
+      expect(
+        pickWifiAddress({ station: { connected: false, wired: true }, interfaces: [{ name: 'eth0', address }], addresses: [address] }),
+        address,
+      ).toBeUndefined();
+    }
+  });
+
+  it('the native wired flag opens the private-LAN fallback when the launcher names the adapter differently', () => {
+    const interfaces = [
+      { name: 'rmnet_data0', address: '10.44.1.9' },
+      { name: 'lan0', address: '192.168.5.7' },
+    ];
+    const addresses = ['10.44.1.9', '192.168.5.7'];
+    expect(pickWifiAddress({ station: { connected: false, wired: true }, interfaces, addresses })).toBe('192.168.5.7');
+    // Without the flag that interface is unknown, so Wi-Fi off still means nothing to advertise.
+    expect(pickWifiAddress({ station: { connected: false }, interfaces, addresses })).toBeUndefined();
+    // And the flag never lets a cellular address through.
+    expect(
+      pickWifiAddress({
+        station: { connected: false, wired: true },
+        interfaces: [{ name: 'rmnet_data0', address: '10.44.1.9' }],
+        addresses: ['10.44.1.9'],
+      }),
+    ).toBeUndefined();
+  });
+
+  it('prefers the Wi-Fi station, then a wlan interface, over a wired adapter', () => {
+    const interfaces = [
+      { name: 'eth0', address: '10.1.2.3' },
+      { name: 'wlan0', address: '192.168.86.23' },
+    ];
+    const addresses = ['10.1.2.3', '192.168.86.23'];
+    expect(pickWifiAddress({ station: { connected: true, address: '192.168.86.24' }, interfaces, addresses })).toBe('192.168.86.24');
+    expect(pickWifiAddress({ station: { connected: true }, interfaces, addresses })).toBe('192.168.86.23');
+    expect(pickWifiAddress({ station: undefined, interfaces, addresses })).toBe('192.168.86.23');
+    // On Wi-Fi per Android but with no wlan address to show, the wired adapter is the next best answer.
+    expect(
+      pickWifiAddress({ station: { connected: true }, interfaces: [{ name: 'eth0', address: '10.1.2.3' }], addresses: ['10.1.2.3'] }),
+    ).toBe('10.1.2.3');
   });
 
   it('never advertises the platform IKEv2 VPN tunnel (ipsec<N>) even before the native read', () => {
@@ -137,8 +195,36 @@ describe('deriveWifiJoinDisplay', () => {
       serverUrl: 'http://192.168.86.23:3000#k=abc',
       addresses: ['172.20.0.4'],
       ssid: 'Kitchen',
+      wired: false,
       connectedClients: 2,
       checked: true,
+    });
+  });
+
+  it('labels a wired connection and drops the Wi-Fi name', () => {
+    expect(
+      deriveWifiJoinDisplay({
+        station: { connected: false, wired: true, ssid: 'Kitchen' },
+        interfaces: [{ name: 'eth0', address: '10.1.2.3' }],
+        addresses: ['10.1.2.3'],
+        connectedClients: [],
+        fragment: '',
+      }),
+    ).toEqual({ serverUrl: 'http://10.1.2.3:3000', addresses: [], ssid: undefined, wired: true, connectedClients: 0, checked: true });
+    // A wired-named interface counts as wired without the native flag too.
+    expect(
+      deriveWifiJoinDisplay({
+        station: { connected: false },
+        interfaces: [{ name: 'eth0', address: '10.1.2.3' }],
+        addresses: ['10.1.2.3'],
+        connectedClients: [],
+        fragment: '',
+      }),
+    ).toMatchObject({ serverUrl: 'http://10.1.2.3:3000', wired: true });
+    // The station's own address never is.
+    expect(deriveWifiJoinDisplay({ station: home, interfaces: [], addresses: [], connectedClients: [], fragment: '' })).toMatchObject({
+      wired: false,
+      ssid: 'Kitchen',
     });
   });
 
@@ -157,7 +243,18 @@ describe('deriveWifiJoinDisplay', () => {
 });
 
 describe('toWifiPanelState', () => {
-  const base = { addresses: [], connectedClients: 0 };
+  const base = { addresses: [], connectedClients: 0, wired: false };
+
+  it('names a wired connection', () => {
+    expect(toWifiPanelState({ ...base, serverUrl: 'http://10.1.2.3:3000', ssid: undefined, wired: true, checked: true })).toEqual({
+      mode: 'wifi',
+      status: 'running',
+      serverUrl: 'http://10.1.2.3:3000',
+      addresses: [],
+      connectedClients: 0,
+      wired: true,
+    });
+  });
 
   it('is starting before the first read, stopped off Wi-Fi, running with an address', () => {
     expect(toWifiPanelState({ ...base, serverUrl: undefined, ssid: undefined, checked: false })).toEqual({

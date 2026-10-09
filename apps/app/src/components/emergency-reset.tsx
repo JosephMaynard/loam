@@ -5,7 +5,7 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { HoldToConfirm } from '@/components/hold-to-confirm';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { Spacing } from '@/constants/theme';
+import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useAppLocale } from '@/hooks/use-app-locale';
 import { useTheme } from '@/hooks/use-theme';
 import type { BridgeChannel } from '@/lib/db-encryption';
@@ -158,7 +158,7 @@ const styles = StyleSheet.create({
   button: { alignItems: 'center', paddingVertical: Spacing.three, borderRadius: Spacing.four },
   buttonLabel: { color: '#ffffff' },
   container: { flex: 1 },
-  safeArea: { flex: 1 },
+  safeArea: { flex: 1, width: '100%', maxWidth: MaxContentWidth, alignSelf: 'center' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',

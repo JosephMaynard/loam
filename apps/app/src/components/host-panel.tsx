@@ -52,6 +52,9 @@ export type HostState = {
   manualFragment?: string;
   /** Wi-Fi mode: the network's name, only when Android lets the app read it without a permission prompt. */
   wifiNetwork?: string;
+  /** Wi-Fi mode: the advertised address is a wired adapter's (a laptop docked on Ethernet), so the card names
+   * the connection as wired rather than a Wi-Fi network. */
+  wired?: boolean;
 };
 
 /** "Phones connected: 3": a count after a label reads naturally in every language, with no plural rules. */
@@ -95,6 +98,8 @@ const STATUS_LABEL: Record<HostMode, Record<HostState['status'], AppCatalogKey>>
  */
 export function HostPanel({ state }: { state: HostState }) {
   const line = connectedLine(state);
+  const statusLabel: AppCatalogKey =
+    state.mode === 'wifi' && state.status === 'running' && state.wired ? 'host.runningWired' : STATUS_LABEL[state.mode][state.status];
   return (
     <ThemedView style={styles.container}>
       <ThemedText type="title" style={styles.title}>
@@ -103,7 +108,7 @@ export function HostPanel({ state }: { state: HostState }) {
       <ThemedView
         type={state.status === 'running' ? 'backgroundSelected' : 'backgroundElement'}
         style={styles.statusPill}>
-        <ThemedText type="small">{t(STATUS_LABEL[state.mode][state.status])}</ThemedText>
+        <ThemedText type="small">{t(statusLabel)}</ThemedText>
       </ThemedView>
       {line ? (
         <ThemedText type="smallBold" style={styles.connected}>
@@ -127,21 +132,26 @@ function AlsoAt({ addresses }: { addresses?: string[] }) {
   );
 }
 
-/** Wi-Fi mode: one card with the URL QR for everyone on the phone's current Wi-Fi network. No location
- * rationale here — this mode never asks for location permission. */
+/** Wi-Fi mode: one card with the URL QR for everyone on the network this device is on: its Wi-Fi, or the wired
+ * connection of a docked laptop (`wired`). No location rationale here — this mode never asks for location
+ * permission. */
 function WifiJoin({ state }: { state: HostState }) {
   return (
     <ThemedView type="backgroundElement" style={styles.step}>
-      <ThemedText type="subtitle">{t('host.wifiTitle')}</ThemedText>
+      <ThemedText type="subtitle">{state.wired ? t('host.wiredTitle') : t('host.wifiTitle')}</ThemedText>
       {state.serverUrl ? (
         <>
-          {state.wifiNetwork ? (
+          {state.wired ? (
+            <ThemedText type="smallBold" style={styles.manual}>
+              {t('host.wiredNetwork')}
+            </ThemedText>
+          ) : state.wifiNetwork ? (
             <ThemedText type="smallBold" style={styles.manual}>
               {t('host.wifiNetwork', { name: state.wifiNetwork })}
             </ThemedText>
           ) : null}
           <ThemedText type="small" themeColor="textSecondary" style={styles.manual}>
-            {state.wifiNetwork ? t('host.wifiScanNamed') : t('host.wifiScan')}
+            {state.wired ? t('host.wiredScan') : state.wifiNetwork ? t('host.wifiScanNamed') : t('host.wifiScan')}
           </ThemedText>
           <QRCode value={state.serverUrl} />
           <ThemedText type="code" style={styles.manual}>

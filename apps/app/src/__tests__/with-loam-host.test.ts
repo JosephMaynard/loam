@@ -25,6 +25,7 @@ const {
   addLegacyBluetoothPermissions,
   addOptionalFeatures,
   applyApplicationAttributes,
+  applyMainActivityAttributes,
   dataExtractionRulesXml,
   networkSecurityConfigXml,
   prebuildFingerprint,
@@ -120,7 +121,7 @@ describe("with-loam-host: hotspot permissions", () => {
 });
 
 describe("with-loam-host: optional hardware features", () => {
-  it("declares wifi/location/bluetooth features optional and forces an existing required one optional", () => {
+  it("declares wifi/location/bluetooth/touch features optional and forces an existing required one optional", () => {
     const manifest = {
       "uses-feature": [{ $: { "android:name": "android.hardware.wifi", "android:required": "true" } }],
     };
@@ -132,9 +133,10 @@ describe("with-loam-host: optional hardware features", () => {
       "android.hardware.location.gps",
       // ACCESS_COARSE_LOCATION implies this one (fine implies .gps); both optional, like the rest.
       "android.hardware.location.network",
-      // Implied by app.json `orientation: "portrait"`; optional so landscape-only devices (Chromebooks)
-      // aren't filtered from Play.
-      "android.hardware.screen.portrait",
+      // Every app implies a touchscreen unless it says otherwise; without these two Play hides the listing
+      // from Android laptops and desktops that have only a keyboard and trackpad.
+      "android.hardware.touchscreen",
+      "android.hardware.faketouch",
     ]) {
       const matches = features.filter((feature) => feature.$["android:name"] === name);
       expect(matches).toHaveLength(1);
@@ -143,15 +145,33 @@ describe("with-loam-host: optional hardware features", () => {
     expect(features).toHaveLength(OPTIONAL_FEATURES.length);
   });
 
-  it("covers the portrait feature app.json's orientation implies", () => {
+  it("declares no screen-orientation feature, since app.json locks no orientation", () => {
+    // A fixed orientation implies `android.hardware.screen.<orientation>`; `default` implies none, and the
+    // host must run in both (tablets, foldables, laptops; Play's large-screen checks).
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const appJson = require("../../app.json");
-    if (appJson.expo.orientation === "portrait") {
-      expect(OPTIONAL_FEATURES).toContain("android.hardware.screen.portrait");
-    }
-    if (appJson.expo.orientation === "landscape") {
-      expect(OPTIONAL_FEATURES).toContain("android.hardware.screen.landscape");
-    }
+    expect(appJson.expo.orientation).toBe("default");
+    expect(OPTIONAL_FEATURES.filter((name: string) => name.startsWith("android.hardware.screen."))).toEqual([]);
+  });
+});
+
+describe("with-loam-host: large screens", () => {
+  it("marks the main activity resizable and leaves its configChanges and orientation alone", () => {
+    const configChanges = "keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize";
+    const activity = applyMainActivityAttributes({
+      $: { "android:name": ".MainActivity", "android:configChanges": configChanges, "android:screenOrientation": "unspecified" },
+    });
+    expect(activity.$).toEqual({
+      "android:name": ".MainActivity",
+      "android:configChanges": configChanges,
+      "android:screenOrientation": "unspecified",
+      "android:resizeableActivity": "true",
+    });
+  });
+
+  it("overrides a non-resizable declaration rather than keeping it", () => {
+    const activity = applyMainActivityAttributes({ $: { "android:name": ".MainActivity", "android:resizeableActivity": "false" } });
+    expect(activity.$["android:resizeableActivity"]).toBe("true");
   });
 });
 

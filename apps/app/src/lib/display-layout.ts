@@ -17,13 +17,16 @@ const MIN_SIZE = 120;
 
 /**
  * The code size for `count` codes on a `width` × `height` screen (safe-area insets already removed), and
- * whether two codes sit side by side (a screen wider than tall) or stack.
+ * whether two codes sit side by side or stack: whichever leaves them larger, so a landscape screen and a
+ * squarish laptop window (where stacking would overflow) get a row, and a portrait phone a column.
  */
 export function displayCodeSize(count: 1 | 2, width: number, height: number): { size: number; sideBySide: boolean } {
   const usableHeight = height - HEADING_HEIGHT - EXIT_HEIGHT - PAD * 2;
-  const sideBySide = count === 2 && width > height;
-  const perCodeWidth = sideBySide ? (width - PAD * 3) / 2 : width - PAD * 2;
-  const perCodeHeight =
-    sideBySide || count === 1 ? usableHeight - CODE_CAPTION_HEIGHT : usableHeight / 2 - CODE_CAPTION_HEIGHT;
-  return { size: Math.max(MIN_SIZE, Math.floor(Math.min(perCodeWidth, perCodeHeight))), sideBySide };
+  const stacked = Math.min(width - PAD * 2, (count === 1 ? usableHeight : usableHeight / 2) - CODE_CAPTION_HEIGHT);
+  if (count === 1) {
+    return { size: Math.max(MIN_SIZE, Math.floor(stacked)), sideBySide: false };
+  }
+  const row = Math.min((width - PAD * 3) / 2, usableHeight - CODE_CAPTION_HEIGHT);
+  const sideBySide = row > stacked;
+  return { size: Math.max(MIN_SIZE, Math.floor(sideBySide ? row : stacked)), sideBySide };
 }
