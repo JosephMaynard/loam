@@ -33,7 +33,7 @@ the **known limitations honestly**, and lists the concrete things worth attackin
 | Path-hiding tunnel | `apps/server/src/transport-server.ts` | `POST /api/transport/tunnel`, `internalTunnelToken` + `isInternalTunnelRequest`, `TUNNELLABLE_METHODS`. |
 | Client (all of it) | `apps/client/src/lib/transport.ts` | `ensureSession`, `attemptFetch`/`tunnelFetch`, `encryptedImageUrl`, seq counter, re-handshake retry. |
 | Image encryption | `apps/client/src/lib/use-encrypted-image.ts`, `components/Avatar.tsx`, `components/AttachmentImage.tsx` | plus the dropped image-route exemption in `requiresTransportSession`. |
-| Tests | `apps/server/src/app.test.ts` ("transport …" describes), `apps/client/src/lib/transport.test.ts`, `packages/crypto/src/index.test.ts` | |
+| Tests | `apps/server/src/transport.test.ts`, `apps/client/src/lib/transport.test.ts`, `packages/crypto/src/index.test.ts` | |
 
 ## Guarantees (what it's meant to provide)
 

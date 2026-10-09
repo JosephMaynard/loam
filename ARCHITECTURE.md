@@ -292,8 +292,9 @@ pnpm smoke:cli                 # pack and install loamnet, then drive the instal
 
 There is no lint script; type-checking happens inside `build`, plus the separate `typecheck` for
 `apps/app`. The suites: `packages/*` (schema, display-name, avatar, qr, crypto, tui); `apps/server`
-(`src/db.test.ts` for the data-access layer and importer, `src/app.test.ts` driving the routes through
-`buildApp()` and `server.inject()`, and focused suites for realtime, llm, mesh-bridge, sync-transport,
+(`src/db.test.ts` for the data-access layer and importer, route suites by subject (`admin`, `channels`, `messages`,
+`moderation`, `kill-switch`, `transport`, `sync`, `mesh`…) driving `buildApp()` through `server.inject()`
+with a shared harness in `src/test-support/` (its header maps the files), and focused suites for realtime, llm, mesh-bridge, sync-transport,
 tombstone, net, embedded, invites, rate-limit, member rules and blocking); `apps/client` (Vitest with
 jsdom: `src/lib/*.test.ts` for markdown and XSS, IndexedDB round-trips with `fake-indexeddb`, parsers,
 transport and liveness, plus a `.test.tsx` beside most components; test files are excluded from the
