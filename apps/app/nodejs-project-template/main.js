@@ -65,9 +65,7 @@ function notify(status, extra) {
 }
 
 // Boot-notice codes: these mean the server DEGRADED but kept booting (`db_encryption_recovered_fresh`: a
-// fresh DB after an unreadable one), never that boot failed. `db_encryption_open_failed` is no longer
-// emitted by the server (an encrypted mode whose keyed open fails now locks instead of serving plaintext)
-// and stays listed only so it can never be mistaken for a fatal error. The readiness probe below
+// fresh DB after an unreadable one), never that boot failed. The readiness probe below
 // (`startReadinessProbe`/`probeServer`) still runs and will post 'ready' once the server actually answers.
 // Reported as status 'notice', NOT 'error': the RN host screen must not treat these as fatal, and a notice
 // must survive the 'ready' that follows it (see index.tsx's persistent notice state). Any OTHER code
@@ -86,7 +84,7 @@ function notify(status, extra) {
 //
 // `db_encryption_driver_missing` is likewise a real 'error': the SQLCipher driver failed to load under an
 // encrypted selection, and the launcher LOCKS instead of booting plaintext.
-const DB_ENCRYPTION_NOTICE_CODES = ['db_encryption_open_failed', 'db_encryption_recovered_fresh'];
+const DB_ENCRYPTION_NOTICE_CODES = ['db_encryption_recovered_fresh'];
 
 // embedded-main.ts (bundled into loam-server.js below) does the real startup work asynchronously —
 // require('./loam-server.js') returns long before a config-load or server.listen() failure would
