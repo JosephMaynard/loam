@@ -609,6 +609,29 @@ export function createTransportServer(ctx: AppContext) {
 
 /** Add the global transport hooks (decrypt/encrypt/enforce, security headers) and the global rate limiter. */
 export async function registerTransportHooks(ctx: AppContext): Promise<void> {
+  // Direct sealed requests whose authenticated envelope asked for a sequence-bound response (`r: 1`, docs/08
+  // "Response binding"): onSend seals their response under `${METHOD} ${url}#${s}` rather than the bare
+  // route aad, so a captured response can't be replayed as the answer to a later request on the same route.
+  // WeakSet → GC'd with the request.
+  const responseBoundRequests = new WeakSet<FastifyRequest>();
+
+  /**
+   * Run a sealed `{ s, r? }` envelope through the session's replay window and record it on the request:
+   * its sequence for the handlers and response binding, and whether it asked for a bound response.
+   * False when the sequence is missing, replayed or out of the window.
+   */
+  function acceptEnvelopeSequence(request: FastifyRequest, envelope: { s?: unknown; r?: unknown }): boolean {
+    const activeSession = ctx.transportRequestSessions.get(request);
+    if (!activeSession || typeof envelope.s !== "number" || !ctx.acceptTransportSeq(activeSession, envelope.s)) {
+      return false;
+    }
+    ctx.transportRequestSeq.set(request, envelope.s);
+    if (envelope.r === 1) {
+      responseBoundRequests.add(request);
+    }
+    return true;
+  }
+
   // Security headers on every response. A strict CSP is defense-in-depth behind the already-hardened
   // markdown sanitizer: the client is fully self-contained (its own JS/CSS, images from this origin,
   // ws:// to this host), so it needs no external origins. `nosniff` stops content-type confusion on
@@ -711,21 +734,19 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
       // monotonic sequence for replay protection, `b` the actual request body (omitted for a bodyless
       // mutation). `s` lives INSIDE the AEAD, so it's authenticated — an attacker can't renumber a
       // replay to dodge the window without breaking the tag.
-      let envelope: { s?: unknown; b?: unknown; tok?: unknown };
+      let envelope: { s?: unknown; r?: unknown; b?: unknown; tok?: unknown };
       try {
-        envelope = JSON.parse(opened) as { s?: unknown; b?: unknown; tok?: unknown };
+        envelope = JSON.parse(opened) as { s?: unknown; r?: unknown; b?: unknown; tok?: unknown };
       } catch {
         return reply.code(400).send(errorBody("Malformed encrypted request"));
       }
-      const activeSession = ctx.transportRequestSessions.get(request);
-      if (!activeSession || typeof envelope.s !== "number" || !ctx.acceptTransportSeq(activeSession, envelope.s)) {
+      if (!acceptEnvelopeSequence(request, envelope)) {
         // Replayed, reordered beyond the window, or a missing/garbage sequence — refuse before the
         // handler runs. 409 (not 401) so a legitimate client doesn't mistake it for an expired session
         // and silently re-handshake+retry: a real client never reuses a sequence, so this fires only on
         // a captured-and-replayed request (docs/08).
         return reply.code(409).send(errorBody("Replayed or out-of-order encrypted request"));
       }
-      ctx.transportRequestSeq.set(request, envelope.s);
       // A sealed node-to-node sync request carries the `sync.token` INSIDE the envelope (docs/08) — stash it
       // (authenticated by the AEAD) for `syncPeerAuthorized`, which prefers it over any wire header.
       if (typeof envelope.tok === "string") {
@@ -734,7 +755,27 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
       request.body = envelope.b;
       return;
     }
-    // A GET/HEAD may legitimately carry no body at all (response-only sealing) — nothing to enforce.
+    // A GET/HEAD carries no body, so its `{ s, r }` envelope (if any) rides the `x-loam-seq` header, sealed
+    // under the same request aad: that gives it a sequence to bind its response to. Without the header (an
+    // older client) it is answered under the bare route aad as before; nothing to enforce.
+    const sealedSeq = request.headers["x-loam-seq"];
+    if ((request.method === "GET" || request.method === "HEAD") && typeof sealedSeq === "string") {
+      const openedSeq = openTransport(key, sealedSeq, `${request.method} ${request.url}`);
+      let envelope: { s?: unknown; r?: unknown } | undefined;
+      try {
+        envelope = openedSeq === null ? undefined : (JSON.parse(openedSeq) as { s?: unknown; r?: unknown });
+      } catch {
+        envelope = undefined;
+      }
+      if (!envelope || typeof envelope !== "object") {
+        return reply.code(400).send(errorBody("Malformed encrypted request"));
+      }
+      if (!acceptEnvelopeSequence(request, envelope)) {
+        return reply.code(409).send(errorBody("Replayed or out-of-order encrypted request"));
+      }
+      return;
+    }
+    // A GET/HEAD may otherwise carry no body at all (response-only sealing) — nothing to enforce.
     // But a mutation (POST/PATCH/DELETE/PUT) presented under a resolved transport session MUST arrive
     // as a sealed envelope: without this, a request that carries a live/known session id (visible on
     // the wire in the `x-loam-enc` header) alongside a plain, attacker-supplied JSON body would just
@@ -754,17 +795,19 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
     if (!key || typeof payload !== "string") {
       return payload;
     }
-    // Bind a node-to-node sync RESPONSE to the request's authenticated sequence (docs/08):
-    // sealing under `${method} ${url}#${seq}` means a captured response can't be replayed or cross-fed to a
-    // different request on the same route (the puller opens with the exact seq it sent). Scoped to the
-    // direct-sealed sync routes — the browser's own direct/tunnel paths are unaffected. (`transportRequestSeq`
-    // is always set for a sync request, since every sealed sync request carries a `{ s }` envelope.)
+    // Bind the RESPONSE to the request's authenticated sequence (docs/08, "Response binding"): sealing under
+    // `${method} ${url}#${seq}` means a captured response can't be replayed or cross-fed to a different
+    // request on the same route (the caller opens with the exact seq it sent). Always for the direct-sealed
+    // sync routes (every sealed sync request carries a `{ s }` envelope); for any other direct request when
+    // its envelope asked (`r: 1`, the browser client in `optional` mode). The tunnel binds its responses
+    // inside the sealed descriptor instead, and resume/logout carry their own `{ s, m, p }`. A request refused
+    // before its sequence was authenticated (a 429, a malformed body) has none, so it gets the bare aad.
     const seq = ctx.transportRequestSeq.get(request);
     const routeUrl = request.routeOptions?.url;
-    const responseAad =
-      seq !== undefined && routeUrl !== undefined && ctx.DIRECT_SEALED_SYNC_ROUTES.has(routeUrl)
-        ? `${request.method} ${request.url}#${seq}`
-        : `${request.method} ${request.url}`;
+    const bindToSequence =
+      seq !== undefined &&
+      (responseBoundRequests.has(request) || (routeUrl !== undefined && ctx.DIRECT_SEALED_SYNC_ROUTES.has(routeUrl)));
+    const responseAad = bindToSequence ? `${request.method} ${request.url}#${seq}` : `${request.method} ${request.url}`;
     const sealed = sealTransport(key, payload, responseAad);
     reply.header("content-type", "application/json; charset=utf-8");
     reply.header("x-loam-enc", "1");

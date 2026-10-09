@@ -279,11 +279,11 @@ describe("transport", () => {
         const aad = `${init.method} ${url}`;
         const opened = openTransport(sessionKeyOnServer!, wireBody.enc, aad);
         expect(opened).not.toBeNull();
-        // The sealed plaintext is the `{ s, b }` anti-replay envelope: sequence 1 (first request on a
-        // fresh session) carrying the body under `b`.
-        expect(JSON.parse(opened!)).toEqual({ s: 1, b: { text: "hello" } });
+        // The sealed plaintext is the `{ s, r, b }` anti-replay envelope: sequence 1 (first request on a
+        // fresh session), asking for a sequence-bound response, carrying the body under `b`.
+        expect(JSON.parse(opened!)).toEqual({ s: 1, r: 1, b: { text: "hello" } });
 
-        const sealedResponse = sealTransport(sessionKeyOnServer!, JSON.stringify({ id: "msg_1" }), aad);
+        const sealedResponse = sealTransport(sessionKeyOnServer!, JSON.stringify({ id: "msg_1" }), `${aad}#1`);
         return new Response(JSON.stringify({ enc: sealedResponse }), {
           status: 200,
           headers: { "x-loam-enc": "1" },
@@ -364,7 +364,8 @@ describe("transport", () => {
         // real response the same way the server would.
         const session = getSession();
         expect(session).toBeDefined();
-        const sealed = sealTransport(session!.key, JSON.stringify({ ok: true }), `GET ${url}`);
+        // Bound to the sequence this retry carried (the latest one on the fresh session).
+        const sealed = sealTransport(session!.key, JSON.stringify({ ok: true }), `GET ${url}#${session!.seq}`);
         return new Response(JSON.stringify({ enc: sealed }), { status: 200, headers: { "x-loam-enc": "1" } });
       });
       vi.stubGlobal("fetch", fetchMock);
@@ -556,13 +557,14 @@ describe("transport", () => {
 
       const session = getSession();
       const opened = openTransport(session!.key, wire.enc, "POST /api/admin/sync/run");
-      // A bodyless mutation still seals the `{ s }` anti-replay envelope (sequence only, no `b`).
-      expect(JSON.parse(opened!)).toEqual({ s: 1 });
+      // A bodyless mutation still seals the `{ s, r }` anti-replay envelope (no `b`).
+      expect(JSON.parse(opened!)).toEqual({ s: 1, r: 1 });
     });
 
-    it("keeps a bodyless GET a pure passthrough under a live session (no envelope needed)", async () => {
+    it("sends a bodyless GET with no body, its sealed envelope in the x-loam-seq header", async () => {
       const host = createTransportIdentity();
       let capturedBody: unknown;
+      let capturedSeq: string | undefined;
 
       const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
         if (url === "/api/transport/handshake") {
@@ -571,6 +573,7 @@ describe("transport", () => {
         }
 
         capturedBody = init.body;
+        capturedSeq = (init.headers as Record<string, string>)["x-loam-seq"];
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       });
       vi.stubGlobal("fetch", fetchMock);
@@ -579,6 +582,40 @@ describe("transport", () => {
       await encryptedFetch("GET", "/api/channels");
 
       expect(capturedBody).toBeUndefined();
+      const opened = openTransport(getSession()!.key, capturedSeq!, "GET /api/channels");
+      expect(JSON.parse(opened!)).toEqual({ s: 1, r: 1 });
+    });
+
+    it("refuses a sealed response bound to another sequence: a replayed old answer never passes as a new one", async () => {
+      const host = createTransportIdentity();
+      let captured: string | undefined;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+          return new Response(JSON.stringify(json), { status });
+        }
+        const key = getSession()!.key;
+        // The first answer is genuine (bound to sequence 1); an on-path attacker keeps it and replays it as
+        // the answer to the second request on the same route.
+        captured ??= sealTransport(key, JSON.stringify({ messages: ["old"] }), `GET ${url}#1`);
+        return new Response(JSON.stringify({ enc: captured }), { status: 200, headers: { "x-loam-enc": "1" } });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("optional", host.publicKey);
+      expect(await (await encryptedFetch("GET", "/api/messages/general")).json()).toEqual({ messages: ["old"] });
+      // Sequence 2 gets sequence 1's answer: it doesn't open, and neither does the retry on a fresh session.
+      await expect(encryptedFetch("GET", "/api/messages/general")).rejects.toThrow("Transport session expired");
+      // A bare-aad seal (what a server answers when it refused a request before reading its sequence) is
+      // only taken with an error status, so it can't stand in for a success either.
+      const bare = sealTransport(getSession()!.key, JSON.stringify({ messages: ["old"] }), "POST /api/messages/general");
+      fetchMock.mockImplementation(async () => new Response(JSON.stringify({ enc: bare }), { status: 200, headers: { "x-loam-enc": "1" } }));
+      await expect(encryptedFetch("POST", "/api/messages/general", { body: "y" })).rejects.toThrow("Transport session expired");
+      const refusal = sealTransport(getSession()!.key, JSON.stringify({ error: "Too many requests" }), "POST /api/messages/general");
+      fetchMock.mockImplementation(async () => new Response(JSON.stringify({ enc: refusal }), { status: 429, headers: { "x-loam-enc": "1" } }));
+      const limited = await encryptedFetch("POST", "/api/messages/general", { body: "z" });
+      expect(limited.status).toBe(429);
     });
   });
 
@@ -1436,7 +1473,7 @@ describe("review fixes 2026-09-04 (client transport)", () => {
             return new Response(null, { status: 401 }); // an unsealed (forgeable) 401 on a GET
           }
           const session = getSession();
-          const sealed = sealTransport(session!.key, JSON.stringify({ ok: true }), `GET ${url}`);
+          const sealed = sealTransport(session!.key, JSON.stringify({ ok: true }), `GET ${url}#${session!.seq}`);
           return new Response(JSON.stringify({ enc: sealed }), { status: 200, headers: { "x-loam-enc": "1" } });
         }),
       );

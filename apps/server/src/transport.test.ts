@@ -453,6 +453,60 @@ describe("transport encryption transparent round-trip", () => {
     expect((JSON.parse(opened as string) as { message: { body: string } }).message.body).toBe(secret);
   });
 
+  it("binds a direct sealed response to the request's sequence when the envelope asks (r: 1)", async () => {
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "optional" } });
+    const user = await newSession(app);
+    const session = await openSession(app);
+    const headers = { cookie: user.cookie, "x-loam-enc": session.sessionId, "content-type": "application/json" };
+    const enc = (res: InjectResponse) => (res.json() as { enc: string }).enc;
+
+    // A GET carries its `{ s, r }` envelope in the x-loam-seq header; the answer opens only under `#s`.
+    const getAad = "GET /api/channels";
+    const listed = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { ...headers, "x-loam-seq": sealTransport(session.key, JSON.stringify({ s: 1, r: 1 }), getAad) },
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(openTransport(session.key, enc(listed), `${getAad}#1`)).not.toBeNull();
+    expect(openTransport(session.key, enc(listed), getAad)).toBeNull();
+    expect(openTransport(session.key, enc(listed), `${getAad}#2`)).toBeNull();
+
+    // The same header again is a replay: refused before the handler, like a replayed body.
+    const replayed = await app.server.inject({
+      method: "GET",
+      url: "/api/channels",
+      headers: { ...headers, "x-loam-seq": sealTransport(session.key, JSON.stringify({ s: 1, r: 1 }), getAad) },
+    });
+    expect(replayed.statusCode).toBe(409);
+    // A header that doesn't open under the session key is malformed.
+    const forged = await app.server.inject({ method: "GET", url: "/api/channels", headers: { ...headers, "x-loam-seq": "AAAA" } });
+    expect(forged.statusCode).toBe(400);
+
+    // A mutation asks in its body envelope.
+    const postAad = "POST /api/messages";
+    const posted = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers,
+      payload: { enc: sealTransport(session.key, JSON.stringify({ s: 2, r: 1, b: { type: "channelPost", channelId: "general", body: "bound" } }), postAad) },
+    });
+    expect(posted.statusCode).toBe(201);
+    expect(openTransport(session.key, enc(posted), `${postAad}#2`)).not.toBeNull();
+    expect(openTransport(session.key, enc(posted), postAad)).toBeNull();
+
+    // An envelope that doesn't ask (an older client) still gets the bare route aad, and so does a bare GET.
+    const legacy = await app.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers,
+      payload: { enc: sealRequest(session.key, 3, postAad, { type: "channelPost", channelId: "general", body: "older client" }) },
+    });
+    expect(openTransport(session.key, enc(legacy), postAad)).not.toBeNull();
+    const bareGet = await app.server.inject({ method: "GET", url: "/api/channels", headers });
+    expect(openTransport(session.key, enc(bareGet), getAad)).not.toBeNull();
+  });
+
   it("required mode: only the public bootstrap is directly reachable; all content is tunnel-only", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
 
