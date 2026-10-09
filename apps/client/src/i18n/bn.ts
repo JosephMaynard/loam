@@ -239,7 +239,7 @@ export const bn: Translation = {
   "admin.meshHeading": "সুযোগসন্ধানী মেশ",
   "admin.meshEnable": "সুযোগসন্ধানী মেশ ডেলিভারি সক্ষম করুন",
   "admin.meshNote":
-    "সিলড-মেইলবক্স ডেলিভারি যা একটি বার্তাকে অফলাইন প্রাপকের দিকে নোড থেকে নোডে লাফ দিতে দেয় (docs/16)। ডিফল্টরূপে বন্ধ।",
+    "সিলড-মেইলবক্স ডেলিভারি যা একটি বার্তাকে অফলাইন প্রাপকের দিকে নোড থেকে নোডে লাফ দিতে দেয়। ডিফল্টরূপে বন্ধ।",
   "admin.meshRelay": "অন্যদের সিলড মেইল রিলে করুন",
   "admin.meshLifetimeLabel": "বার্তার আয়ুষ্কাল (ঘণ্টা)",
   "admin.meshLifetimeNote":
@@ -600,7 +600,7 @@ export const bn: Translation = {
   "settings.blockedNote": "আপনি যাঁদের ব্লক করেন তাঁরা আপনাকে সরাসরি বার্তা পাঠাতে পারেন না, এবং চ্যানেলে তাঁদের বার্তা আপনার কাছ থেকে লুকানো থাকে। LOAM তাঁদের জানায় না।",
   "settings.blockedEmpty": "আপনি কাউকে ব্লক করেননি।",
   "settings.privacyPolicy": "গোপনীয়তা নীতি",
-  "settings.reportProblems": "LOAM-এ কোনো অ্যানালিটিক্স বা ক্র্যাশ রিপোর্টিং নেই, তাই আপনি না জানালে আমরা কোনো সমস্যার কথা জানতে পারি না। কোনো সমস্যা জানাতে বা LOAM সম্পর্কে আরও জানতে আমাদের ওয়েবসাইট দেখুন বা আমাদের ইমেল করুন:",
+  "settings.reportProblems": "LOAM-এ কোনো অ্যানালিটিক্স বা ক্র্যাশ রিপোর্টিং নেই, তাই আপনি না জানালে আমরা কোনো সমস্যার কথা জানতে পারি না। কোনো সমস্যা জানাতে, নতুন কোনো ফিচারের অনুরোধ করতে বা LOAM সম্পর্কে আরও জানতে আমাদের ওয়েবসাইট দেখুন বা আমাদের ইমেল করুন:",
   "welcome.title": "{network}-এ স্বাগতম",
   "welcome.nameLabel": "এই নেটওয়ার্কে আপনার নাম",
   "welcome.tryAnother": "অন্য একটি নাম দেখুন",
@@ -636,6 +636,7 @@ export const bn: Translation = {
   "error.rules_not_accepted": "পোস্ট করার আগে নেটওয়ার্কের নিয়মে সম্মত হন",
   "error.rules_version_mismatch": "এই নিয়মগুলো বদলে গেছে। বর্তমান নিয়ম পড়তে আবার লোড করুন",
   "error.reroll_not_allowed": "নতুন নাম শুধু প্রথমবার যোগ দেওয়ার আগে পাওয়া যায়",
+  "error.host_not_allowed": "এই ঠিকানাটি এই LOAM নোড পরিবেশন করে না",
   "error.dm_unavailable": "এই ব্যক্তিকে সরাসরি বার্তা পাঠানো যাচ্ছে না",
   "error.dm_blocked_by_you": "আপনি এই ব্যক্তিকে ব্লক করেছেন। বার্তা পাঠাতে তাঁকে আনব্লক করুন",
   "error.channel_member_unavailable": "এই ব্যক্তি এই চ্যানেলের জন্য উপলব্ধ নন",
@@ -646,7 +647,6 @@ export const bn: Translation = {
   "message.actionsAt": "বার্তার বিকল্প, {time}-এ পাঠানো",
   "message.reactWith": "{emoji} দিয়ে প্রতিক্রিয়া জানান",
   "message.moreActions": "আরও বিকল্প",
-  "message.moreReactions": "আরও প্রতিক্রিয়া",
   "message.otherEmoji": "অন্য ইমোজি",
   "message.emojiFieldPlaceholder": "একটি ইমোজি বাছুন",
   "message.emojiFieldHint": "কীবোর্ডের ইমোজি বোতাম ব্যবহার করুন, বা একটি ইমোজি পেস্ট করুন।",

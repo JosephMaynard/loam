@@ -1,3 +1,4 @@
+import { createTransportIdentity, openTransport, sealTransport, transportServerAccept } from "@loam/crypto";
 import type { Channel, Message, User } from "@loam/schema";
 import { IDBFactory } from "fake-indexeddb";
 import { render } from "preact";
@@ -7,7 +8,8 @@ import { App } from "./app";
 import { captureAdminClaimCode, takeAdminClaimCode } from "./lib/admin-link";
 import { CONFIRMED_USER_KEY } from "./lib/identity";
 import { destroyDatabase, getAllRecords, putRecord, putRecords, resetLocalStoreForTests } from "./lib/local-store";
-import { resetTransportStateForTests } from "./lib/transport";
+import { captureJoinKey, resetTransportStateForTests } from "./lib/transport";
+import { isWipeTombstoned, setWipeTombstone } from "./lib/wipe";
 
 // App-level boot tests (pre-release review 2026-09-25): mount the real `App` against a stubbed node (fetch +
 // WebSocket) and a fresh fake IndexedDB, to check what the boot does with the cache it hydrates.
@@ -323,5 +325,114 @@ describe("the Welcome screen (member rules)", () => {
     stubNode();
     const root = await boot("/channels");
     expect(root.querySelector(".welcome-screen")).toBeNull();
+  });
+});
+
+describe("a wiped device rejoining by its join QR", () => {
+  const RESUME_AAD = "POST /api/session/resume";
+
+  /**
+   * A node pinned to `host`: answers the QR-pinned handshake (or refuses it) and the sealed identity resume
+   * the way the real server does, so a boot with a `#k=` can run to the point where the wipe tombstone is
+   * lifted. Content requests (tunnelled) never answer: these tests are about the gate, not the roster.
+   */
+  function stubPinnedNode(host: ReturnType<typeof createTransportIdentity>, options: { handshake?: "ok" | "fail" } = {}) {
+    let sessionKey: string | undefined;
+    const bootstrap = {
+      joinUrl: "http://node.test/",
+      websocketPath: "/ws",
+      networkConfig: {
+        transportEncryption: "required",
+        transportPublicKey: host.publicKey,
+        nodeName: "Test node",
+        enableDMs: true,
+        enableReplies: true,
+      },
+    };
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/bootstrap") {
+        return json(bootstrap);
+      }
+      if (url === "/api/transport/handshake") {
+        if (options.handshake === "fail") {
+          return json({ error: "internal_error" }, 500);
+        }
+        const { clientEphemeralPublic } = JSON.parse(String(init?.body)) as { clientEphemeralPublic: string };
+        const accepted = transportServerAccept({ hostSecret: host.secretKey, clientEphemeralPublic });
+        sessionKey = accepted.sessionKey;
+        return json({ sessionId: "sess-1", hostEphemeralPublic: accepted.hostEphemeralPublic, hostPublicKey: host.publicKey });
+      }
+      if (url === "/api/session/resume" && sessionKey) {
+        const { enc } = JSON.parse(String(init?.body)) as { enc: string };
+        const envelope = JSON.parse(openTransport(sessionKey, enc, RESUME_AAD) ?? "{}") as { s?: number };
+        const reply = { s: envelope.s, m: "POST", p: "/api/session/resume", currentUser: me, token: "token-1" };
+        return new Response(JSON.stringify({ enc: sealTransport(sessionKey, JSON.stringify(reply), RESUME_AAD) }), {
+          status: 200,
+          headers: { "content-type": "application/json", "x-loam-enc": "1" },
+        });
+      }
+      return pending();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  function handshakes(fetchMock: ReturnType<typeof stubPinnedNode>) {
+    return fetchMock.mock.calls.filter(([url]) => url === "/api/transport/handshake");
+  }
+
+  afterEach(() => {
+    delete (window as { __loamHostTransportKey?: unknown }).__loamHostTransportKey;
+  });
+
+  it("with no key at load, boot stays on the wiped screen and never talks to the node", async () => {
+    setWipeTombstone();
+    const fetchMock = stubPinnedNode(createTransportIdentity());
+    const root = await boot("/channels");
+
+    expect(root.textContent).toContain("Device wiped");
+    expect(handshakes(fetchMock)).toHaveLength(0);
+    expect(isWipeTombstoned()).toBe(true);
+  });
+
+  it("a #k= scanned at load lets boot handshake, and the tombstone is lifted once the handshake succeeds", async () => {
+    const host = createTransportIdentity();
+    setWipeTombstone();
+    // As main.tsx does: the fragment is read (and stripped) before the app renders.
+    window.history.replaceState(null, "", `/#k=${host.publicKey}`);
+    captureJoinKey();
+    const fetchMock = stubPinnedNode(host);
+    const root = await boot("/channels");
+
+    expect(root.textContent).not.toContain("Device wiped");
+    expect(handshakes(fetchMock)).toHaveLength(1);
+    await vi.waitFor(() => expect(isWipeTombstoned()).toBe(false));
+  });
+
+  it("keeps the tombstone when the handshake fails (a stale QR never lifts the gate by itself)", async () => {
+    const host = createTransportIdentity();
+    setWipeTombstone();
+    window.history.replaceState(null, "", `/#k=${host.publicKey}`);
+    captureJoinKey();
+    const fetchMock = stubPinnedNode(host, { handshake: "fail" });
+    const root = await boot("/channels");
+
+    expect(root.textContent).not.toContain("Device wiped");
+    expect(handshakes(fetchMock).length).toBeGreaterThan(0);
+    expect(isWipeTombstoned()).toBe(true);
+  });
+
+  it("the Android host's injected key counts as a rejoin for its own WebView", async () => {
+    const host = createTransportIdentity();
+    setWipeTombstone();
+    (window as { __loamHostTransportKey?: unknown }).__loamHostTransportKey = host.publicKey;
+    captureJoinKey();
+    const fetchMock = stubPinnedNode(host);
+    const root = await boot("/channels");
+
+    expect(root.textContent).not.toContain("Device wiped");
+    expect(handshakes(fetchMock)).toHaveLength(1);
+    await vi.waitFor(() => expect(isWipeTombstoned()).toBe(false));
   });
 });

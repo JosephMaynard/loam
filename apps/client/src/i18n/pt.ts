@@ -239,7 +239,7 @@ export const pt: Translation = {
   "admin.meshHeading": "Malha oportunista",
   "admin.meshEnable": "Ativar a entrega por malha oportunista",
   "admin.meshNote":
-    "Entrega por caixa lacrada que permite que uma mensagem salte de nó em nó até um destinatário offline (docs/16). Desativado por padrão.",
+    "Entrega por caixa lacrada que permite que uma mensagem salte de nó em nó até um destinatário offline. Desativado por padrão.",
   "admin.meshRelay": "Retransmitir a correspondência lacrada de outras pessoas",
   "admin.meshLifetimeLabel": "Duração da mensagem (horas)",
   "admin.meshLifetimeNote":
@@ -600,7 +600,7 @@ export const pt: Translation = {
   "settings.blockedNote": "As pessoas que você bloqueia não podem enviar mensagens diretas para você, e as mensagens delas nos canais ficam ocultas para você. O LOAM não as avisa.",
   "settings.blockedEmpty": "Você não bloqueou ninguém.",
   "settings.privacyPolicy": "Política de privacidade",
-  "settings.reportProblems": "O LOAM não tem análises nem relatórios de falhas, por isso só sabemos dos problemas que você nos conta. Para relatar um, ou saber mais sobre o LOAM, visite nosso site ou envie um e-mail:",
+  "settings.reportProblems": "O LOAM não tem análises nem relatórios de falhas, por isso só sabemos dos problemas que você nos conta. Para relatar um, pedir um recurso ou saber mais sobre o LOAM, visite nosso site ou envie um e-mail:",
   "welcome.title": "Boas-vindas a {network}",
   "welcome.nameLabel": "Seu nome nesta rede",
   "welcome.tryAnother": "Tentar outro nome",
@@ -636,6 +636,7 @@ export const pt: Translation = {
   "error.rules_not_accepted": "Aceite as regras da rede antes de publicar",
   "error.rules_version_mismatch": "Estas regras mudaram. Recarregue para ler as atuais",
   "error.reroll_not_allowed": "Só é possível trocar de nome antes de entrar pela primeira vez",
+  "error.host_not_allowed": "Este endereço não é servido por este nó LOAM",
   "error.dm_unavailable": "Mensagens diretas para esta pessoa não estão disponíveis",
   "error.dm_blocked_by_you": "Você bloqueou esta pessoa. Desbloqueie-a para enviar uma mensagem",
   "error.channel_member_unavailable": "Esta pessoa não está disponível para este canal",
@@ -650,7 +651,6 @@ export const pt: Translation = {
   "message.actionsAt": "Ações da mensagem, enviada às {time}",
   "message.reactWith": "Reagir com {emoji}",
   "message.moreActions": "Mais ações",
-  "message.moreReactions": "Mais reações",
   "message.otherEmoji": "Outro emoji",
   "message.emojiFieldPlaceholder": "Escolha um emoji",
   "message.emojiFieldHint": "Use o botão de emoji do teclado ou cole um emoji.",

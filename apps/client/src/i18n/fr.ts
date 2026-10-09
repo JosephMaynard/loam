@@ -239,7 +239,7 @@ export const fr: Translation = {
   "admin.meshHeading": "Maillage opportuniste",
   "admin.meshEnable": "Activer la diffusion par maillage opportuniste",
   "admin.meshNote":
-    "Livraison par boîte scellée qui permet à un message de sauter de nœud en nœud vers un destinataire hors ligne (docs/16). Désactivé par défaut.",
+    "Livraison par boîte scellée qui permet à un message de sauter de nœud en nœud vers un destinataire hors ligne. Désactivé par défaut.",
   "admin.meshRelay": "Relayer le courrier scellé d’autres personnes",
   "admin.meshLifetimeLabel": "Durée de vie du message (heures)",
   "admin.meshLifetimeNote":
@@ -600,7 +600,7 @@ export const fr: Translation = {
   "settings.blockedNote": "Les personnes que vous bloquez ne peuvent pas vous envoyer de messages directs, et leurs messages dans les canaux vous sont masqués. LOAM ne les en avertit pas.",
   "settings.blockedEmpty": "Vous n’avez bloqué personne.",
   "settings.privacyPolicy": "Politique de confidentialité",
-  "settings.reportProblems": "LOAM n'a ni statistiques d'utilisation ni rapports de plantage : nous n'apprenons un problème que si vous nous le signalez. Pour en signaler un, ou en savoir plus sur LOAM, consultez notre site ou écrivez-nous :",
+  "settings.reportProblems": "LOAM n'a ni statistiques d'utilisation ni rapports de plantage : nous n'apprenons un problème que si vous nous le signalez. Pour en signaler un, demander une fonctionnalité ou en savoir plus sur LOAM, consultez notre site ou écrivez-nous :",
   "welcome.title": "Bienvenue sur {network}",
   "welcome.nameLabel": "Votre nom sur ce réseau",
   "welcome.tryAnother": "Essayer un autre nom",
@@ -636,6 +636,7 @@ export const fr: Translation = {
   "error.rules_not_accepted": "Acceptez les règles du réseau avant de publier",
   "error.rules_version_mismatch": "Ces règles ont changé. Rechargez pour lire la version actuelle",
   "error.reroll_not_allowed": "Un nouveau nom n'est possible qu'avant votre première connexion",
+  "error.host_not_allowed": "Cette adresse n'est pas servie par ce nœud LOAM",
   "error.dm_unavailable": "Les messages directs à cette personne ne sont pas disponibles",
   "error.dm_blocked_by_you": "Vous avez bloqué cette personne. Débloquez-la pour lui envoyer un message",
   "error.channel_member_unavailable": "Cette personne n’est pas disponible pour ce canal",
@@ -650,7 +651,6 @@ export const fr: Translation = {
   "message.actionsAt": "Actions du message, envoyé à {time}",
   "message.reactWith": "Réagir avec {emoji}",
   "message.moreActions": "Plus d’actions",
-  "message.moreReactions": "Plus de réactions",
   "message.otherEmoji": "Autre emoji",
   "message.emojiFieldPlaceholder": "Choisissez un emoji",
   "message.emojiFieldHint": "Utilisez le bouton emoji de votre clavier ou collez un emoji.",

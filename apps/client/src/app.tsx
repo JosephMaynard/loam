@@ -86,6 +86,7 @@ import {
   handleWsFrame,
   inviteQrHostKey,
   isTunnelActive,
+  joinKeyPresentAtStartup,
   mayFallBackToPlaintext,
   reestablishSession,
   rejectPendingHostKey,
@@ -460,14 +461,17 @@ function LoamApp() {
   const [pinChange, setPinChange] = useState<{ current: string; next: string; matchesNode: boolean }>();
   // Deletes/edits applied by live events, so a history snapshot fetched before them can't undo them.
   const liveChangesRef = useRef(new LiveChangeJournal());
-  // A freshly-scanned join QR (`#k=`) present at THIS load = an explicit rejoin (docs/20 round-4 H2). Read
-  // it before the transport layer consumes the fragment. When a wipe tombstone is outstanding, a rejoin is
-  // the only thing that lifts the boot gate.
-  const rejoinQrPresent = /^#k=[A-Za-z0-9_-]+$/.test(window.location.hash);
+  // A freshly-scanned join QR (`#k=`) present at THIS load = an explicit rejoin (docs/20 round-4 H2). The
+  // transport layer records it in `captureJoinKey()` (main.tsx) before stripping the fragment from the URL,
+  // so it must be read from there, never from `window.location.hash` (the hash is
+  // already gone by the time this renders). Inside the Android host's own WebView the launcher's injected
+  // key counts too: the host has no QR of its own to rescan. When a wipe tombstone is outstanding, a rejoin
+  // is the only thing that lifts the boot gate.
+  const rejoinQrPresent = joinKeyPresentAtStartup();
   // Whether THIS load is a verified-rejoin attempt of a tombstoned device (a scanned QR while the tombstone
-  // is still set). Captured once at mount, before the transport layer consumes the `#k=` fragment. The
-  // tombstone is lifted only AFTER the QR handshake actually succeeds (docs/20 round-5 H2) — not merely
-  // because a syntactically-valid `#k=` is present (a stale/invalid QR, or a crash, must not remove the gate).
+  // is still set). Captured once at mount. The tombstone is lifted only AFTER the QR handshake actually
+  // succeeds (docs/20 round-5 H2) — not merely because a syntactically-valid `#k=` was present (a
+  // stale/invalid QR, or a crash, must not remove the gate).
   const bootRejoinAttempt = useRef(rejoinQrPresent && isWipeTombstoned());
   // BOOT GATE (docs/20 round-4 H2): if a prior device wipe's durable tombstone is still set, do NOT
   // auto-render/reconnect the normal app (a surviving HttpOnly cookie could otherwise rehydrate the wiped

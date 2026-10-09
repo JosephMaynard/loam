@@ -246,7 +246,7 @@ export const ar: Translation = {
   "admin.meshHeading": "شبكة انتهازية (mesh)",
   "admin.meshEnable": "تفعيل التسليم عبر الشبكة الانتهازية",
   "admin.meshNote":
-    "تسليم عبر صندوق بريد مختوم يتيح للرسالة القفز من عقدة إلى عقدة نحو مستلم غير متصل (docs/16). معطّل افتراضيًا.",
+    "تسليم عبر صندوق بريد مختوم يتيح للرسالة القفز من عقدة إلى عقدة نحو مستلم غير متصل. معطّل افتراضيًا.",
   "admin.meshRelay": "ترحيل البريد المختوم الخاص بالآخرين",
   "admin.meshLifetimeLabel": "مدة صلاحية الرسالة (ساعات)",
   "admin.meshLifetimeNote":
@@ -614,7 +614,7 @@ export const ar: Translation = {
   "settings.blockedNote": "لا يمكن للأشخاص الذين تحظرهم إرسال رسائل مباشرة إليك، وتُخفى رسائلهم في القنوات عنك. لا يُعلمهم LOAM بذلك.",
   "settings.blockedEmpty": "لم تحظر أحدًا.",
   "settings.privacyPolicy": "سياسة الخصوصية",
-  "settings.reportProblems": "لا يحتوي LOAM على أي تحليلات أو تقارير أعطال، لذلك لا نعرف بالمشكلات إلا إذا أبلغتنا بها. للإبلاغ عن مشكلة أو لمعرفة المزيد عن LOAM، زر موقعنا أو راسلنا:",
+  "settings.reportProblems": "لا يحتوي LOAM على أي تحليلات أو تقارير أعطال، لذلك لا نعرف بالمشكلات إلا إذا أبلغتنا بها. للإبلاغ عن مشكلة، أو لطلب ميزة جديدة، أو لمعرفة المزيد عن LOAM، زر موقعنا أو راسلنا:",
   "welcome.title": "مرحبًا بك في {network}",
   "welcome.nameLabel": "اسمك على هذه الشبكة",
   "welcome.tryAnother": "جرّب اسمًا آخر",
@@ -650,6 +650,7 @@ export const ar: Translation = {
   "error.rules_not_accepted": "وافق على قواعد الشبكة قبل النشر",
   "error.rules_version_mismatch": "تغيّرت هذه القواعد. أعد التحميل لقراءة النسخة الحالية",
   "error.reroll_not_allowed": "لا يمكن اختيار اسم جديد إلا قبل انضمامك لأول مرة",
+  "error.host_not_allowed": "هذا العنوان لا تخدمه عقدة LOAM هذه",
   "error.dm_unavailable": "الرسائل المباشرة إلى هذا الشخص غير متاحة",
   "error.dm_blocked_by_you": "لقد حظرت هذا الشخص. ألغِ حظره لترسل إليه رسالة",
   "error.channel_member_unavailable": "هذا الشخص غير متاح لهذه القناة",
@@ -667,7 +668,6 @@ export const ar: Translation = {
   "message.actionsAt": "إجراءات الرسالة، أُرسلت {time}",
   "message.reactWith": "تفاعل بـ {emoji}",
   "message.moreActions": "إجراءات أخرى",
-  "message.moreReactions": "مزيد من التفاعلات",
   "message.otherEmoji": "رمز تعبيري آخر",
   "message.emojiFieldPlaceholder": "اختر رمزًا تعبيريًا",
   "message.emojiFieldHint": "استخدم زر الرموز التعبيرية في لوحة المفاتيح، أو الصق رمزًا تعبيريًا.",

@@ -239,7 +239,7 @@ export const ur: Translation = {
   "admin.meshHeading": "موقع پرست میش (mesh)",
   "admin.meshEnable": "موقع پرست میش ترسیل فعال کریں",
   "admin.meshNote":
-    "مہر بند میل باکس کی ترسیل جو پیغام کو آف لائن وصول کنندہ کی طرف نوڈ سے نوڈ تک چھلانگ لگانے دیتی ہے (docs/16)۔ پہلے سے غیر فعال۔",
+    "مہر بند میل باکس کی ترسیل جو پیغام کو آف لائن وصول کنندہ کی طرف نوڈ سے نوڈ تک چھلانگ لگانے دیتی ہے۔ پہلے سے غیر فعال۔",
   "admin.meshRelay": "دوسرے لوگوں کی مہر بند میل آگے relay کریں",
   "admin.meshLifetimeLabel": "پیغام کی مدت (گھنٹے)",
   "admin.meshLifetimeNote":
@@ -600,7 +600,7 @@ export const ur: Translation = {
   "settings.blockedNote": "جن لوگوں کو آپ بلاک کرتے ہیں وہ آپ کو براہِ راست پیغامات نہیں بھیج سکتے، اور چینلز میں ان کے پیغامات آپ سے چھپے رہتے ہیں۔ LOAM انہیں اطلاع نہیں دیتا۔",
   "settings.blockedEmpty": "آپ نے کسی کو بلاک نہیں کیا۔",
   "settings.privacyPolicy": "رازداری کی پالیسی",
-  "settings.reportProblems": "LOAM میں کوئی اینالیٹکس یا کریش رپورٹنگ نہیں ہے، اس لیے ہمیں صرف انہی مسائل کا پتا چلتا ہے جن کی آپ اطلاع دیں۔ کسی مسئلے کی اطلاع دینے یا LOAM کے بارے میں مزید جاننے کے لیے ہماری ویب سائٹ دیکھیں یا ہمیں ای میل کریں:",
+  "settings.reportProblems": "LOAM میں کوئی اینالیٹکس یا کریش رپورٹنگ نہیں ہے، اس لیے ہمیں صرف انہی مسائل کا پتا چلتا ہے جن کی آپ اطلاع دیں۔ کسی مسئلے کی اطلاع دینے، کسی نئی خصوصیت کی درخواست کرنے یا LOAM کے بارے میں مزید جاننے کے لیے ہماری ویب سائٹ دیکھیں یا ہمیں ای میل کریں:",
   "welcome.title": "{network} میں خوش آمدید",
   "welcome.nameLabel": "اس نیٹ ورک پر آپ کا نام",
   "welcome.tryAnother": "کوئی اور نام آزمائیں",
@@ -636,6 +636,7 @@ export const ur: Translation = {
   "error.rules_not_accepted": "پوسٹ کرنے سے پہلے نیٹ ورک کے قواعد سے اتفاق کریں",
   "error.rules_version_mismatch": "یہ قواعد بدل گئے ہیں۔ موجودہ قواعد پڑھنے کے لیے دوبارہ لوڈ کریں",
   "error.reroll_not_allowed": "نیا نام صرف پہلی بار شامل ہونے سے پہلے مل سکتا ہے",
+  "error.host_not_allowed": "یہ پتہ اس LOAM نوڈ سے فراہم نہیں کیا جاتا",
   "error.dm_unavailable": "اس شخص کو براہِ راست پیغامات دستیاب نہیں ہیں",
   "error.dm_blocked_by_you": "آپ نے اس شخص کو بلاک کیا ہے۔ پیغام بھیجنے کے لیے انہیں اَن بلاک کریں",
   "error.channel_member_unavailable": "یہ شخص اس چینل کے لیے دستیاب نہیں ہے",
@@ -646,7 +647,6 @@ export const ur: Translation = {
   "message.actionsAt": "پیغام کے اقدامات، {time} پر بھیجا گیا",
   "message.reactWith": "{emoji} سے ردِعمل دیں",
   "message.moreActions": "مزید اقدامات",
-  "message.moreReactions": "مزید ردِعمل",
   "message.otherEmoji": "کوئی اور ایموجی",
   "message.emojiFieldPlaceholder": "ایک ایموجی چنیں",
   "message.emojiFieldHint": "اپنے کی بورڈ کا ایموجی بٹن استعمال کریں، یا ایموجی پیسٹ کریں۔",

@@ -239,7 +239,7 @@ export const my: Translation = {
   "admin.meshHeading": "Opportunistic mesh",
   "admin.meshEnable": "Enable opportunistic mesh delivery",
   "admin.meshNote":
-    "Sealed-mailbox delivery that lets a message hop node-to-node toward an offline recipient (docs/16). Off by default.",
+    "Sealed-mailbox delivery that lets a message hop node-to-node toward an offline recipient. Off by default.",
   "admin.meshRelay": "Relay other people's sealed mail onward",
   "admin.meshLifetimeLabel": "Message lifetime (hours)",
   "admin.meshLifetimeNote":
@@ -600,7 +600,7 @@ export const my: Translation = {
   "settings.blockedNote": "သင်ပိတ်ဆို့ထားသူများသည် သင့်ထံ တိုက်ရိုက်စာ ပို့၍မရဘဲ channel များရှိ ၎င်းတို့၏ မက်ဆေ့ချ်များကို သင့်ထံမှ ဖျောက်ထားသည်။ LOAM က ၎င်းတို့ကို အသိမပေးပါ။",
   "settings.blockedEmpty": "သင် မည်သူ့ကိုမျှ ပိတ်ဆို့မထားပါ။",
   "settings.privacyPolicy": "ကိုယ်ရေးလုံခြုံမှု မူဝါဒ",
-  "settings.reportProblems": "LOAM တွင် အသုံးပြုမှု ခွဲခြမ်းစိတ်ဖြာချက် သို့မဟုတ် ပျက်စီးမှု အစီရင်ခံစာ မရှိသောကြောင့် သင် အကြောင်းကြားသော ပြဿနာများကိုသာ ကျွန်ုပ်တို့ သိရှိပါသည်။ ပြဿနာတစ်ခု တိုင်ကြားရန် သို့မဟုတ် LOAM အကြောင်း ပိုမိုသိရှိရန် ကျွန်ုပ်တို့၏ ဝက်ဘ်ဆိုက်သို့ သွားပါ သို့မဟုတ် အီးမေးလ် ပို့ပါ -",
+  "settings.reportProblems": "LOAM တွင် အသုံးပြုမှု ခွဲခြမ်းစိတ်ဖြာချက် သို့မဟုတ် ပျက်စီးမှု အစီရင်ခံစာ မရှိသောကြောင့် သင် အကြောင်းကြားသော ပြဿနာများကိုသာ ကျွန်ုပ်တို့ သိရှိပါသည်။ ပြဿနာတစ်ခု တိုင်ကြားရန်၊ လုပ်ဆောင်ချက်အသစ် တောင်းဆိုရန် သို့မဟုတ် LOAM အကြောင်း ပိုမိုသိရှိရန် ကျွန်ုပ်တို့၏ ဝက်ဘ်ဆိုက်သို့ သွားပါ သို့မဟုတ် အီးမေးလ် ပို့ပါ -",
   "welcome.title": "{network} သို့ ကြိုဆိုပါသည်",
   "welcome.nameLabel": "ဤကွန်ရက်ပေါ်ရှိ သင့်အမည်",
   "welcome.tryAnother": "အခြားအမည် စမ်းကြည့်ရန်",
@@ -636,6 +636,7 @@ export const my: Translation = {
   "error.rules_not_accepted": "ပို့စ်မတင်မီ ကွန်ရက် စည်းမျဉ်းများကို သဘောတူပါ",
   "error.rules_version_mismatch": "ဤစည်းမျဉ်းများ ပြောင်းလဲသွားပါပြီ။ လက်ရှိစည်းမျဉ်းများကို ဖတ်ရန် ပြန်လည်ဖွင့်ပါ",
   "error.reroll_not_allowed": "အမည်အသစ်ကို ပထမဆုံး မဝင်ရောက်မီသာ ရနိုင်သည်",
+  "error.host_not_allowed": "ဤလိပ်စာကို ဤ LOAM node က ဝန်ဆောင်မှုမပေးပါ",
   "error.dm_unavailable": "ဤသူထံ တိုက်ရိုက်စာ ပို့၍ မရနိုင်ပါ",
   "error.dm_blocked_by_you": "သင်သည် ဤသူကို ပိတ်ဆို့ထားသည်။ မက်ဆေ့ချ်ပို့ရန် ပိတ်ဆို့မှုကို ဖြုတ်ပါ",
   "error.channel_member_unavailable": "ဤသူသည် ဤ channel အတွက် မရနိုင်ပါ",
@@ -646,7 +647,6 @@ export const my: Translation = {
   "message.actionsAt": "စာ လုပ်ဆောင်ချက်များ၊ {time} တွင် ပို့ခဲ့သည်",
   "message.reactWith": "{emoji} ဖြင့် တုံ့ပြန်ရန်",
   "message.moreActions": "နောက်ထပ် လုပ်ဆောင်ချက်များ",
-  "message.moreReactions": "နောက်ထပ် တုံ့ပြန်မှုများ",
   "message.otherEmoji": "အခြား အီမိုဂျီ",
   "message.emojiFieldPlaceholder": "အီမိုဂျီ တစ်ခု ရွေးပါ",
   "message.emojiFieldHint": "ကီးဘုတ်ရှိ အီမိုဂျီ ခလုတ်ကို သုံးပါ၊ သို့မဟုတ် အီမိုဂျီ တစ်ခု ကူးထည့်ပါ။",

@@ -239,7 +239,7 @@ export const tr: Translation = {
   "admin.meshHeading": "Fırsatçı ağ (mesh)",
   "admin.meshEnable": "Fırsatçı ağ iletimini etkinleştir",
   "admin.meshNote":
-    "Bir mesajın çevrimdışı bir alıcıya doğru düğümden düğüme atlamasını sağlayan mühürlü posta kutusu iletimi (docs/16). Varsayılan olarak kapalı.",
+    "Bir mesajın çevrimdışı bir alıcıya doğru düğümden düğüme atlamasını sağlayan mühürlü posta kutusu iletimi. Varsayılan olarak kapalı.",
   "admin.meshRelay": "Başkalarının mühürlü postasını ileri aktar",
   "admin.meshLifetimeLabel": "Mesaj ömrü (saat)",
   "admin.meshLifetimeNote":
@@ -600,7 +600,7 @@ export const tr: Translation = {
   "settings.blockedNote": "Engellediğiniz kişiler size doğrudan mesaj gönderemez ve kanallardaki mesajları sizden gizlenir. LOAM onlara bildirmez.",
   "settings.blockedEmpty": "Kimseyi engellemediniz.",
   "settings.privacyPolicy": "Gizlilik politikası",
-  "settings.reportProblems": "LOAM'da analiz veya çökme raporu yoktur, bu yüzden yalnızca bize bildirdiğiniz sorunlardan haberimiz olur. Bir sorun bildirmek ya da LOAM hakkında daha fazla bilgi almak için web sitemizi ziyaret edin veya bize e-posta gönderin:",
+  "settings.reportProblems": "LOAM'da analiz veya çökme raporu yoktur, bu yüzden yalnızca bize bildirdiğiniz sorunlardan haberimiz olur. Bir sorun bildirmek, yeni bir özellik istemek ya da LOAM hakkında daha fazla bilgi almak için web sitemizi ziyaret edin veya bize e-posta gönderin:",
   "welcome.title": "{network} ağına hoş geldiniz",
   "welcome.nameLabel": "Bu ağdaki adınız",
   "welcome.tryAnother": "Başka bir ad dene",
@@ -636,6 +636,7 @@ export const tr: Translation = {
   "error.rules_not_accepted": "Gönderi paylaşmadan önce ağ kurallarını kabul edin",
   "error.rules_version_mismatch": "Bu kurallar değişti. Güncel kuralları okumak için sayfayı yenileyin",
   "error.reroll_not_allowed": "Yeni ad yalnızca ilk katılımınızdan önce alınabilir",
+  "error.host_not_allowed": "Bu adres bu LOAM düğümü tarafından sunulmuyor",
   "error.dm_unavailable": "Bu kişiye doğrudan mesaj gönderilemiyor",
   "error.dm_blocked_by_you": "Bu kişiyi engellediniz. Mesaj göndermek için engeli kaldırın",
   "error.channel_member_unavailable": "Bu kişi bu kanal için uygun değil",
@@ -646,7 +647,6 @@ export const tr: Translation = {
   "message.actionsAt": "Mesaj işlemleri, gönderilme saati {time}",
   "message.reactWith": "{emoji} ile tepki ver",
   "message.moreActions": "Diğer işlemler",
-  "message.moreReactions": "Daha fazla tepki",
   "message.otherEmoji": "Başka bir emoji",
   "message.emojiFieldPlaceholder": "Bir emoji seçin",
   "message.emojiFieldHint": "Klavyenizin emoji düğmesini kullanın ya da bir emoji yapıştırın.",

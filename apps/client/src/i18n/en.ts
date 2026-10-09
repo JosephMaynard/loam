@@ -291,7 +291,7 @@ export const en = {
   "admin.meshHeading": "Opportunistic mesh",
   "admin.meshEnable": "Enable opportunistic mesh delivery",
   "admin.meshNote":
-    "Sealed-mailbox delivery that lets a message hop node-to-node toward an offline recipient (docs/16). Off by default.",
+    "Sealed-mailbox delivery that lets a message hop node-to-node toward an offline recipient. Off by default.",
   "admin.meshRelay": "Relay other people's sealed mail onward",
   "admin.meshLifetimeLabel": "Message lifetime (hours)",
   "admin.meshLifetimeNote":
@@ -673,7 +673,7 @@ export const en = {
   "settings.blockedNote": "People you block can't send you direct messages, and their channel messages are hidden from you. LOAM doesn't notify them.",
   "settings.blockedEmpty": "You haven't blocked anyone.",
   "settings.privacyPolicy": "Privacy policy",
-  "settings.reportProblems": "LOAM has no analytics or crash reporting, so we only hear about problems you tell us about. To report one, or to find out more about LOAM, visit our website or email us:",
+  "settings.reportProblems": "LOAM has no analytics or crash reporting, so we only hear about problems you tell us about. To report one, to ask for a feature, or to find out more about LOAM, visit our website or email us:",
   "welcome.title": "Welcome to {network}",
   "welcome.nameLabel": "Your name on this network",
   "welcome.tryAnother": "Try another name",
@@ -709,6 +709,7 @@ export const en = {
   "error.rules_not_accepted": "Agree to the network's rules before posting",
   "error.rules_version_mismatch": "These rules have changed. Reload to read the current ones",
   "error.reroll_not_allowed": "A new name is only available before you first join in",
+  "error.host_not_allowed": "This address isn't served by this LOAM node",
   "error.dm_unavailable": "Direct messages to this person aren't available",
   "error.dm_blocked_by_you": "You blocked this person. Unblock them to send a message",
   "error.channel_member_unavailable": "This person isn't available for this channel",
@@ -719,7 +720,6 @@ export const en = {
   "message.actionsAt": "Message actions, sent {time}",
   "message.reactWith": "React with {emoji}",
   "message.moreActions": "More actions",
-  "message.moreReactions": "More reactions",
   "message.otherEmoji": "Other emoji",
   "message.emojiFieldPlaceholder": "Pick an emoji",
   "message.emojiFieldHint": "Use your keyboard's emoji button, or paste an emoji.",

@@ -145,9 +145,10 @@ describe("ConversationView is scoped per conversation", () => {
 
   it("an open message report dialog does not follow into the next conversation", async () => {
     const host = mount(view({ conversation: GENERAL, messages: [post("p1")] }));
+    // The ⋮ button opens the message's actions sheet (the same one the time opens); Report is in it.
     host.querySelector<HTMLButtonElement>(".message-more")!.click();
     await tick();
-    Array.from(host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+    Array.from(host.querySelectorAll<HTMLButtonElement>(".message-sheet .menu-item"))
       .find((item) => item.textContent === "Report")!
       .click();
     await tick();

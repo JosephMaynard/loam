@@ -239,7 +239,7 @@ export const sw: Translation = {
   "admin.meshHeading": "Mesh ya fursa",
   "admin.meshEnable": "Wezesha uwasilishaji wa mesh ya fursa",
   "admin.meshNote":
-    "Uwasilishaji wa sanduku la barua lililofungwa unaoruhusu ujumbe kuruka kutoka nodi hadi nodi kuelekea kwa mpokeaji asiye mtandaoni (docs/16). Imezimwa kwa chaguo-msingi.",
+    "Uwasilishaji wa sanduku la barua lililofungwa unaoruhusu ujumbe kuruka kutoka nodi hadi nodi kuelekea kwa mpokeaji asiye mtandaoni. Imezimwa kwa chaguo-msingi.",
   "admin.meshRelay": "Sambaza barua zilizofungwa za watu wengine",
   "admin.meshLifetimeLabel": "Muda wa ujumbe (masaa)",
   "admin.meshLifetimeNote":
@@ -600,7 +600,7 @@ export const sw: Translation = {
   "settings.blockedNote": "Watu unaowazuia hawawezi kukutumia ujumbe wa moja kwa moja, na jumbe zao kwenye vituo hufichwa kwako. LOAM haiwajulishi.",
   "settings.blockedEmpty": "Hujamzuia mtu yeyote.",
   "settings.privacyPolicy": "Sera ya faragha",
-  "settings.reportProblems": "LOAM haina takwimu za matumizi wala ripoti za hitilafu, kwa hivyo tunajua tu matatizo unayotuambia. Ili kuripoti tatizo, au kujua zaidi kuhusu LOAM, tembelea tovuti yetu au tutumie barua pepe:",
+  "settings.reportProblems": "LOAM haina takwimu za matumizi wala ripoti za hitilafu, kwa hivyo tunajua tu matatizo unayotuambia. Ili kuripoti tatizo, kuomba kipengele kipya, au kujua zaidi kuhusu LOAM, tembelea tovuti yetu au tutumie barua pepe:",
   "welcome.title": "Karibu {network}",
   "welcome.nameLabel": "Jina lako kwenye mtandao huu",
   "welcome.tryAnother": "Jaribu jina lingine",
@@ -636,6 +636,7 @@ export const sw: Translation = {
   "error.rules_not_accepted": "Kubali sheria za mtandao kabla ya kuchapisha",
   "error.rules_version_mismatch": "Sheria hizi zimebadilika. Pakia upya ili usome za sasa",
   "error.reroll_not_allowed": "Jina jipya linapatikana tu kabla hujajiunga kwa mara ya kwanza",
+  "error.host_not_allowed": "Anwani hii haihudumiwi na nodi hii ya LOAM",
   "error.dm_unavailable": "Ujumbe wa moja kwa moja kwa mtu huyu haupatikani",
   "error.dm_blocked_by_you": "Umemzuia mtu huyu. Ondoa kizuizi ili kumtumia ujumbe",
   "error.channel_member_unavailable": "Mtu huyu hapatikani kwa kituo hiki",
@@ -646,7 +647,6 @@ export const sw: Translation = {
   "message.actionsAt": "Vitendo vya ujumbe, ulitumwa saa {time}",
   "message.reactWith": "Jibu kwa {emoji}",
   "message.moreActions": "Vitendo zaidi",
-  "message.moreReactions": "Miitikio zaidi",
   "message.otherEmoji": "Emoji nyingine",
   "message.emojiFieldPlaceholder": "Chagua emoji",
   "message.emojiFieldHint": "Tumia kitufe cha emoji kwenye kibodi yako, au bandika emoji.",

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   acceptPendingHostKey,
   apiUrl,
+  captureJoinKey,
   clearCachedHostPublicKey,
   clearStoredIdentityToken,
   encryptedFetch,
@@ -18,6 +19,7 @@ import {
   isHostKeyPinBroken,
   handleWsFrame,
   isTunnelActive,
+  joinKeyPresentAtStartup,
   logoutSecureIdentity,
   mayFallBackToPlaintext,
   rejectPendingHostKey,
@@ -1583,5 +1585,70 @@ describe("review fixes 2026-09-04 (client transport) — round 2: a broken pin f
     } finally {
       setItem.mockRestore();
     }
+  });
+
+  describe("captureJoinKey (the wipe gate reads this, not the stripped hash)", () => {
+    afterEach(() => {
+      delete (window as { __loamHostTransportKey?: unknown }).__loamHostTransportKey;
+    });
+
+    it("records that a #k= key arrived at start-up, pins it and strips the fragment", () => {
+      const host = createTransportIdentity();
+      window.location.hash = `#k=${host.publicKey}`;
+      expect(joinKeyPresentAtStartup()).toBe(false);
+
+      captureJoinKey();
+
+      expect(joinKeyPresentAtStartup()).toBe(true);
+      expect(window.location.hash).toBe("");
+      expect(getCachedHostPublicKey()).toBe(host.publicKey);
+    });
+
+    it("stays false with no fragment, or a fragment that is not a join key", () => {
+      captureJoinKey();
+      expect(joinKeyPresentAtStartup()).toBe(false);
+
+      window.location.hash = "#x=abc";
+      captureJoinKey();
+      expect(joinKeyPresentAtStartup()).toBe(false);
+      expect(getCachedHostPublicKey()).toBeUndefined();
+      expect(window.location.hash).toBe("#x=abc");
+    });
+
+    it("counts a #k= that differs from the held pin (parked, never silently adopted) as a scan", () => {
+      const pinned = createTransportIdentity();
+      const scanned = createTransportIdentity();
+      localStorage.setItem(`loam.transportHostKey.${window.location.origin}`, pinned.publicKey);
+      window.location.hash = `#k=${scanned.publicKey}`;
+
+      captureJoinKey();
+
+      expect(joinKeyPresentAtStartup()).toBe(true);
+      expect(getCachedHostPublicKey()).toBe(pinned.publicKey);
+      expect(window.location.hash).toBe("");
+    });
+
+    it("counts the Android launcher's injected key as the host's own rejoin", () => {
+      const host = createTransportIdentity();
+      (window as { __loamHostTransportKey?: unknown }).__loamHostTransportKey = host.publicKey;
+
+      captureJoinKey();
+
+      expect(joinKeyPresentAtStartup()).toBe(true);
+      expect(getCachedHostPublicKey()).toBe(host.publicKey);
+    });
+
+    it("ignores a non-string launcher value (DOM clobbering)", () => {
+      (window as { __loamHostTransportKey?: unknown }).__loamHostTransportKey = { toString: () => "x" };
+      captureJoinKey();
+      expect(joinKeyPresentAtStartup()).toBe(false);
+    });
+
+    it("is cleared by the test reset", () => {
+      window.location.hash = `#k=${createTransportIdentity().publicKey}`;
+      captureJoinKey();
+      resetTransportStateForTests();
+      expect(joinKeyPresentAtStartup()).toBe(false);
+    });
   });
 });

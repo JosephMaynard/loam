@@ -227,7 +227,7 @@ function AdminChannelRow({
     setError(undefined);
 
     try {
-      const updated = await requestChannel("PATCH", `/api/channels/${channel.id}`, update);
+      const updated = await requestChannel("PATCH", `/api/channels/${encodeURIComponent(channel.id)}`, update);
       onApply(updated);
       setName(updated.name);
     } catch (requestError) {

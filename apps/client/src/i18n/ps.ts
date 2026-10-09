@@ -239,7 +239,7 @@ export const ps: Translation = {
   "admin.meshHeading": "فرصتي مش شبکه",
   "admin.meshEnable": "د فرصتي مش لېږد فعالول",
   "admin.meshNote":
-    "د بند شوي-صندوق لېږد چې یو پیغام له نوډه نوډ ته د یو آفلاین اخیستونکي په لور ورټوپوي (docs/16). په اصل کې بند دی.",
+    "د بند شوي-صندوق لېږد چې یو پیغام له نوډه نوډ ته د یو آفلاین اخیستونکي په لور ورټوپوي. په اصل کې بند دی.",
   "admin.meshRelay": "د نورو خلکو بند شوې بریښنالیکونه مخ ته لېږدول",
   "admin.meshLifetimeLabel": "د پیغام ژوند موده (ساعتونه)",
   "admin.meshLifetimeNote":
@@ -600,7 +600,7 @@ export const ps: Translation = {
   "settings.blockedNote": "هغه خلک چې تاسو یې بندوئ تاسو ته مستقیم پیغامونه نه شي لېږلای، او په چینلونو کې یې پیغامونه له تاسو پټ وي. LOAM هغوی ته خبر نه ورکوي.",
   "settings.blockedEmpty": "تاسو هېڅوک نه دي بند کړي.",
   "settings.privacyPolicy": "د محرمیت تګلاره",
-  "settings.reportProblems": "LOAM هېڅ تحلیلونه یا د خرابیو راپورونه نه لري، نو موږ یوازې د هغو ستونزو په اړه خبرېږو چې تاسو یې راته ووایئ. د ستونزې د راپور یا د LOAM په اړه د نورو معلوماتو لپاره، زموږ ویب‌پاڼې ته ورشئ یا موږ ته برېښنالیک ولېږئ:",
+  "settings.reportProblems": "LOAM هېڅ تحلیلونه یا د خرابیو راپورونه نه لري، نو موږ یوازې د هغو ستونزو په اړه خبرېږو چې تاسو یې راته ووایئ. د ستونزې د راپور، د نوي ځانګړتیا د غوښتنې یا د LOAM په اړه د نورو معلوماتو لپاره، زموږ ویب‌پاڼې ته ورشئ یا موږ ته برېښنالیک ولېږئ:",
   "welcome.title": "{network} ته ښه راغلاست",
   "welcome.nameLabel": "په دې شبکه کې ستاسو نوم",
   "welcome.tryAnother": "بل نوم وازمویئ",
@@ -636,6 +636,7 @@ export const ps: Translation = {
   "error.rules_not_accepted": "د خپرولو دمخه د شبکې قواعد ومنئ",
   "error.rules_version_mismatch": "دا قواعد بدل شوي دي. د اوسنیو قواعدو د لوستلو لپاره پاڼه بیا پورته کړئ",
   "error.reroll_not_allowed": "نوی نوم یوازې ستاسو د لومړي ځل یوځای کېدو دمخه شتون لري",
+  "error.host_not_allowed": "دا پته د دې LOAM نوډ له خوا نه خدمت کېږي",
   "error.dm_unavailable": "دې کس ته مستقیم پیغامونه شتون نه لري",
   "error.dm_blocked_by_you": "تاسو دا کس بند کړی دی. د پیغام لېږلو لپاره یې بندیز لرې کړئ",
   "error.channel_member_unavailable": "دا کس د دې چینل لپاره شتون نه لري",
@@ -646,7 +647,6 @@ export const ps: Translation = {
   "message.actionsAt": "د پیغام کړنې، په {time} لېږل شوی",
   "message.reactWith": "په {emoji} غبرګون",
   "message.moreActions": "نورې کړنې",
-  "message.moreReactions": "نور غبرګونونه",
   "message.otherEmoji": "بل ایموجي",
   "message.emojiFieldPlaceholder": "یو ایموجي وټاکئ",
   "message.emojiFieldHint": "د خپل کیبورډ د ایموجي تڼۍ وکاروئ، یا یو ایموجي پیسټ کړئ.",

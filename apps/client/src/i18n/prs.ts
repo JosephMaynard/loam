@@ -240,7 +240,7 @@ export const prs: Translation = {
   "admin.meshHeading": "شبکهٔ فرصت‌طلبانه",
   "admin.meshEnable": "فعال‌سازی تحویل شبکهٔ فرصت‌طلبانه",
   "admin.meshNote":
-    "تحویل صندوق پستی مهروموم‌شده که به پیام اجازه می‌دهد گره‌به‌گره به‌سوی گیرندهٔ آفلاین جهش کند (docs/16). به‌صورت پیش‌فرض خاموش است.",
+    "تحویل صندوق پستی مهروموم‌شده که به پیام اجازه می‌دهد گره‌به‌گره به‌سوی گیرندهٔ آفلاین جهش کند. به‌صورت پیش‌فرض خاموش است.",
   "admin.meshRelay": "بازپخش نامه‌های مهروموم‌شدهٔ دیگران",
   "admin.meshLifetimeLabel": "طول عمر پیام (ساعت)",
   "admin.meshLifetimeNote":
@@ -601,7 +601,7 @@ export const prs: Translation = {
   "settings.blockedNote": "کسانی که مسدود می‌کنید نمی‌توانند برایتان پیام مستقیم بفرستند و پیام‌هایشان در چینل‌ها از نظر شما پنهان می‌شود. LOAM برایشان اطلاع نمی‌دهد.",
   "settings.blockedEmpty": "شما کسی را مسدود نکرده‌اید.",
   "settings.privacyPolicy": "پالیسی حریم خصوصی",
-  "settings.reportProblems": "LOAM هیچ تحلیل آماری یا گزارش خرابی ندارد، پس ما تنها از مشکلاتی آگاه می‌شویم که شما گزارش بدهید. برای گزارش یک مشکل یا معلومات بیشتر درباره LOAM، از ویب‌سایت ما دیدن کنید یا برای ما ایمیل بفرستید:",
+  "settings.reportProblems": "LOAM هیچ تحلیل آماری یا گزارش خرابی ندارد، پس ما تنها از مشکلاتی آگاه می‌شویم که شما گزارش بدهید. برای گزارش یک مشکل، درخواست یک ویژگی جدید یا معلومات بیشتر درباره LOAM، از ویب‌سایت ما دیدن کنید یا برای ما ایمیل بفرستید:",
   "welcome.title": "به {network} خوش آمدید",
   "welcome.nameLabel": "نام شما در این شبکه",
   "welcome.tryAnother": "یک نام دیگر را امتحان کنید",
@@ -637,6 +637,7 @@ export const prs: Translation = {
   "error.rules_not_accepted": "پیش از نشر پست، قوانین شبکه را بپذیرید",
   "error.rules_version_mismatch": "این قوانین تغییر کرده‌اند. برای خواندن نسخهٔ فعلی، صفحه را دوباره بار کنید",
   "error.reroll_not_allowed": "نام جدید تنها پیش از نخستین پیوستن شما در دسترس است",
+  "error.host_not_allowed": "این نشانی توسط این گره LOAM ارائه نمی‌شود",
   "error.dm_unavailable": "پیام مستقیم به این شخص در دسترس نیست",
   "error.dm_blocked_by_you": "شما این شخص را مسدود کرده‌اید. برای فرستادن پیام، مسدودیت را رفع کنید",
   "error.channel_member_unavailable": "این شخص برای این چینل در دسترس نیست",
@@ -647,7 +648,6 @@ export const prs: Translation = {
   "message.actionsAt": "اقدامات پیام، فرستاده‌شده در {time}",
   "message.reactWith": "واکنش با {emoji}",
   "message.moreActions": "اقدامات بیشتر",
-  "message.moreReactions": "واکنش‌های بیشتر",
   "message.otherEmoji": "ایموجی دیگر",
   "message.emojiFieldPlaceholder": "یک ایموجی انتخاب کنید",
   "message.emojiFieldHint": "از دکمهٔ ایموجی کیبورد استفاده کنید یا یک ایموجی را پیست کنید.",

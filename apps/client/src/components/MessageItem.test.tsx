@@ -17,16 +17,16 @@ function mount(element: VNode): HTMLDivElement {
   return container;
 }
 
-/** Open the message's ⋮ menu and return its item labels. */
-async function menuLabels(host: HTMLElement): Promise<string[]> {
+/** Open the actions sheet from the toolbar's ⋮ button and return its action labels (below the reactions). */
+async function sheetLabels(host: HTMLElement): Promise<string[]> {
   host.querySelector<HTMLButtonElement>(".message-more")!.click();
   await tick();
-  return Array.from(host.querySelectorAll('[role="menuitem"] .menu-item-label')).map((node) => node.textContent ?? "");
+  return Array.from(host.querySelectorAll(".message-sheet .menu-item-label")).map((node) => node.textContent ?? "");
 }
 
-/** A menu item (in the open ⋮ menu) by its label. */
-function menuItem(host: HTMLElement, label: string): HTMLButtonElement {
-  return Array.from(host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(
+/** An action (in the open sheet) by its label. */
+function sheetItem(host: HTMLElement, label: string): HTMLButtonElement {
+  return Array.from(host.querySelectorAll<HTMLButtonElement>(".message-sheet .menu-item")).find(
     (item) => item.textContent === label,
   )!;
 }
@@ -112,10 +112,10 @@ describe("MessageItem", () => {
       />,
     );
 
-    expect(await menuLabels(host)).toEqual(["Copy text", "Report"]);
+    expect(await sheetLabels(host)).toEqual(["Copy text", "Report"]);
   });
 
-  it("offers edit and delete on the current user's own message, behind the ⋮ menu (no visible icon row)", async () => {
+  it("offers edit and delete on the current user's own message, behind the ⋮ button's sheet (no visible icon row)", async () => {
     const host = mount(
       <MessageItem
         currentUser={currentUser}
@@ -126,12 +126,15 @@ describe("MessageItem", () => {
       />,
     );
 
-    // Nothing but the toolbar's icon buttons is rendered until the menu opens.
-    expect(host.querySelector('[role="menu"]')).toBeNull();
-    expect(await menuLabels(host)).toEqual(["Copy text", "Edit", "Delete"]);
+    // Nothing but the toolbar's icon buttons is rendered until the sheet opens, and there is no separate
+    // popover menu any more: the ⋮ button is a plain button into the one actions sheet.
+    expect(host.querySelector(".message-sheet")).toBeNull();
+    expect(host.querySelector('[aria-haspopup="menu"]')).toBeNull();
+    expect(host.querySelector(".message-more")?.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(await sheetLabels(host)).toEqual(["Copy text", "Edit", "Delete"]);
   });
 
-  it("switches to the inline edit form from the menu, and Escape cancels it", async () => {
+  it("switches to the inline edit form from the sheet, and Escape cancels it", async () => {
     const host = mount(
       <MessageItem
         currentUser={currentUser}
@@ -142,8 +145,8 @@ describe("MessageItem", () => {
       />,
     );
 
-    await menuLabels(host);
-    menuItem(host, "Edit").click();
+    await sheetLabels(host);
+    sheetItem(host, "Edit").click();
     await tick();
     const textarea = host.querySelector<HTMLTextAreaElement>(".message-edit textarea")!;
     expect(textarea.value).toBe("draft me");
@@ -284,11 +287,11 @@ describe("MessageItem", () => {
     );
     expect(host.querySelector(".quick-reaction")).toBeNull();
     expect(host.querySelector(".message-reply-button")).toBeNull();
-    // The ⋮ menu is still there (Copy stays useful), but Edit is gone with it.
+    // The ⋮ button is still there (Copy stays useful), but Edit is gone from its sheet.
     expect(host.querySelector(".message-more")).not.toBeNull();
   });
 
-  it("offers no edit in a read-only channel even through the ⋮ menu", async () => {
+  it("offers no edit in a read-only channel even through the ⋮ button's sheet", async () => {
     const host = mount(
       <MessageItem
         currentUser={currentUser}
@@ -299,7 +302,7 @@ describe("MessageItem", () => {
         {...noop}
       />,
     );
-    expect(await menuLabels(host)).toEqual(["Copy text"]);
+    expect(await sheetLabels(host)).toEqual(["Copy text"]);
   });
 
   it("offers nothing to react to, reply to, copy or edit on a moderator-removed message", async () => {
@@ -342,12 +345,17 @@ describe("MessageItem", () => {
     expect(onReact).toHaveBeenCalledWith("msg.1", quick.textContent?.trim());
   });
 
-  it("opens the full reaction grid from the toolbar's smiley button", async () => {
+  it("opens the full reaction grid from the toolbar's ⋮ button, which is the only other button there", async () => {
     const host = mount(
       <MessageItem currentUser={currentUser} message={post()} reactions={[]} usersById={new Map()} {...noop} />,
     );
 
-    host.querySelector<HTMLButtonElement>('[aria-label="More reactions"]')!.click();
+    // No separate smiley: the ⋮ button is the one way into the sheet, so there is one destination to learn.
+    expect(host.querySelector('[aria-label="More reactions"]')).toBeNull();
+    const toolbarButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".message-toolbar button"));
+    expect(toolbarButtons.filter((button) => !button.classList.contains("quick-reaction"))).toHaveLength(1);
+
+    host.querySelector<HTMLButtonElement>('[aria-label="More actions"]')!.click();
     await tick();
 
     const tiles = Array.from(host.querySelectorAll<HTMLButtonElement>(".message-sheet .sheet-reaction"));
@@ -355,6 +363,42 @@ describe("MessageItem", () => {
     expect(tiles).toHaveLength(16);
     expect(tiles.slice(0, 5).map((tile) => tile.textContent)).toEqual(["👍", "👎", "❤️", "🙏", "🤞"]);
     expect(tiles[15]!.getAttribute("aria-label")).toBe("Other emoji");
+  });
+
+  it("the ⋮ button and the time open the same sheet, with Reply first when the message can be replied to", async () => {
+    const onOpenThread = vi.fn();
+    function mountOne(): HTMLDivElement {
+      return mount(
+        <MessageItem
+          currentUser={currentUser}
+          message={post()}
+          onOpenThread={onOpenThread}
+          onReport={() => {}}
+          reactions={[]}
+          usersById={new Map([[author.id, author]])}
+          {...noop}
+        />,
+      );
+    }
+
+    const viaMore = mountOne();
+    expect(await sheetLabels(viaMore)).toEqual(["Reply in thread", "Copy text", "Report"]);
+    expect(viaMore.querySelectorAll(".message-sheet .sheet-reaction").length).toBeGreaterThan(0);
+
+    const viaTime = mountOne();
+    viaTime.querySelector<HTMLButtonElement>("button.message-time")!.click();
+    await tick();
+    expect(Array.from(viaTime.querySelectorAll(".message-sheet .menu-item-label")).map((node) => node.textContent)).toEqual([
+      "Reply in thread",
+      "Copy text",
+      "Report",
+    ]);
+
+    // Reply from the sheet reaches the thread like the toolbar's reply button does, and closes the sheet first.
+    sheetItem(viaMore, "Reply in thread").click();
+    await tick();
+    expect(onOpenThread).toHaveBeenCalledWith("msg.1");
+    expect(viaMore.querySelector(".message-sheet")).toBeNull();
   });
 
   it("reacts with any emoji typed into the sheet's emoji field, refuses plain text, and remembers the pick", async () => {
