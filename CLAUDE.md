@@ -28,7 +28,7 @@ law-enforcement avoidance as the purpose.
 primitive; the server has a `sealed` `Message` arm, per-user mesh identities (`mesh_identities` DAL
 table; minted only for local users — a v0.4 database gets a one-time `synced_users` backfill (unreachable,
 footprint-free humans) — a row an older build minted for a synced user is deleted at boot and
-its forged `identityKey` stripped), and bounded relay (TTL/hop/cap, no acks). The outer message id isn't covered by the seal, so
+its forged `identityKey` stripped), and bounded relay (TTL/hop/cap, no acks; mail is sealed with a hop budget drawn from the top three values (never below 2) and a stated send time up to min(ttl/5, 1 h, retention/5) early, and a relay stores and re-advertises carried mail under its own intake time, so first-hop carriers can't read origin off those fields alone; docs/16 §9 says what is still visible). `GET /api/mesh/outbound` hands the radio courier at most 200 blobs per answer, rotated across calls. `openMailbox` refuses a `fromKx` that isn't a canonical 32-byte key, which keeps the frozen v1 inner-signature encoding unambiguous (docs/16 item 10; a new inner field needs a new label). The outer message id isn't covered by the seal, so
 replay protection keys on a **hash of ciphertext + toTag + TTL** (`sealed.<sha256>`, stored beside the
 id tombstones on delivery) as well as the id; relays dedupe carried mail by the same key, only the
 canonical base64url spelling is accepted, and peer-supplied ids in the `sealed.` namespace are refused.
@@ -246,7 +246,7 @@ still drive everything through `buildApp()` + `inject`, so the split is invisibl
   token becomes admin, and only the host's own WebView receives it, injected as
   `window.__loamHostDeviceToken` (never in a URL: anyone can craft one), so no LAN session can take
   `firstUser` during the boot window), or
-  `none`. A successful claim persists `{isAdmin, pending:false}`, so on an approval-policy node the
+  `none`. A successful claim persists `{isAdmin, pending:false}` (the reply is the `rolesVisibleUser` projection), so on an approval-policy node the
   claimer is an active admin. **`loamnet` mints a host token too** (`cli/bin/loam.js`), so it is always
   `hostDevice`: admin comes from the terminal UI's one-time claim codes (`admin-links.ts`: single-use,
   10 min, in memory, cleared by the kill switch; the claim route accepts one under `hostDevice`; the client
@@ -271,11 +271,13 @@ still drive everything through `buildApp()` + `inject`, so the split is invisibl
   an admin PATCH that changes `llm.onDevice` is then written through to `config.json` (durably, other keys
   kept; a failed write refuses the save with a 500) so it survives a restart.
 - **Rate limiting**: our own fixed-window limiter (`src/rate-limit.ts`, which replaced `@fastify/rate-limit`)
-  runs globally (300/min/IP; IPv6 keyed by /64, IPv4-mapped folded to IPv4) with per-route caps on uploads,
+  runs globally (300/min/IP; IPv6 keyed by /64 via `rateLimitKey`, IPv4-mapped folded to IPv4) with per-route caps on uploads,
   sync, mesh, search, claim and panic via `config.rateLimit`; those per-route configs set `allowList: () => false` so tunnel
   re-dispatches (exempt from the global limiter) still count. Claim/panic add their own semantic attempt
-  limiters on top. It sends no `x-ratelimit-*` headers (they fingerprinted the panic route); a default
-  refusal is a 429 with `retry-after`.
+  limiters on top. Claim and panic (route limiter `perAddress: true` and the attempt limiters) and the WS
+  pre-auth cap count each address on its own (`addressKey`), with a coarser per-/64 bound, so one IPv6 LAN
+  device can't lock the rest out. It sends no `x-ratelimit-*` headers (they fingerprinted the panic route); a
+  default refusal is a 429 with `retry-after` and `code: "rate_limited"`.
 - **Logging**: tunnel re-dispatches are never request-logged (`loamLogController`, keyed on the
   internal token — the inner URL is the path the tunnel hides), the `req` serializer strips query
   strings from every logged URL, a pino `logMethod` hook (`redactLogText`) drops the URL from Fastify's own
@@ -295,7 +297,8 @@ still drive everything through `buildApp()` + `inject`, so the split is invisibl
   wipe depends on encryption: **encrypted** (`LOAM_DB_KEY` set) → close store, delete DB files, and
   (ephemeral mode) rotate to a fresh key — a cryptographic wipe that makes flash remnants
   unreadable; the store is reopened so `app.store` is a **getter**, not a snapshot. **Unencrypted** →
-  `store.wipeAll()` (logical DELETE, **not** secure erasure on flash — docs/02). Every branch also sweeps
+  `store.wipeAll()` + `VACUUM` + checkpoint (plaintext stores run `PRAGMA secure_delete`, so the file keeps
+  no deleted text, but it is **not** secure erasure on flash — docs/02). Every branch also sweeps
   `.loam-recovery-*` snapshots (a start-fresh's moved-aside DB + media): fail-closed in the encrypted
   branches, best-effort (warns on a survivor) in the plaintext one. A client that was offline during the
   wipe purges its cache on reconnect, because its server-confirmed identity changed (`lib/identity.ts`).
@@ -333,7 +336,8 @@ still drive everything through `buildApp()` + `inject`, so the split is invisibl
 - **Attachments**: messages may carry ≤4 attachments (`attachments` on posts/replies/DMs;
   attachment-only messages are valid) — images (256KB, served inline) or allowlisted non-image files
   (1 MiB, stored as `.bin`, served octet-stream + `Content-Disposition: attachment`). `POST /api/attachments` mirrors the avatar pipeline (base64, magic-byte vs
-  MIME, 256KB images / 1 MiB other files, rate-limited); ids are uploader-bound and consumed on first use; files served
+  MIME, 256KB images / 1 MiB other files, rate-limited); ids are uploader-bound and consumed on first use, and the message stores the server's own record of the upload
+  (`PendingUpload`), never the client's copy; files served
   from `GET /api/attachments/:fileName` (unguessable ids), deleted with their message / kill switch. The
   orphan sweep re-checks live messages/owners right before each delete and gives owner-less files an
   mtime grace window, so it can't race an in-flight upload.
@@ -420,8 +424,16 @@ still drive everything through `buildApp()` + `inject`, so the split is invisibl
   envelope with a monotonic per-connection sequence, so a frame can't be replayed onto another
   connection. The client routes all fetches/WS through `apps/client/src/lib/transport.ts`; `off` is a
   pure passthrough. **Anti-replay:** each sealed REST request carries a per-session
-  monotonic sequence inside its `{ s, b }` envelope; the server enforces a DTLS-style sliding window
-  (`TRANSPORT_REPLAY_WINDOW`), 409 on replay/out-of-window. **Path-hiding tunnel (`required` mode, and
+  monotonic sequence inside its `{ s, r, b }` envelope (a GET/HEAD carries it sealed in `x-loam-seq`); the
+  server enforces a DTLS-style sliding window (`TRANSPORT_REPLAY_WINDOW`), 409 on replay/out-of-window.
+  **Response binding** (docs/08): for a request with `r: 1` the reply is sealed under `METHOD url#seq#status`
+  (a bodyless 204 comes back as a sealed empty 200); a refusal sent before the sequence is authenticated
+  carries `encStatus` under `METHOD url!status`, which the client accepts only for status >= 400. Under a
+  live session the client refuses any unsealed reply on every path (`UnsealedResponseError`) except the
+  pre-session 401/421/503, which reach the caller as status + code only. Older clients (no `r`) and sync
+  pulls get the previous `METHOD url` sealing. The transport session map evicts, at its cap, the oldest
+  session of the largest group (an identity token's bound sessions, or an anonymous source), and one
+  identity token binds at most 4 sessions. **Path-hiding tunnel (`required` mode, and
   every bound session):** the client tunnels every request through an opaque `POST /api/transport/tunnel`
   (sealed `{ m, p, body }`), re-dispatched server-side via `server.inject` with an unforgeable per-boot
   internal token (global-limiter-exempt) plus the caller's identity — `x-loam-user` for a bound session
@@ -537,7 +549,8 @@ still drive everything through `buildApp()` + `inject`, so the split is invisibl
   reports its end/error or the 5-minute timeout, since the launcher bridge has no cancel), and a placeholder left streaming by a crash is finalized at boot.
 
 **Feature-flag note**: the messaging flags (`enableReplies`, `enableDMs`, `enableReactions`,
-`enablePublicChannels`, `enableMarkdown`) are real config values enforced in `createMessage()`.
+`enablePublicChannels`, `enableMarkdown`) are real config values enforced in `createMessage()`
+(`enablePublicChannels` gates public channels only, `channelOpenUnderFlags`).
 `enableUserChannels` gates user channel creation (`POST /api/channels`); `enablePrivateChannels`
 (default **on**) gates the *creation* of private channels — existing private channels keep working
 if it is later switched off. **`security.profile` is authoritative**: a named profile (`open`/`standard`/`hardened`)
@@ -653,9 +666,12 @@ kill switch. See `docs/09-security-profiles.md`.
   budget (`maxNewIdentitiesPerWindow`, default 60 / 10 min; `AppOptions`), throwing a `429` past it —
   a client that keeps its session cookie never touches it, and on a LAN each device has its own IP. **Ghost
   identities are reaped**: `reapUnusedIdentities()` (on the 30 s reaper tick) deletes a human user who never
-  agreed to the rules, holds no role or moderation state, is not `pending` (a greeter's queue entry), has no
+  agreed to the rules, holds no role or moderation state, has no
   open or escalated report filed, authored or received no message, owns or belongs to no channel, is on no
-  socket, and is older than `unusedIdentityMaxAgeMs` (24 h; `AppOptions`), dropping its sessions/tokens, mesh
+  socket and holds no live bound transport session, and is older than `unusedIdentityMaxAgeMs` (24 h;
+  `AppOptions`), measured from admission for someone let in from the queue (`users.admitted_at`, a
+  server-only column). A `pending` identity (a greeter's queue entry, which can't agree to the rules yet) is
+  reaped only after `pendingIdentityMaxAgeMs` (7 days); a block does not count as use. It drops its sessions/tokens, mesh
   keypair and (via `store.deleteUser`) its block-list rows, join requests and mesh address book in one
   transaction; nothing is broadcast (clients drop it on the next `reconcileRoster`). A no-op when
   `requireRulesAcceptance` is off.
