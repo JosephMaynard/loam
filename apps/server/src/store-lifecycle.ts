@@ -18,6 +18,8 @@ import {
   DbEncryptionPlaintextUnconvertedError,
   DbEncryptionUnreadableError,
   DbEphemeralExistingDatabaseError,
+  DbEphemeralMarkerUnremovableError,
+  DbEphemeralMarkerUnwritableError,
   WipeResumeInProgressError,
 } from "./errors.js";
 import type { AppOptions } from "./types.js";
@@ -468,17 +470,18 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
    *     chose to lose. Refuse to start with {@link DbEphemeralExistingDatabaseError}, leaving every file
    *     untouched; the operator picks another data dir or supplies the database's passphrase.
    *   - neither: a fresh data dir. Write the marker.
+   * The marker is written before this function returns, and so before `openInitialStore` opens (and may
+   * create) `loam.db`; see {@link writeEphemeralMarker}. A marker that can't be written durably is fatal
+   * ({@link DbEphemeralMarkerUnwritableError}): a database created without it would look persistent to the
+   * next ephemeral boot, which would refuse to start over it.
    * A fixed-key or plaintext boot clears the marker (as the launcher does), so a database it writes is never
-   * later mistaken for ephemeral leftovers. Media removal is best-effort (the boot sweeps are the backstop);
-   * a database file that will not go away is fatal, since the open would fail anyway.
+   * later mistaken for ephemeral leftovers; see {@link removeStaleEphemeralMarker}, which fails closed. Media
+   * removal is best-effort (the boot sweeps are the backstop); a database file that will not go away is
+   * fatal, since the open would fail anyway.
    */
   function prepareEphemeralDataDir(): void {
     if (!ephemeralDbKey) {
-      try {
-        rmSync(dbEphemeralMarkerPath, { force: true });
-      } catch (error) {
-        log.warn(error, `Could not remove the stale ephemeral-key marker ${dbEphemeralMarkerPath}`);
-      }
+      removeStaleEphemeralMarker();
       return;
     }
 
@@ -516,10 +519,72 @@ export function createStoreLifecycle(deps: StoreLifecycleDeps) {
       log.info("Ephemeral key: removed the previous boot's database and uploaded media (unreadable under this boot's key)");
     }
 
+    writeEphemeralMarker();
+  }
+
+  /**
+   * On a fixed-key or plaintext boot, remove a marker an earlier ephemeral boot left behind, and make the
+   * removal durable (the data dir is flushed when a marker was there; Windows has no directory flush). The
+   * database this boot opens is persistent: a marker left beside it would tell a later ephemeral boot over
+   * the same data dir to delete it as leftovers. So a marker that won't go away stops the boot with
+   * {@link DbEphemeralMarkerUnremovableError}, before the database is opened.
+   */
+  function removeStaleEphemeralMarker(): void {
+    const fail = (detail: string): never => {
+      const message =
+        `Could not remove the ephemeral-key marker ${dbEphemeralMarkerPath} (${detail}), left by an earlier boot ` +
+        "under an ephemeral key. This boot keeps its database, and with the marker still there a later " +
+        "ephemeral-key boot over this data directory would delete that database as leftovers, so the database " +
+        "was not opened. Remove the marker file by hand, then start again.";
+      log.error(message);
+      reportBootNotice(message, "db_ephemeral_marker_unremovable");
+      throw new DbEphemeralMarkerUnremovableError(message);
+    };
+
+    const hadMarker = existsSync(dbEphemeralMarkerPath);
+    try {
+      rmSync(dbEphemeralMarkerPath, { force: true });
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error));
+    }
+    if (hadMarker && process.platform !== "win32" && !fsyncDir(dataDir)) {
+      fail("the data directory could not be flushed to disk after removing it");
+    }
+  }
+
+  /**
+   * Write the ephemeral-key marker (a millisecond timestamp, the launcher's format) and make it durable: the
+   * bytes are flushed to disk before the file is closed, then the data dir itself, so the marker's directory
+   * entry can't be lost to a power cut while the `loam.db` created after it survives. Windows has no
+   * directory flush; there the file flush is all there is. Any failure throws
+   * {@link DbEphemeralMarkerUnwritableError}, before any database is opened.
+   */
+  function writeEphemeralMarker(): void {
+    const fail = (detail: string): never => {
+      const message =
+        `Could not write the ephemeral-key marker ${dbEphemeralMarkerPath} (${detail}). Without it, the next ` +
+        "ephemeral boot would take this boot's database for a persistent one and refuse to start, so no " +
+        `database was opened. Check that the data directory ${dataDir} is writable and has free space, or use ` +
+        "a different data directory (--data-dir, or LOAM_DATA_DIR).";
+      log.error(message);
+      reportBootNotice(message, "db_ephemeral_marker_unwritable");
+      throw new DbEphemeralMarkerUnwritableError(message);
+    };
+
     try {
       writeFileSync(dbEphemeralMarkerPath, String(Date.now()), { encoding: "utf8", mode: 0o600 });
+      // Reopened for writing: Windows flushes only a handle that may write.
+      const fd = openSync(dbEphemeralMarkerPath, "r+");
+      try {
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
     } catch (error) {
-      log.warn(error, `Could not write the ephemeral-key marker ${dbEphemeralMarkerPath}; the next ephemeral boot will refuse to start over this database`);
+      fail(error instanceof Error ? error.message : String(error));
+    }
+    if (process.platform !== "win32" && !fsyncDir(dataDir)) {
+      fail("the data directory could not be flushed to disk");
     }
   }
 

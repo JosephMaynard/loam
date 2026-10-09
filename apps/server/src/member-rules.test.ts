@@ -109,6 +109,85 @@ describe("identities nobody ever used", () => {
     }
   });
 
+  it("keeps a newcomer waiting in a greeter's queue, however long the wait", async () => {
+    const app = await makeApp({ unusedIdentityMaxAgeMs: 60 });
+    const admin = await newSession(app);
+    expect((await request(app, admin.cookie, "PATCH", "/api/admin/config", { access: { joinPolicy: "approval" } })).statusCode).toBe(200);
+    const waiting = await newSession(app); // pending: they can't agree to the rules until someone lets them in
+    expect(app.store.loadUsers().find((user) => user.id === waiting.userId)?.pending).toBe(true);
+
+    await sleep(120);
+    app.reapUnusedIdentities();
+
+    expect(userIds(app)).toContain(waiting.userId);
+    const queue = (await request(app, admin.cookie, "GET", "/api/access/pending")).json() as { id: string }[];
+    expect(queue.map((user) => user.id)).toContain(waiting.userId);
+  });
+
+  it("keeps a never-agreed reporter while their report is open or escalated, and lets them go once it is resolved", async () => {
+    const app = await makeApp({ unusedIdentityMaxAgeMs: 60 });
+    const admin = await newSession(app);
+    const moderator = await newSession(app);
+    await agree(app, moderator.cookie);
+    expect((await request(app, admin.cookie, "PATCH", `/api/admin/users/${moderator.userId}/roles`, { roles: ["moderator"] })).statusCode).toBe(200);
+    const reported = await newSession(app);
+    await agree(app, reported.cookie);
+    // Reporting is allowed before agreeing to the rules, so a reporter can be an otherwise unused identity.
+    const reporter = await newSession(app);
+    const filed = await request(app, reporter.cookie, "POST", "/api/reports", { targetType: "user", targetId: reported.userId, reason: "harassment" });
+    expect(filed.statusCode).toBe(201);
+    const reportId = (filed.json() as { id: string }).id;
+
+    await sleep(120);
+    app.reapUnusedIdentities();
+    expect(userIds(app)).toContain(reporter.userId);
+
+    // Escalated is still in a queue (the admins'): the reporter stays.
+    const escalated = await request(app, moderator.cookie, "POST", `/api/moderation/reports/${reportId}/resolve`, { resolution: "escalated" });
+    expect((escalated.json() as { status: string }).status).toBe("escalated");
+    app.reapUnusedIdentities();
+    expect(userIds(app)).toContain(reporter.userId);
+
+    // Resolved: nothing ties the record to a person any more, so the next pass removes it.
+    const resolved = await request(app, admin.cookie, "POST", `/api/moderation/reports/${reportId}/resolve`, { resolution: "dismissed" });
+    expect(resolved.statusCode).toBe(200);
+    app.reapUnusedIdentities();
+    expect(userIds(app)).not.toContain(reporter.userId);
+  });
+
+  it("removes a reaped identity's join requests and mesh address book with it, and nobody else's", async () => {
+    const app = await makeApp({ unusedIdentityMaxAgeMs: 60 });
+    const owner = await newSession(app); // the admin
+    await agree(app, owner.cookie);
+    expect((await request(app, owner.cookie, "PATCH", "/api/admin/config", { mesh: { enabled: true } })).statusCode).toBe(200);
+    const created = await request(app, owner.cookie, "POST", "/api/channels", { name: "ops", visibility: "private" });
+    expect(created.statusCode).toBe(201);
+    const channelId = (created.json() as { id: string }).id;
+    expect((await request(app, owner.cookie, "PATCH", `/api/channels/${channelId}`, { allowJoinRequests: true })).statusCode).toBe(200);
+    const ownerCard = (await request(app, owner.cookie, "GET", "/api/mesh/identity")).json() as object;
+
+    const ghost = await newSession(app); // asks to join and adds a contact, but never agrees and never comes back
+    const keeper = await newSession(app); // does the same and agrees
+    await agree(app, keeper.cookie);
+    for (const person of [ghost, keeper]) {
+      expect((await request(app, person.cookie, "POST", `/api/channels/${channelId}/join-requests`)).statusCode).toBe(201);
+      expect((await request(app, person.cookie, "POST", "/api/mesh/contacts", ownerCard)).statusCode).toBe(200);
+    }
+    const contactOwners = () => app.store.loadMeshContacts().map((row) => row.ownerUserId);
+    expect(app.store.loadJoinRequests(channelId)).toEqual(expect.arrayContaining([ghost.userId, keeper.userId]));
+    expect(contactOwners()).toEqual(expect.arrayContaining([ghost.userId, keeper.userId]));
+
+    await sleep(120);
+    app.reapUnusedIdentities();
+
+    expect(userIds(app)).not.toContain(ghost.userId);
+    expect(app.store.loadJoinRequests(channelId)).toEqual([keeper.userId]);
+    expect(contactOwners()).not.toContain(ghost.userId);
+    expect(contactOwners()).toContain(keeper.userId);
+    const keeperContacts = (await request(app, keeper.cookie, "GET", "/api/mesh/contacts")).json() as unknown[];
+    expect(keeperContacts).toHaveLength(1);
+  });
+
   it("removes nothing while the rules gate is off, since nothing then tells a probe from a person", async () => {
     const app = await makeApp({ requireRulesAcceptance: false, unusedIdentityMaxAgeMs: 1 });
     await newSession(app);

@@ -115,6 +115,16 @@ describe("openStore", () => {
     expect(store.loadUsers().map((user) => user.id)).toEqual(["user.keep"]);
   });
 
+  it("deletes a user's join requests and own mesh address book with the row, and nobody else's", () => {
+    store.addJoinRequest("ops", "user.gone");
+    store.addJoinRequest("ops", "user.keep");
+    store.upsertMeshContact("user.gone", "mesh.someone", "{}");
+    store.upsertMeshContact("user.keep", "mesh.someone", "{}");
+    store.deleteUser("user.gone");
+    expect(store.loadJoinRequests("ops")).toEqual(["user.keep"]);
+    expect(store.loadMeshContacts().map((row) => row.ownerUserId)).toEqual(["user.keep"]);
+  });
+
   it("round-trips channels", () => {
     const channel = makeChannel("general", { description: "Open room" });
     store.upsertChannel(channel);

@@ -129,21 +129,59 @@ export function hostNameAllowed(name: string | undefined, joinHost: () => string
   return name === hostHeaderName(joinHost());
 }
 
+/** The port a scheme uses when a URL or a `Host` header leaves it out. */
+function defaultPortFor(protocol: "http" | "https"): number {
+  return protocol === "https" ? 443 : 80;
+}
+
 /**
- * Whether a WebSocket upgrade's `Origin` names the same host the request was addressed to (its `Host`),
- * ports aside. A page served by this node always does; a page on another origin (a DNS-rebinding page, any
- * cross-site page) does not, and an opaque `Origin: null` never matches.
+ * The explicit port in a `Host` header, or undefined when it names none. Only meaningful for a value
+ * {@link hostHeaderName} accepts: `name:port` or `[v6]:port` carry one; a bare name or IPv6 literal does not.
  */
-export function originMatchesHost(origin: string, host: string | undefined): boolean {
+function hostHeaderPort(host: string): number | undefined {
+  const value = host.trim();
+  const portPart = value.startsWith("[")
+    ? value.slice(value.indexOf("]") + 1)
+    : value.split(":").length === 2
+      ? value.slice(value.indexOf(":"))
+      : "";
+  return /^:\d{1,5}$/.test(portPart) ? Number(portPart.slice(1)) : undefined;
+}
+
+/**
+ * Whether a WebSocket upgrade's `Origin` is a page this node serves, judged against the request's `Host`:
+ * an `http:` or `https:` Origin whose host name is the `Host`'s and whose port is either the `Host`'s port
+ * or the node's advertised client port (`clientPort`, the port in the join URL). A port left out is its
+ * scheme's default: the Origin's from its own scheme, the `Host`'s from the protocol the request arrived on
+ * (`protocol`, default `http`). The port counts because browsers share cookies across the ports of one host:
+ * any other web app on the same machine (another port on a laptop running `loamnet`) could otherwise open
+ * `/ws` with a member's cookie. A page on another host (a DNS-rebinding page, any cross-site page), any
+ * other scheme, and an opaque `Origin: null` never match.
+ */
+export function originMatchesHost(
+  origin: string,
+  host: string | undefined,
+  options: { clientPort?: number; protocol?: "http" | "https" } = {},
+): boolean {
+  if (host === undefined) {
+    return false;
+  }
   const hostName = hostHeaderName(host);
   if (!hostName) {
     return false;
   }
+  let url: URL;
   try {
-    return hostHeaderName(new URL(origin).host) === hostName;
+    url = new URL(origin);
   } catch {
     return false;
   }
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || hostHeaderName(url.host) !== hostName) {
+    return false;
+  }
+  const originPort = url.port ? Number(url.port) : defaultPortFor(url.protocol === "https:" ? "https" : "http");
+  const hostPort = hostHeaderPort(host) ?? defaultPortFor(options.protocol ?? "http");
+  return originPort === hostPort || originPort === options.clientPort;
 }
 
 /**

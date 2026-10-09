@@ -397,8 +397,12 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   name, or the advertised join host (`currentJoinHost()`, so `LOAM_JOIN_HOST`/the TUI's pinned address);
   anything else gets 421 `host_not_allowed` before any identity is minted, and the request log replaces a
   non-allowlisted hostname with `[hostname]`. The `/ws` upgrade additionally refuses (403, before the
-  upgrade) an `Origin` whose host differs from the request's `Host`, ports aside; a client that sends no
-  Origin is judged by its credentials alone.
+  upgrade) an `Origin` that isn't `http:`/`https:` on the request's `Host` name and on either the `Host`'s
+  port or the advertised `clientPort` (a left-out port is the scheme's default; `originMatchesHost`), since
+  cookies are shared across the ports of one host; `pnpm dev` passes because Vite's `/ws` proxy keeps the
+  browser's `Host` (no `changeOrigin`). A client that sends no Origin is judged by its credentials alone.
+  `@fastify/websocket` registers before these global hooks, so an upgrade they refuse (421/503) still has
+  its socket closed.
 - **Transport encryption** (docs/08, `security.transportEncryption` — `optional` **default (secure by
   default)** / `required`; `off` is no longer operator-settable, see below):
   QR-bootstrapped app-layer session encryption over plain HTTP (no WebCrypto/TLS in the
@@ -641,9 +645,11 @@ kill switch. See `docs/09-security-profiles.md`.
   budget (`maxNewIdentitiesPerWindow`, default 60 / 10 min; `AppOptions`), throwing a `429` past it —
   a client that keeps its session cookie never touches it, and on a LAN each device has its own IP. **Ghost
   identities are reaped**: `reapUnusedIdentities()` (on the 30 s reaper tick) deletes a human user who never
-  agreed to the rules, holds no role or moderation state, authored or received no message, owns or belongs to
-  no channel, is on no socket, and is older than `unusedIdentityMaxAgeMs` (24 h; `AppOptions`), dropping its
-  sessions/tokens too; nothing is broadcast (clients drop it on the next `reconcileRoster`). A no-op when
+  agreed to the rules, holds no role or moderation state, is not `pending` (a greeter's queue entry), has no
+  open or escalated report filed, authored or received no message, owns or belongs to no channel, is on no
+  socket, and is older than `unusedIdentityMaxAgeMs` (24 h; `AppOptions`), dropping its sessions/tokens, mesh
+  keypair and (via `store.deleteUser`) its block-list rows, join requests and mesh address book in one
+  transaction; nothing is broadcast (clients drop it on the next `reconcileRoster`). A no-op when
   `requireRulesAcceptance` is off.
 - **Release signing**: `pnpm --filter app keystore` generates a real signing key;
   `plugins/with-release-signing.js` injects the release `signingConfig` at prebuild **only when

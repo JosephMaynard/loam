@@ -212,8 +212,13 @@ export interface LoamStore {
   loadQuarantinedMessageRows(): QuarantinedMessageRow[];
   loadSessions(): SessionRecord[];
   upsertUser(user: User): void;
-  /** Delete a single user row by id. Used for the legacy demo-user cleanup (`user.1234`/`user.5678`);
-   * the caller removes any messages that reference the user separately. */
+  /**
+   * Delete a single user row by id, with the rows that exist only for that user: their block-list rows (as
+   * blocker or blocked), their pending private-channel join requests, and their own mesh address book
+   * (`mesh_contacts` they own; other users' contact entries are theirs to keep). Used by the legacy
+   * demo-user cleanup (`user.1234`/`user.5678`), the legacy `mesh.` sentinel cleanup and the unused-identity
+   * reaper. The caller removes messages, sessions, identity tokens and the mesh keypair separately.
+   */
   deleteUser(userId: string): void;
   upsertChannel(channel: Channel): void;
   /** Delete a single channel row by id. The caller cascades (messages, attachments, tombstones). */
@@ -254,8 +259,8 @@ export interface LoamStore {
   /**
    * Store (or replace) one entry in a local user's mesh address book (docs/16): the owner's user id,
    * the contact's `mesh.` id, and an opaque JSON card (public keys + the contact's secret mailbox
-   * token, needed to seal to them). Per-owner so one local user's contacts aren't another's; wiped by
-   * the kill switch.
+   * token, needed to seal to them). Per-owner so one local user's contacts aren't another's; an owner's
+   * rows go when that user is deleted (`deleteUser`); wiped by the kill switch.
    */
   upsertMeshContact(ownerUserId: string, meshId: string, data: string): void;
   loadMeshContacts(): { ownerUserId: string; meshId: string; data: string }[];
@@ -334,7 +339,8 @@ export interface LoamStore {
   isUserSynced(userId: string): boolean;
   /**
    * Pending join requests for private channels (P10). Idempotent add; per-channel load (the requester ids);
-   * removal on approve/deny; bulk removal when a channel is deleted. Wiped by the kill switch.
+   * removal on approve/deny; bulk removal when a channel is deleted, and of a requester's rows when that user
+   * is deleted (`deleteUser`). Wiped by the kill switch.
    */
   addJoinRequest(channelId: string, userId: string): void;
   loadJoinRequests(channelId: string): string[];
@@ -980,6 +986,8 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     "DELETE FROM channel_join_requests WHERE channel_id = ? AND user_id = ?",
   );
   const removeJoinRequestsForChannelStmt = db.prepare("DELETE FROM channel_join_requests WHERE channel_id = ?");
+  const removeJoinRequestsForUserStmt = db.prepare("DELETE FROM channel_join_requests WHERE user_id = ?");
+  const deleteMeshContactsForOwnerStmt = db.prepare("DELETE FROM mesh_contacts WHERE owner_user_id = ?");
   const addUserBlockStmt = db.prepare(
     "INSERT INTO user_blocks (blocker_id, blocked_id, created_at) VALUES (?, ?, ?) ON CONFLICT(blocker_id, blocked_id) DO NOTHING",
   );
@@ -1161,6 +1169,8 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
     deleteUser(userId) {
       deleteUserStmt.run(userId);
       deleteUserBlocksForUserStmt.run(userId, userId);
+      removeJoinRequestsForUserStmt.run(userId);
+      deleteMeshContactsForOwnerStmt.run(userId);
     },
     upsertChannel(channel) {
       refuseQuarantined("channels", channel.id);

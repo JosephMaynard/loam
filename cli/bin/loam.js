@@ -401,9 +401,15 @@ try {
     printPortInUse(port);
     process.exit(1);
   }
-  // A persistent database under an ephemeral key: the server refused rather than delete it. Its message
-  // already says which directory and what to do; a stack trace would add nothing.
-  if (error?.code === "db_ephemeral_existing_database") {
+  // A persistent database under an ephemeral key (the server refused rather than delete it), an ephemeral key
+  // whose marker file couldn't be written (refused before any database was created), or a fixed key or plain
+  // boot that couldn't remove an earlier ephemeral boot's marker (refused before the database was opened).
+  // Each message already says which file or directory and what to do; a stack trace would add nothing.
+  if (
+    error?.code === "db_ephemeral_existing_database" ||
+    error?.code === "db_ephemeral_marker_unwritable" ||
+    error?.code === "db_ephemeral_marker_unremovable"
+  ) {
     console.error(`\n${error.message}`);
     process.exit(1);
   }

@@ -7,17 +7,54 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import Fastify from "fastify";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp, type LoamApp } from "./app.js";
-import { DbEphemeralExistingDatabaseError } from "./errors.js";
+import { DbEphemeralExistingDatabaseError, DbEphemeralMarkerUnremovableError, DbEphemeralMarkerUnwritableError } from "./errors.js";
 import { createStoreLifecycle } from "./store-lifecycle.js";
 import type { AppOptions } from "./types.js";
+
+// Filesystem faults on one exact path: `writeFileSync`, `openSync` or `rmSync` of that path throws EIO. Inert
+// unless a test arms it; reset after every test.
+const fsFaults = vi.hoisted(() => ({
+  writeFileSync: undefined as string | undefined,
+  openSync: undefined as string | undefined,
+  rmSync: undefined as string | undefined,
+}));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  const simulatedEio = (call: string, path: string): Error =>
+    Object.assign(new Error(`simulated EIO: ${call} ${path}`), { code: "EIO" });
+  return {
+    ...actual,
+    writeFileSync: (...args: Parameters<typeof actual.writeFileSync>) => {
+      if (fsFaults.writeFileSync !== undefined && String(args[0]) === fsFaults.writeFileSync) {
+        throw simulatedEio("write", fsFaults.writeFileSync);
+      }
+      return actual.writeFileSync(...args);
+    },
+    openSync: (...args: Parameters<typeof actual.openSync>) => {
+      if (fsFaults.openSync !== undefined && String(args[0]) === fsFaults.openSync) {
+        throw simulatedEio("open", fsFaults.openSync);
+      }
+      return actual.openSync(...args);
+    },
+    rmSync: (...args: Parameters<typeof actual.rmSync>) => {
+      if (fsFaults.rmSync !== undefined && String(args[0]) === fsFaults.rmSync) {
+        throw simulatedEio("remove", fsFaults.rmSync);
+      }
+      return actual.rmSync(...args);
+    },
+  };
+});
 
 const MARKER = ".loam-db-ephemeral";
 const cleanups: Array<() => Promise<void> | void> = [];
 
 afterEach(async () => {
+  fsFaults.writeFileSync = undefined;
+  fsFaults.openSync = undefined;
+  fsFaults.rmSync = undefined;
   while (cleanups.length > 0) {
     await cleanups.pop()!();
   }
@@ -155,6 +192,125 @@ describe("ephemeral key across boots", () => {
       (reason: unknown) => reason,
     );
     expect(refused).toBeInstanceOf(DbEphemeralExistingDatabaseError);
+  });
+});
+
+/** Boot with an ephemeral key in `dataDir` and return the error the boot failed with (undefined if it booted). */
+async function ephemeralBootError(dataDir: string): Promise<unknown> {
+  return buildApp({ dataDir, logger: false, requireRulesAcceptance: false, ephemeralDbKey: true }).then(
+    async (app) => {
+      await app.close();
+      return undefined;
+    },
+    (reason: unknown) => reason,
+  );
+}
+
+describe("ephemeral-key marker before the database", () => {
+  it("refuses to boot, creating no database, when the marker can't be written", async () => {
+    const dataDir = tempDir();
+    fsFaults.writeFileSync = join(dataDir, MARKER);
+
+    const error = await ephemeralBootError(dataDir);
+    expect(error).toBeInstanceOf(DbEphemeralMarkerUnwritableError);
+    const { code, message } = error as DbEphemeralMarkerUnwritableError;
+    expect(code).toBe("db_ephemeral_marker_unwritable");
+    expect(message).toContain(join(dataDir, MARKER));
+    expect(message).toContain("simulated EIO");
+    expect(message).toContain("--data-dir");
+    // The marker is written before the store opens, so the failed boot left no database for the next
+    // ephemeral boot to mistake for a persistent one.
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+    expect(existsSync(join(dataDir, MARKER))).toBe(false);
+
+    // Once the fault clears, the same data dir boots, and boots again over its own leftovers.
+    fsFaults.writeFileSync = undefined;
+    const first = await boot(dataDir, { ephemeralDbKey: true });
+    expect(existsSync(join(dataDir, MARKER))).toBe(true);
+    await first.close();
+    const second = await boot(dataDir, { ephemeralDbKey: true });
+    expect(second.app.store.loadMessages()).toEqual([]);
+  });
+
+  it("refuses to boot over the previous boot's leftovers when the fresh marker can't be written", async () => {
+    const dataDir = tempDir();
+    const first = await boot(dataDir, { ephemeralDbKey: true });
+    await first.close();
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(true);
+
+    fsFaults.writeFileSync = join(dataDir, MARKER);
+    expect(await ephemeralBootError(dataDir)).toBeInstanceOf(DbEphemeralMarkerUnwritableError);
+    // The dead key's database went as usual; no new one was opened in its place.
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses to boot when the data directory can't be flushed after the marker", async () => {
+    const dataDir = tempDir();
+    fsFaults.openSync = dataDir;
+
+    const error = await ephemeralBootError(dataDir);
+    expect(error).toBeInstanceOf(DbEphemeralMarkerUnwritableError);
+    expect((error as Error).message).toContain("could not be flushed");
+    expect(existsSync(join(dataDir, "loam.db"))).toBe(false);
+  });
+});
+
+describe("stale ephemeral-key marker on a boot that keeps its database", () => {
+  const KEY = "a fixed host passphrase";
+
+  /** A fixed-key database with one post in it, closed, and a marker an earlier ephemeral boot left beside it. */
+  async function fixedKeyDirWithStaleMarker(): Promise<{ dataDir: string; before: Buffer }> {
+    const dataDir = tempDir();
+    const first = await boot(dataDir, { dbEncryptionKey: KEY });
+    const cookie = await sessionCookie(first.app);
+    expect(await postToGeneral(first.app, cookie, "KEEP_ME")).toBe(201);
+    await first.close();
+    writeFileSync(join(dataDir, MARKER), "1700000000000", "utf8");
+    return { dataDir, before: readFileSync(join(dataDir, "loam.db")) };
+  }
+
+  /** Boot with the fixed key and return the error the boot failed with (undefined if it booted). */
+  async function fixedKeyBootError(dataDir: string): Promise<unknown> {
+    return buildApp({ dataDir, logger: false, requireRulesAcceptance: false, dbEncryptionKey: KEY }).then(
+      async (app) => {
+        await app.close();
+        return undefined;
+      },
+      (reason: unknown) => reason,
+    );
+  }
+
+  it("refuses a fixed-key boot that cannot remove a stale ephemeral marker, leaving the database untouched", async () => {
+    const { dataDir, before } = await fixedKeyDirWithStaleMarker();
+    fsFaults.rmSync = join(dataDir, MARKER);
+
+    const error = await fixedKeyBootError(dataDir);
+    expect(error).toBeInstanceOf(DbEphemeralMarkerUnremovableError);
+    const { code, message } = error as DbEphemeralMarkerUnremovableError;
+    expect(code).toBe("db_ephemeral_marker_unremovable");
+    expect(message).toContain(join(dataDir, MARKER));
+    expect(message).toContain("simulated EIO");
+    expect(message).toContain("by hand");
+    // Refused before the open: the database is byte-for-byte what the last boot left, and the marker stays
+    // for the operator to see.
+    expect(readFileSync(join(dataDir, "loam.db")).equals(before)).toBe(true);
+    expect(existsSync(join(dataDir, MARKER))).toBe(true);
+
+    // Once the marker can go, the boot removes it and serves the same data.
+    fsFaults.rmSync = undefined;
+    const reopened = await boot(dataDir, { dbEncryptionKey: KEY });
+    expect(existsSync(join(dataDir, MARKER))).toBe(false);
+    expect(hasPost(reopened.app, "KEEP_ME")).toBe(true);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a fixed-key boot when the marker's removal can't be flushed to disk", async () => {
+    const { dataDir, before } = await fixedKeyDirWithStaleMarker();
+    fsFaults.openSync = dataDir;
+
+    const error = await fixedKeyBootError(dataDir);
+    expect(error).toBeInstanceOf(DbEphemeralMarkerUnremovableError);
+    expect((error as Error).message).toContain("could not be flushed");
+    expect(readFileSync(join(dataDir, "loam.db")).equals(before)).toBe(true);
   });
 });
 

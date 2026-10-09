@@ -2371,10 +2371,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * curl, a HEAD) mints and persists a user record, which then sits on the People list and in the DM picker
    * for ever. A human record older than `unusedIdentityMaxAgeMs` that never agreed to the member rules,
    * neither wrote nor received a message, owns or belongs to no channel, holds no admin flag, role or
-   * moderation state, and has no socket open or mid-challenge is such a ghost: its row, sessions and
-   * identity tokens go (a returning cookie mints afresh), and clients drop it when they next reconcile the
-   * roster from `GET /api/users`. Nothing is broadcast: nobody ever saw it do anything. Only meaningful
-   * while the rules gate is on, since agreeing is the signal that a person is behind the record.
+   * moderation state, is not waiting in a greeter's queue (`pending`: such a person cannot agree to the rules
+   * until admitted), has no report still open in the moderators' queue (reporting, like reading and
+   * blocking, is allowed before agreeing), and has no socket open or mid-challenge is such a ghost. Its row,
+   * sessions, identity tokens and mesh keypair go, with the rows that exist only for it (`deleteUser`: its
+   * block-list rows, private-channel join requests and mesh address book), all in one transaction; a
+   * returning cookie mints afresh, and clients drop it when they next reconcile the roster from
+   * `GET /api/users`. Nothing is broadcast: nobody ever saw it do anything. Only meaningful while the rules
+   * gate is on, since agreeing is the signal that a person is behind the record.
    */
   function reapUnusedIdentities(): void {
     if (!requireRulesAcceptance) {
@@ -2412,12 +2416,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         user.rulesVersion === undefined &&
         !user.isAdmin &&
         !user.roles?.length &&
+        !user.pending &&
         !user.banned &&
         !user.shadowBanned &&
         user.timeoutUntil === undefined &&
         user.createdAt < cutoff &&
         !connected.has(user.id) &&
-        !referenced.has(user.id),
+        !referenced.has(user.id) &&
+        // Last, so only the few records that are otherwise ghosts cost a query (the indexed reporter column).
+        store.countOpenReports(user.id) === 0,
     );
 
     if (!ghosts.length) {
@@ -2429,7 +2436,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // Persist first, then mirror in memory, like every other mutator.
     store.transaction(() => {
       for (const id of ids) {
-        store.deleteUser(id);
+        store.deleteUser(id); // with its block-list rows, join requests and mesh address book
         store.deleteIdentityTokensForUser(id);
         store.deleteMeshIdentity(id);
       }
@@ -2453,6 +2460,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
     for (const id of ids) {
       meshIdentities.delete(id);
+      meshContacts.delete(id);
     }
     server.log.info(`Removed ${ids.size} identit${ids.size === 1 ? "y" : "ies"} nobody ever used`);
   }
@@ -2588,11 +2596,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     void runSyncLoop().catch((error: unknown) => server.log.error(error));
   }, 5_000);
 
-  await registerTransportHooks(ctx);
-
   // `maxPayload` bounds what `ws` will buffer per inbound frame (see WS_MAX_INBOUND_FRAME_BYTES); a
-  // larger frame closes the socket with 1009 before any handler sees it.
+  // larger frame closes the socket with 1009 before any handler sees it. Registered BEFORE the transport
+  // hooks: the plugin's own `onRequest` hook marks an upgrade request, and only a marked one has its socket
+  // closed after the answer. A `/ws` upgrade that the global hook refuses first (421 for a foreign Host, 503
+  // while a wipe restart is pending) would otherwise keep its socket open for ever, since an upgrade socket
+  // has none of the HTTP server's timeouts.
   await server.register(fastifyWebsocket, { options: { maxPayload: WS_MAX_INBOUND_FRAME_BYTES } });
+  await registerTransportHooks(ctx);
   await registerStaticFiles();
 
   registerSessionRoutes(ctx);

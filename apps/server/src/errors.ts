@@ -77,6 +77,36 @@ export class DbEphemeralExistingDatabaseError extends Error {
 }
 
 /**
+ * Thrown by `openInitialStore` when an ephemeral key is configured but the `.loam-db-ephemeral` marker can't
+ * be written durably. Thrown before any database is opened: a `loam.db` created without the marker would
+ * look like a persistent database to the next ephemeral boot, which would then refuse to start over it
+ * ({@link DbEphemeralExistingDatabaseError}). The message names the marker, the data directory and the
+ * filesystem error.
+ */
+export class DbEphemeralMarkerUnwritableError extends Error {
+  readonly code = "db_ephemeral_marker_unwritable" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "DbEphemeralMarkerUnwritableError";
+  }
+}
+
+/**
+ * Thrown by `openInitialStore` when a fixed-key or plaintext boot finds a stale `.loam-db-ephemeral` marker
+ * and can't durably remove it. Thrown before the database is opened, so nothing is written: the database
+ * such a boot writes is persistent, and a marker left beside it would tell a later ephemeral boot over the
+ * same data dir that `loam.db` is an ephemeral boot's leftovers, which that boot deletes. The message names
+ * the marker, the filesystem error and the way out (remove the marker by hand).
+ */
+export class DbEphemeralMarkerUnremovableError extends Error {
+  readonly code = "db_ephemeral_marker_unremovable" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "DbEphemeralMarkerUnremovableError";
+  }
+}
+
+/**
  * Thrown by `buildApp`'s boot-time wipe-phase resume (P1-1, Sol round 8) after it has re-run (and, on a
  * `delete-pending` phase, RETRIED) the fixed-key kill-switch artifact deletion BEFORE opening a serving
  * store. It never opens the real store — either the wipe is not yet safe to complete (deletion still

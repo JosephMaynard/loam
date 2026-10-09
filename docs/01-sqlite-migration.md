@@ -246,7 +246,13 @@ launcher side) talk over the existing `nodejs.channel` bridge, mirroring the req
    "file is not a database" error. The server does the same itself since 0.6.x (`prepareEphemeralDataDir`
    in `store-lifecycle.ts`, keyed on the same `.loam-db-ephemeral` marker, also dropping `avatars/` and
    `attachments/`), so a desktop `LOAM_DB_KEY=ephemeral` node or a `loamnet --encrypt` service restarts
-   cleanly too; a `loam.db` with no marker is a persistent database and is refused, never deleted.
+   cleanly too; a `loam.db` with no marker is a persistent database and is refused, never deleted. The
+   server writes the marker (flushed to disk, with its directory) before it opens the database; if it can't,
+   the boot stops with `db_ephemeral_marker_unwritable` instead of creating a database that the next
+   ephemeral boot would refuse as persistent. A fixed-key or plaintext boot removes a stale marker (and
+   flushes the removal) before it opens its database; if it can't, it stops with
+   `db_ephemeral_marker_unremovable`, since a later ephemeral boot would read that marker as leave to
+   delete the persistent database.
 6. If a key **is** set: `process.env.LOAM_DB_KEY = key`, and `LOAM_DB_DRIVER` is left unset —
    `openStore()`'s `encryptionKey` path takes precedence over the driver env var (see `db.ts`).
 

@@ -107,6 +107,10 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   an older reaction stored before this can still be removed.
 
 ### Security
+- **The live-updates WebSocket refuses a page served from another port of the same computer**, which
+  could otherwise ride a member's cookie (cookies ignore ports); the page's origin must match the host and
+  the port it was addressed to, or the advertised client port. A refused upgrade is now closed properly
+  instead of staying open until the node restarts.
 - **Emergency Reset on an unencrypted network writes the deletion into the database file itself** before
   the reset is marked finished, so a power cut straight afterwards can no longer bring the old messages
   back out of the write-ahead log.
@@ -161,6 +165,11 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   server's own limiter sends no `x-ratelimit-*` headers.
 
 ### Fixed
+- **Unused identities are kept while they wait in a greeter's queue or have an open report**, and removing
+  one also removes its pending channel join requests and mesh contacts.
+- **An ephemeral-key node stops at start-up if it cannot save its marker file** instead of creating a
+  database the next start would refuse; a node started without an ephemeral key refuses to start if it
+  cannot remove a leftover marker, so a later ephemeral start can never mistake its database for leftovers.
 - **An Emergency Reset that could not even be recorded now says so everywhere**: the web app, the Android
   host's reset screen and the terminal UI tell you to restart and run the reset again, instead of promising
   that a restart finishes it. The response carries a `journaled` flag the hosts read.
