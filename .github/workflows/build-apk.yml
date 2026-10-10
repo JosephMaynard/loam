@@ -164,7 +164,7 @@ jobs:
         run: rm -f apps/app/release.jks apps/app/keystore.properties
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: loam-host-apk
           path: apps/app/loam-host.apk
@@ -174,7 +174,7 @@ jobs:
         # Play upload artifact (upload-key signed). Deliberately NOT attached to the GitHub Release: the
         # release job downloads only `loam-host-apk`.
         if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: loam-host-aab
           path: apps/app/loam-host.aab
@@ -192,12 +192,12 @@ jobs:
       attestations: write # store the attestation on this repository
     steps:
       - name: Download APK artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: loam-host-apk
 
       - name: Download AAB artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: loam-host-aab
 
@@ -218,7 +218,7 @@ jobs:
       contents: write # create/update the Release and upload the APK asset (this job only)
     steps:
       - name: Download APK artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: loam-host-apk
 
