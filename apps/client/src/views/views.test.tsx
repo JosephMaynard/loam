@@ -54,6 +54,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   for (const container of mounted) {
     render(null, container);
@@ -167,6 +168,8 @@ describe("PeopleView", () => {
   });
 
   it("shows the greeter how long each newcomer has been waiting", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-10T12:00:00Z"));
     const newcomer: User = { ...me, id: "user.new", displayName: "Newcomer", pending: true, createdAt: Date.now() - 3 * 3_600_000 };
     vi.stubGlobal(
       "fetch",

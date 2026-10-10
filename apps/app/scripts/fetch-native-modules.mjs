@@ -122,6 +122,9 @@ function run(cmd, args, opts = {}) {
  * Returns the driver's package root.
  */
 function materialiseWrapper(pkgName, runtimePackages) {
+  if (!NPM_TARBALLS[pkgName] || !runtimePackages.includes(pkgName)) {
+    throw new Error(`No vendored tarball is pinned and listed for the ${pkgName} wrapper.`);
+  }
   console.log(`Installing ${pkgName}@${NPM_TARBALLS[pkgName].version} JS wrapper from the vendored tarball…`);
   for (const pkg of runtimePackages) {
     const pin = NPM_TARBALLS[pkg];
@@ -141,13 +144,19 @@ function materialiseWrapper(pkgName, runtimePackages) {
     const dest = join(nodeModulesDir, pkg);
     rmSync(dest, { recursive: true, force: true });
     mkdirSync(dest, { recursive: true });
-    run("tar", ["xzf", tarball, "-C", dest, "--strip-components=1"]);
-    const manifestPath = join(dest, "package.json");
-    const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, "utf8")) : {};
-    if (manifest.name !== pkg || manifest.version !== pin.version) {
-      throw new Error(
-        `${fileName} unpacked as ${manifest.name ?? "?"}@${manifest.version ?? "?"}, expected ${pkg}@${pin.version}.`,
-      );
+    try {
+      run("tar", ["xzf", tarball, "-C", dest, "--strip-components=1"]);
+      const manifestPath = join(dest, "package.json");
+      const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, "utf8")) : {};
+      if (manifest.name !== pkg || manifest.version !== pin.version) {
+        throw new Error(
+          `${fileName} unpacked as ${manifest.name ?? "?"}@${manifest.version ?? "?"}, expected ${pkg}@${pin.version}.`,
+        );
+      }
+    } catch (error) {
+      // Never leave a partial or wrong package behind for a later step to pick up.
+      rmSync(dest, { recursive: true, force: true });
+      throw error;
     }
   }
 
