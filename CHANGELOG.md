@@ -6,6 +6,13 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-10
+
+The Play launch release: Welcome screen and network rules (18+), reports moderators can act on, Android
+setup screens, display mode, link and invite codes, a terminal screen and kiosk mode for `loamnet`, support
+for tablets and Android laptops, every finding of the 9 October 2026 review, and a long list of security
+fixes.
+
 ### Added
 - **A maskable app icon**, so Android's launcher shapes the installed web app's icon instead of shrinking it
   onto a white disc.
