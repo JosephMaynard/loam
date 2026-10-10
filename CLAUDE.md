@@ -432,8 +432,10 @@ still drive everything through `buildApp()` + `inject`, so the split is invisibl
   live session the client refuses any unsealed reply on every path (`UnsealedResponseError`) except the
   pre-session 401/421/503, which reach the caller as status + code only. Older clients (no `r`) and sync
   pulls get the previous `METHOD url` sealing. The transport session map evicts, at its cap, the oldest
-  session of the largest group (an identity token's bound sessions, or an anonymous source), and one
-  identity token binds at most 4 sessions. **Path-hiding tunnel (`required` mode, and
+  session of the largest group (an identity token's bound sessions, or an anonymous source), one with no
+  live socket first. One identity token binds at most 16 sessions: past that a bind drops the token's
+  idle sessions, and is refused (429) rather than close a live one, since a browser's tabs share the token
+  and closing a live tab would make it reconnect and close the next, forever. **Path-hiding tunnel (`required` mode, and
   every bound session):** the client tunnels every request through an opaque `POST /api/transport/tunnel`
   (sealed `{ m, p, body }`), re-dispatched server-side via `server.inject` with an unforgeable per-boot
   internal token (global-limiter-exempt) plus the caller's identity — `x-loam-user` for a bound session

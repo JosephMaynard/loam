@@ -272,6 +272,7 @@ export const ERROR_CODES: Record<string, ServerErrorCode> = {
   "No such join request": "not_found",
   "No such mesh contact": "recipient_not_found",
   "Too many pending connections; try again": "too_many_attempts",
+  "Too many open sessions for this identity; close a tab and try again": "too_many_attempts",
   "Only the channel owner or an admin can review join requests": "channel_change_forbidden",
   "Only the channel owner or an admin can approve join requests": "channel_change_forbidden",
   "Only the channel owner or an admin can deny join requests": "channel_change_forbidden",

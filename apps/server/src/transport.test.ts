@@ -390,14 +390,15 @@ describe("transport encryption foundation", () => {
     expect((await resumeIdentity(app, flood[5]!, 1)).status).toBe(200);
   });
 
-  it("binds at most four sessions to one identity token: a fifth evicts that token's own oldest", async () => {
+  it("binds at most sixteen sessions to one identity token, making room by dropping its idle ones", async () => {
     const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
     const other = await openTransport08(app);
     expect((await resumeIdentity(app, other, 1)).status).toBe(200);
     const first = await openTransport08(app);
     const { token } = await resumeIdentity(app, first, 1);
     const sessions = [first];
-    for (let i = 0; i < 5; i += 1) {
+    // None of these has a socket (tabs reloaded or closed since), so binding past the cap drops the oldest.
+    for (let i = 0; i < 17; i += 1) {
       const next = await openTransport08(app);
       expect((await resumeIdentity(app, next, 1, token)).status).toBe(200);
       sessions.push(next);
@@ -1237,6 +1238,56 @@ describe("transport encryption WebSocket frames", () => {
     expect(sawExpired).toBe(true); // told to re-handshake
     expect(closed).toBe(true); // refused, not admitted
     expect(appFrames).toBe(0); // never received the broadcast in the clear
+  });
+
+  it("refuses a bind past the per-token cap rather than close another open tab, then admits it once a tab closes", async () => {
+    // The tabs of one browser share an identity token. Closing a live tab to make room would make it
+    // reconnect and close the next one, round and round; so a bind past the cap is refused instead.
+    const app = await makeApp({ security: { profile: "custom", transportEncryption: "required" } });
+    const baseUrl = await app.server.listen({ port: 0, host: "127.0.0.1" });
+    const first = await openTransport08(app);
+    const { token } = await resumeIdentity(app, first, 1);
+    const tabs: { session: { sessionId: string; key: string }; client: Awaited<ReturnType<typeof connectConfirmed>>; closed: boolean }[] = [];
+    try {
+      for (let i = 0; i < 16; i += 1) {
+        const session = i === 0 ? first : await openTransport08(app);
+        if (i > 0) {
+          expect((await resumeIdentity(app, session, 1, token)).status).toBe(200);
+        }
+        const client = await connectConfirmed(baseUrl, session.sessionId, session.key);
+        const tab = { session, client, closed: false };
+        client.socket.addEventListener("close", () => (tab.closed = true));
+        tabs.push(tab);
+      }
+
+      const seventeenth = await openTransport08(app);
+      const refused = await app.server.inject({
+        method: "POST",
+        url: "/api/session/resume",
+        headers: { "x-loam-enc": seventeenth.sessionId, "content-type": "application/json" },
+        payload: { enc: sealSeq(seventeenth.key, 1, "POST /api/session/resume", { token }) },
+      });
+      expect(refused.statusCode).toBe(429);
+      await sleep(100);
+      expect(tabs.filter((tab) => tab.closed)).toEqual([]);
+
+      // One tab closes; its now idle session makes room, and only that one goes.
+      tabs[3]!.client.socket.close();
+      let admitted = 0;
+      const deadline = Date.now() + 2_000;
+      while (admitted !== 200 && Date.now() < deadline) {
+        await sleep(25);
+        admitted = (await resumeIdentity(app, await openTransport08(app), 1, token)).status;
+      }
+      expect(admitted).toBe(200);
+      expect(tabs.filter((tab, index) => index !== 3 && tab.closed)).toEqual([]);
+      expect((await tunnelInner(app, tabs[3]!.session, 2, { m: "GET", p: "/api/users" })).outerStatus).not.toBe(200);
+      expect((await tunnelInner(app, tabs[4]!.session, 2, { m: "GET", p: "/api/users" })).outerStatus).toBe(200);
+    } finally {
+      for (const tab of tabs) {
+        tab.client.socket.close();
+      }
+    }
   });
 
   it("closes a confirmed socket when its transport session is evicted", async () => {

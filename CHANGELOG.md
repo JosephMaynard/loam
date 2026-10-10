@@ -171,7 +171,9 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   and "resetting" answers get through, without their text). So someone on the network can no longer replay an
   old reply or swap in a forged one. Older clients still open across the upgrade are answered as before.
 - **A flood of new encrypted sessions can no longer push people off the node.** One device identity holds at
-  most four sessions, and when the table is full the busiest source loses its oldest session first.
+  most 16 sessions (its tabs share one), making room by dropping sessions no open tab is using and otherwise
+  refusing, never by closing an open tab; when the table is full the busiest source loses its oldest
+  unused session first.
 - **On IPv6 networks, one device can no longer use up the admin-claim, panic or connection limits for
   everyone else on the network**: those limits count each address, with a looser bound per network so
   cycling addresses still doesn't buy unlimited guesses.

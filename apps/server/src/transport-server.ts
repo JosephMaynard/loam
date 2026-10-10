@@ -887,17 +887,30 @@ export function registerTransportRoutes(ctx: AppContext): void {
    * Eviction policy for the transport session map, which is bounded (`TRANSPORT_SESSION_CAP`) because the
    * handshake is unauthenticated:
    *
-   * - One identity token binds at most `MAX_SESSIONS_PER_IDENTITY_TOKEN` live sessions; a further bind
-   *   evicts that token's own oldest. Resuming with an existing token costs no identity budget, so without
-   *   this one attacker token could bind every slot.
+   * - One identity token binds at most `MAX_SESSIONS_PER_IDENTITY_TOKEN` sessions. Resuming with an existing
+   *   token costs no identity budget, so without this one attacker token could bind every slot. A further
+   *   bind first drops that token's oldest session with no live socket (a tab reloaded or closed since); when
+   *   every one of them is in use it is REFUSED, never made room for by closing a live one: the tabs of one
+   *   browser share a token, and evicting a live tab would make it reconnect and evict the next, forever.
    * - At the cap, a new handshake evicts the oldest session of the GROUP holding the most sessions: a
    *   bound session's group is its identity token, an anonymous one's is its source address (keyed like
    *   the HTTP limiter, so cycling addresses inside an IPv6 /64 doesn't split a flood). A flood from one
    *   source or one token therefore pays for itself before a person holding one or two sessions is touched,
    *   and anonymous sessions include every unpinned cookie client, so they get no blanket priority either.
-   *   On a tie the anonymous group goes first, then the group whose oldest session is oldest.
+   *   On a tie the anonymous group goes first, then the group whose oldest session is oldest. Within the
+   *   group, the oldest session with no live socket goes before the oldest overall.
    */
-  const MAX_SESSIONS_PER_IDENTITY_TOKEN = 4;
+  const MAX_SESSIONS_PER_IDENTITY_TOKEN = 16;
+
+  /** Whether a transport session carries an admitted WebSocket (an open tab, not a leftover). */
+  function hasLiveSocket(sid: string): boolean {
+    for (const socketSession of ctx.sockets) {
+      if (socketSession.transportSessionId === sid) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   /** The eviction group of a session (see the policy above). */
   function evictionGroup(session: TransportSession): string {
@@ -908,35 +921,56 @@ export function registerTransportRoutes(ctx: AppContext): void {
 
   /** The session to evict at the cap (see the policy above), or undefined when the map is empty. */
   function transportSessionToEvict(): string | undefined {
-    const groups = new Map<string, { count: number; oldest: string; anonymous: boolean }>();
+    const groups = new Map<string, { count: number; oldest: string; oldestIdle?: string; anonymous: boolean }>();
+    const live = new Set<string>();
+    for (const socketSession of ctx.sockets) {
+      if (socketSession.transportSessionId !== undefined) {
+        live.add(socketSession.transportSessionId);
+      }
+    }
     for (const [id, session] of ctx.transportSessions) {
       const key = evictionGroup(session);
+      const idle = !live.has(id);
       const group = groups.get(key);
       if (group) {
         group.count += 1;
+        if (idle && group.oldestIdle === undefined) {
+          group.oldestIdle = id;
+        }
       } else {
-        groups.set(key, { count: 1, oldest: id, anonymous: session.authMode !== "bound" });
+        groups.set(key, { count: 1, oldest: id, oldestIdle: idle ? id : undefined, anonymous: session.authMode !== "bound" });
       }
     }
     // Groups iterate in order of their oldest session (insertion order), so a strict comparison keeps the
     // oldest among equals.
-    let pick: { count: number; oldest: string; anonymous: boolean } | undefined;
+    let pick: { count: number; oldest: string; oldestIdle?: string; anonymous: boolean } | undefined;
     for (const group of groups.values()) {
       if (!pick || group.count > pick.count || (group.count === pick.count && group.anonymous && !pick.anonymous)) {
         pick = group;
       }
     }
-    return pick?.oldest;
+    return pick ? (pick.oldestIdle ?? pick.oldest) : undefined;
   }
 
-  /** Make room for one more session bound by `tokenHash`: evict that token's oldest others past the cap. */
-  function enforceIdentityTokenCap(tokenHash: string, binding: TransportSession): void {
+  /**
+   * Make room for one more session bound by `tokenHash` (see the policy above): drop that token's oldest
+   * sessions with no live socket until it is under the cap. Returns false, having closed nothing live, when
+   * every remaining one is in use.
+   */
+  function makeRoomForIdentityToken(tokenHash: string, binding: TransportSession): boolean {
     const mine = [...ctx.transportSessions].filter(([, session]) => session !== binding && session.identityTokenHash === tokenHash);
-    while (mine.length >= MAX_SESSIONS_PER_IDENTITY_TOKEN) {
-      const [victim] = mine.shift()!;
-      ctx.transportSessions.delete(victim);
-      ctx.closeSocketsForTransportSession(victim);
+    let count = mine.length;
+    for (const [id] of mine) {
+      if (count < MAX_SESSIONS_PER_IDENTITY_TOKEN) {
+        break;
+      }
+      if (!hasLiveSocket(id)) {
+        ctx.transportSessions.delete(id);
+        ctx.closeSocketsForTransportSession(id); // a socket still awaiting key confirmation
+        count -= 1;
+      }
     }
+    return count < MAX_SESSIONS_PER_IDENTITY_TOKEN;
   }
 
   // Transport handshake (docs/08): client sends its ephemeral X25519 public key; the host derives a
@@ -1073,8 +1107,10 @@ export function registerTransportRoutes(ctx: AppContext): void {
       ctx.store.putIdentityToken(tokenHash, userId, Date.now());
     }
 
+    if (!makeRoomForIdentityToken(tokenHash, activeSession)) {
+      return reply.code(429).send(errorBody("Too many open sessions for this identity; close a tab and try again"));
+    }
     const currentUser = ctx.ensureSessionUser(userId);
-    enforceIdentityTokenCap(tokenHash, activeSession);
     // Bind identity to this transport session — `authMode:"bound"` is what activates the secure rules
     // (content only via the tunnel, no cookie, WS key-confirmation) for this session, independent of the
     // node's global mode.
