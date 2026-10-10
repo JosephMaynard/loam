@@ -1,5 +1,12 @@
 # 30 — Google Play readiness
 
+> **Status: current working checklist** (audited 25 September 2026; large-screen section added 9 October
+> for 0.6.0). Nothing has been uploaded to Play yet. The in-repo blockers are closed; what remains is the
+> owner's work in the Play Console (the first internal-testing upload, Play App Signing, the H1 and H2
+> declarations, Data safety, the listing copy and the large-screen form factors) and the device run in
+> [docs/21](21-device-verification-checklist.md).
+> The 0.5.0 `versionCode` note below is history: 0.6.0 is `versionCode` 8.
+
 Status of publishing the Android host (`apps/app`, package `com.loamnet.host`) on Google Play. Audited
 2026-09-19 (updated 2026-09-25 after the pre-release fixes) against the release APK (`aapt2 dump badging`, `zipalign -c -P 16`, `llvm-readelf -lW` on every
 native lib) and the generated manifest. Play's thresholds move — **confirm the current target-API level
@@ -87,7 +94,7 @@ device checks below, and size headroom before a production track.
 | | Item | State |
 |---|---|---|
 | H1 | **Foreground service type.** `connectedDevice` FGS needs a Play Console declaration + a short demo video. A reviewer may argue "serving nearby phones over a hotspot" is `specialUse`; be ready to justify (`connectedDevice` covers the hotspot/Wi-Fi Aware/BLE links) or to switch type and add `PROPERTY_SPECIAL_USE_FGS_SUBTYPE`. | **Open — owner (Console).** The service itself is now re-asserted whenever the app is in the foreground (API 31+ refuses a start from the background) and `POST_NOTIFICATIONS` is requested once; both still need a device run (docs/21 §3). |
-| H2 | **`ACCESS_FINE_LOCATION` uncapped** → location-permission declaration. It is only needed below API 33; on 33+ `NEARBY_WIFI_DEVICES` (`neverForLocation`) suffices. Capping it again needs `src/hooks/use-hotspot.ts` to request *only* `NEARBY_WIFI_DEVICES` on 33+ — the previous attempt capped the manifest without that and broke the hotspot on every API 33+ phone (see the regression note in `plugins/with-loam-host.js`). | Open — **needs a real device** to verify; until then, file the declaration ("create a local-only Wi-Fi hotspot"). |
+| H2 | **Location permission** → location-permission declaration. Location is only needed below API 33; on 33+ `NEARBY_WIFI_DEVICES` (`neverForLocation`) suffices. The hotspot now requests *only* `NEARBY_WIFI_DEVICES` on 33+ (`src/lib/hotspot-permissions.ts`), and the plugin caps `ACCESS_FINE_LOCATION` and `ACCESS_COARSE_LOCATION` at `maxSdkVersion="32"` (docs/04, LocalOnlyHotspot permissions). | **Built, emulator-checked; needs a real device** (API 33+ and Android 12) to verify. The manifest still lists location for API 32 and below, so keep the declaration filed ("create a local-only Wi-Fi hotspot on Android 12 and older") unless Play stops asking for it. |
 | H3 | Unused template permissions (`SYSTEM_ALERT_WINDOW`, `READ/WRITE_EXTERNAL_STORAGE`). | **Fixed** — `android.blockedPermissions` in `app.json`. |
 | H4 | **Model download size** (0.8–4.5 GB). Legal, but must not surprise: show size + a Wi-Fi/metered warning before download; mention it in the listing. | **Fixed** — every catalog or custom-URL download asks first, stating the size (or that a custom model's is unknown) and warning about mobile/metered data (unconditionally: the app has no network-type API); the catalog shows the size range up front. Mentioning it in the listing is owner copy (H6). |
 | H5 | **Report a user** was unreachable (server + dialog existed, nothing opened it). | **Fixed** — "Report this user" in the DM header. |
@@ -128,7 +135,10 @@ device checks below, and size headroom before a production track.
   checkouts don't persist the token, the build job is read-only, and a separate release job (`contents:
   write`, runs no repo code) attaches the APK. Keystore secrets reach only the signing step; a tag build
   fails without them and runs `pnpm test` + the app typecheck before building. Dependabot bumps the pinned
-  action SHAs weekly (`github-actions` ecosystem).
+  action SHAs weekly (`github-actions` ecosystem). The release also carries `loam-host.apk.sha256`, and a
+  separate `attest` job (the only one with `id-token: write` and `attestations: write`) records signed
+  build provenance for the APK and the AAB; check either with
+  `gh attestation verify <file> --repo MagicZebraLtd/loam` before installing or uploading it.
 - Predictive back is opted out (`predictiveBackGestureEnabled: false`) — fine for now, revisit later.
 
 ## Large screens and Android laptops

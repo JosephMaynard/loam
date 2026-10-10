@@ -1,4 +1,9 @@
 import { describe, it, expect } from "vitest";
+import { ed25519, x25519 } from "@noble/curves/ed25519";
+import { xchacha20poly1305 } from "@noble/ciphers/chacha";
+import { sha256 } from "@noble/hashes/sha256";
+import { hkdf } from "@noble/hashes/hkdf";
+import { randomBytes } from "@noble/hashes/utils";
 import {
   createMeshIdentity,
   meshIdFromSignPublic,
@@ -164,6 +169,88 @@ describe("sealed mailbox", () => {
       const opened = openMailbox({ blob, recipientKxSecret: bob.kxSecret, aad });
       expect(opened?.plaintext).toBe(pt);
     }
+  });
+});
+
+describe("inner signature encoding (docs/16, \"Inner signature encoding\")", () => {
+  const INNER_LABEL = "loam.mesh.inner.v1";
+  const SEAL_INFO = "loam.mesh.seal.v1";
+  const text = new TextEncoder();
+  const b64url = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64url");
+  const fromB64url = (value: string): Uint8Array => new Uint8Array(Buffer.from(value, "base64url"));
+
+  /** The AEAD key a sealed envelope uses, rebuilt independently of the package (the documented recipe). */
+  function envelopeKey(shared: Uint8Array, ephemeralPublic: Uint8Array, recipientKxPublic: Uint8Array): Uint8Array {
+    const salt = new Uint8Array([...ephemeralPublic, ...recipientKxPublic]);
+    return hkdf(sha256, shared, salt, text.encode(SEAL_INFO), 32);
+  }
+
+  /** Seal an arbitrary inner object to `recipientKxPublic` under `aad`, the way `sealMailbox` lays out a blob. */
+  function sealInner(recipientKxPublic: string, inner: Record<string, string>, aad: string): string {
+    const recipient = fromB64url(recipientKxPublic);
+    const ephemeralSecret = x25519.utils.randomPrivateKey();
+    const ephemeralPublic = x25519.getPublicKey(ephemeralSecret);
+    const key = envelopeKey(x25519.getSharedSecret(ephemeralSecret, recipient), ephemeralPublic, recipient);
+    const nonce = randomBytes(24);
+    const ciphertext = xchacha20poly1305(key, nonce, text.encode(aad)).encrypt(text.encode(JSON.stringify(inner)));
+    return b64url(new Uint8Array([...ephemeralPublic, ...nonce, ...ciphertext]));
+  }
+
+  /** Decrypt a blob's inner object without the package, to inspect exactly what was signed. */
+  function openInner(blob: string, recipientKxSecret: string, aad: string): Record<string, string> {
+    const raw = fromB64url(blob);
+    const ephemeralPublic = raw.slice(0, 32);
+    const secret = fromB64url(recipientKxSecret);
+    const key = envelopeKey(x25519.getSharedSecret(secret, ephemeralPublic), ephemeralPublic, x25519.getPublicKey(secret));
+    const plaintext = xchacha20poly1305(key, raw.slice(32, 56), text.encode(aad)).decrypt(raw.slice(56));
+    return JSON.parse(new TextDecoder().decode(plaintext)) as Record<string, string>;
+  }
+
+  it("signs the v1 bytes every released build verifies: label ‖ from ‖ fromKx ‖ pt ‖ aad", () => {
+    const alice = createMeshIdentity();
+    const bob = createMeshIdentity();
+    const aad = `${mailboxTag(bob.mailboxToken, 7)}|1700000000000`;
+    const blob = sealMailbox({ recipientKxPublic: bob.kxPublic, sender: senderOf(alice), plaintext: "wire format", aad });
+    const inner = openInner(blob, bob.kxSecret, aad);
+    expect(Object.keys(inner).sort()).toEqual(["from", "fromKx", "pt", "sig", "signPublic"]);
+    const signed = text.encode(`${INNER_LABEL}${alice.meshId}${alice.kxPublic}wire format${aad}`);
+    expect(ed25519.verify(fromB64url(inner.sig), signed, fromB64url(alice.signPublic))).toBe(true);
+    // The fixed-width fields the encoding relies on.
+    expect(alice.meshId).toHaveLength(31);
+    expect(alice.kxPublic).toHaveLength(43);
+  });
+
+  it("refuses a signature re-read with a different boundary between fromKx and the plaintext", () => {
+    const alice = createMeshIdentity();
+    const bob = createMeshIdentity();
+    const aad = `${mailboxTag(bob.mailboxToken, 7)}|1700000000000`;
+    const sig = ed25519.sign(
+      text.encode(`${INNER_LABEL}${alice.meshId}${alice.kxPublic}Hello world${aad}`),
+      fromB64url(alice.signSecret),
+    );
+    const honest = { from: alice.meshId, signPublic: alice.signPublic, fromKx: alice.kxPublic, pt: "Hello world", sig: b64url(sig) };
+    expect(openMailbox({ blob: sealInner(bob.kxPublic, honest, aad), recipientKxSecret: bob.kxSecret, aad })?.plaintext).toBe(
+      "Hello world",
+    );
+    // Same signed bytes, two characters moved from the plaintext into `fromKx`: the signature still
+    // verifies over them, so only the key-shape check keeps the altered plaintext out.
+    const shifted = { ...honest, fromKx: `${alice.kxPublic}He`, pt: "llo world" };
+    expect(openMailbox({ blob: sealInner(bob.kxPublic, shifted, aad), recipientKxSecret: bob.kxSecret, aad })).toBeNull();
+    // A non-canonical spelling of the real key (it decodes to the same bytes) is refused too, even signed.
+    const respelledSig = ed25519.sign(
+      text.encode(`${INNER_LABEL}${alice.meshId}${alice.kxPublic}=Hello world${aad}`),
+      fromB64url(alice.signSecret),
+    );
+    const respelled = { ...honest, fromKx: `${alice.kxPublic}=`, sig: b64url(respelledSig) };
+    expect(openMailbox({ blob: sealInner(bob.kxPublic, respelled, aad), recipientKxSecret: bob.kxSecret, aad })).toBeNull();
+  });
+
+  it("will not seal with a sender key the recipient would refuse", () => {
+    const alice = createMeshIdentity();
+    const bob = createMeshIdentity();
+    expect(() =>
+      sealMailbox({ recipientKxPublic: bob.kxPublic, sender: { ...senderOf(alice), kxPublic: `${alice.kxPublic}A` }, plaintext: "x", aad: "a" }),
+    ).toThrow();
   });
 });
 

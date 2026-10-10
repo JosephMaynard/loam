@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { Channel, Message, Report, User } from "@loam/schema";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { assertNotPlaintextSqliteFile, importLegacyJsonData, openStore, type LoamStore } from "./db.js";
+import { assertNotPlaintextSqliteFile, openStore, type LoamStore } from "./db.js";
 
 function makeUser(id: string, overrides: Partial<User> = {}): User {
   return {
@@ -34,7 +34,7 @@ function makeChannel(id: string, overrides: Partial<Channel> = {}): Channel {
   };
 }
 
-function makeChannelPost(id: string, createdAt = 1_704_067_200_000): Message {
+function makeChannelPost(id: string, createdAt = 1_704_067_200_000): Extract<Message, { type: "channelPost" }> {
   return {
     id,
     type: "channelPost",
@@ -209,6 +209,29 @@ describe("openStore", () => {
     expect(store.getConfigValue("security.profile")).toBe("standard");
   });
 
+  it("wipeAll on a plaintext file leaves none of the deleted text in the database file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loam-secure-delete-"));
+    const path = join(dir, "loam.db");
+    const fileStore = openStore(path);
+    try {
+      const needle = "SECURE_DELETE_NEEDLE_7f3a";
+      for (let index = 0; index < 50; index += 1) {
+        fileStore.insertMessage({ ...makeChannelPost(`msg_${index}`), body: `${needle} ${index} ${"x".repeat(200)}` });
+      }
+      fileStore.upsertUser(makeUser("user.abc", { displayName: `${needle} name` }));
+      fileStore.checkpoint();
+      expect(readFileSync(path).includes(needle)).toBe(true);
+
+      fileStore.wipeAll();
+      fileStore.checkpoint();
+      const leftovers = [path, `${path}-wal`].filter((file) => existsSync(file) && readFileSync(file).includes(needle));
+      expect(leftovers).toEqual([]);
+    } finally {
+      fileStore.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("round-trips tombstones and prunes only those older than the cutoff", () => {
     store.addTombstone("msg_recent");
     store.addTombstone("msg_also_recent");
@@ -227,7 +250,7 @@ describe("openStore", () => {
     expect(store.loadTombstones()).toEqual([]);
   });
 
-  it("round-trips missing-attachment work items, bumps attempts, and clears them (docs/15 A6)", () => {
+  it("round-trips missing-attachment work items, bumps attempts, and clears them", () => {
     store.addMissingAttachment({
       messageId: "msg_1",
       attachmentId: "att_1",
@@ -242,8 +265,8 @@ describe("openStore", () => {
       mimeType: "image/png",
       peerUrl: "http://peer.example",
       attempts: 0,
-      lastAttemptAt: 0, // F1: 0 means "never attempted" — the retry pass treats this as due immediately
-      nextAttemptAt: 0, // P2-2: same "due immediately" default, now the column loadDueMissingAttachments filters on
+      lastAttemptAt: 0, // 0 means "never attempted" — the retry pass treats this as due immediately
+      nextAttemptAt: 0, // same "due immediately" default, now the column loadDueMissingAttachments filters on
     });
     expect(typeof record?.createdAt).toBe("number");
 
@@ -263,9 +286,9 @@ describe("openStore", () => {
     store.bumpMissingAttachmentAttempts("msg_1", "att_1", farFuture);
     const bumped = store.loadMissingAttachments()[0];
     expect(bumped?.attempts).toBe(2);
-    // F1: each bump also stamps lastAttemptAt (now) — what the retry pass's backoff measures from.
+    // each bump also stamps lastAttemptAt (now) — what the retry pass's backoff measures from.
     expect(bumped?.lastAttemptAt).toBeGreaterThanOrEqual(beforeBump);
-    // P2-2: nextAttemptAt is exactly whatever the caller passed — a dumb storage write, no policy here.
+    // nextAttemptAt is exactly whatever the caller passed — a dumb storage write, no policy here.
     expect(bumped?.nextAttemptAt).toBe(farFuture);
 
     // Not due yet — loadDueMissingAttachments must not return it.
@@ -275,7 +298,7 @@ describe("openStore", () => {
     expect(store.loadMissingAttachments()).toEqual([]);
   });
 
-  it("loadDueMissingAttachments selects only due records, ordered earliest-due-first, capped at limit (P2-2)", () => {
+  it("loadDueMissingAttachments selects only due records, ordered earliest-due-first, capped at limit", () => {
     const now = Date.now();
 
     // Three NOT-yet-due records (bumped into the future) and two DUE ones (default nextAttemptAt=0),
@@ -341,7 +364,7 @@ describe("openStore", () => {
     }
   });
 
-  it("migrates a pre-backoff missing_attachments table by backfilling last_attempt_at (F1)", () => {
+  it("migrates a pre-backoff missing_attachments table by backfilling last_attempt_at", () => {
     // Simulate a database created before retry-backoff existed: drop and re-create the bare-bones
     // (pre-`last_attempt_at`) shape, write a row the old way, then reopen through `openStore` (which
     // runs the migration) and confirm it's usable with the new column defaulted to 0 ("never
@@ -390,7 +413,7 @@ describe("openStore", () => {
     }
   });
 
-  it("migrates a pre-fair-retry missing_attachments table by backfilling next_attempt_at (P2-2)", () => {
+  it("migrates a pre-fair-retry missing_attachments table by backfilling next_attempt_at", () => {
     // Simulate a database created before fair-ordered due-selection existed: has `last_attempt_at`
     // (an earlier migration) but not yet `next_attempt_at`. Reopening through `openStore` must backfill
     // it to 0 ("due immediately"), so pre-existing rows become eligible on the very next pass rather
@@ -503,76 +526,6 @@ describe("reports", () => {
   });
 });
 
-describe("importLegacyJsonData", () => {
-  let dataDir: string;
-  let store: LoamStore;
-
-  beforeEach(() => {
-    dataDir = mkdtempSync(join(tmpdir(), "loam-db-test-"));
-    store = openStore(join(dataDir, "loam.db"));
-  });
-
-  afterEach(() => {
-    store.close();
-    rmSync(dataDir, { recursive: true, force: true });
-  });
-
-  function writeLegacyFiles(): void {
-    writeFileSync(join(dataDir, "users.json"), JSON.stringify([makeUser("user.1234", { isAdmin: true })]));
-    writeFileSync(join(dataDir, "channels.json"), JSON.stringify([makeChannel("general")]));
-    writeFileSync(join(dataDir, "messages.json"), JSON.stringify(allMessageVariants));
-    writeFileSync(
-      join(dataDir, "sessions.json"),
-      JSON.stringify([
-        { token: "token-a", userId: "user.1234" },
-        { token: "", userId: "user.invalid" },
-        { junk: true },
-      ]),
-    );
-  }
-
-  it("returns false when no legacy files exist", () => {
-    expect(importLegacyJsonData(store, dataDir)).toBe(false);
-  });
-
-  it("imports legacy files, skips invalid sessions, and renames files to .bak", () => {
-    writeLegacyFiles();
-
-    expect(importLegacyJsonData(store, dataDir)).toBe(true);
-
-    expect(store.loadUsers()).toEqual([makeUser("user.1234", { isAdmin: true })]);
-    expect(store.loadChannels()).toEqual([makeChannel("general")]);
-    expect(store.loadMessages()).toEqual(allMessageVariants);
-    expect(store.loadSessions()).toEqual([{ token: "token-a", userId: "user.1234" }]);
-
-    for (const file of ["users", "channels", "messages", "sessions"]) {
-      expect(existsSync(join(dataDir, `${file}.json`))).toBe(false);
-      expect(existsSync(join(dataDir, `${file}.json.bak`))).toBe(true);
-    }
-
-    expect(JSON.parse(readFileSync(join(dataDir, "users.json.bak"), "utf8"))).toHaveLength(1);
-  });
-
-  it("does not import into a non-empty store", () => {
-    store.upsertUser(makeUser("user.existing"));
-    writeLegacyFiles();
-
-    expect(importLegacyJsonData(store, dataDir)).toBe(false);
-    expect(store.loadUsers()).toEqual([makeUser("user.existing")]);
-    expect(existsSync(join(dataDir, "users.json"))).toBe(true);
-  });
-
-  it("rolls back and keeps legacy files when a row is corrupt", () => {
-    writeLegacyFiles();
-    writeFileSync(join(dataDir, "messages.json"), JSON.stringify([{ id: "msg_bad", type: "channelPost" }]));
-
-    expect(() => importLegacyJsonData(store, dataDir)).toThrow();
-    expect(store.isEmpty()).toBe(true);
-    expect(existsSync(join(dataDir, "users.json"))).toBe(true);
-    expect(existsSync(join(dataDir, "users.json.bak"))).toBe(false);
-  });
-});
-
 describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () => {
   let dataDir: string;
   let dbPath: string;
@@ -666,12 +619,12 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
     }
   });
 
-  // P1-2 (docs/15, Sol round 3): a FIXED (persistent/passphrase) key can't be rotated in-process — the
+  // A FIXED (persistent/passphrase) key can't be rotated in-process — the
   // real recovery is "delete the ciphertext, clear the Keystore key, restart" so the NEXT boot resolves
   // a genuinely NEW key together with a fresh database. These two tests simulate exactly that cold
   // restart at the store level (openStore stands in for what a fresh boot does), for both modes that
   // use a fixed key — see executeKillSwitch's `fixedKeyMode` branch in app.ts for the in-process half.
-  it("P1-2 persistent-mode cold restart: delete + reopen under a NEW key produces a fresh DB the OLD key can no longer open", () => {
+  it("persistent-mode cold restart: delete + reopen under a NEW key produces a fresh DB the OLD key can no longer open", () => {
     const keyA = "persistent-mode-key-A";
     const original = openStore(dbPath, { encryptionKey: keyA });
     original.upsertUser(makeUser("user.doomed"));
@@ -700,7 +653,7 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
     expect(() => openStore(dbPath, { encryptionKey: keyA })).toThrow();
   });
 
-  it("P1-2 passphrase-mode cold restart: same lifecycle — delete + reopen under a NEW derived key locks out the OLD passphrase's key", () => {
+  it("passphrase-mode cold restart: same lifecycle — delete + reopen under a NEW derived key locks out the OLD passphrase's key", () => {
     // passphrase mode derives its SQLCipher key from an operator passphrase (db-encryption.ts's
     // resolveDbKey — a SHA-256 pass, unrelated to this store-level test, which only cares that the
     // RESULTING key string changes across the restart, exactly as it would for persistent mode above.
@@ -724,7 +677,7 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
     expect(() => openStore(dbPath, { encryptionKey: keyA })).toThrow();
   });
 
-  // P1-1 (Sol round 4): exercises the EXACT key-derivation formula `resolveDbKey` uses
+  // Exercises the EXACT key-derivation formula `resolveDbKey` uses
   // (apps/app/src/lib/db-encryption.ts) — reimplemented here with Node's own `crypto` (SHA-256,
   // lowercase hex, identical output to `expo-crypto`'s `digestStringAsync`) since that module depends on
   // expo-secure-store/expo-crypto and apps/app has no test runner. `deviceSecret` stands in for the
@@ -734,7 +687,7 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
     return createHash("sha256").update(input, "utf8").digest("hex");
   }
 
-  it("P1-1 persistent mode: the key IS the device secret — wiping (discarding secret-A, minting secret-B) opens a fresh DB under key-B that key-A can never open, and no plaintext DB is ever created", () => {
+  it("persistent mode: the key IS the device secret — wiping (discarding secret-A, minting secret-B) opens a fresh DB under key-B that key-A can never open, and no plaintext DB is ever created", () => {
     const deviceSecretA = "device-secret-a-32-random-bytes-hex";
     // 'persistent' mode: key = deviceSecret, verbatim (see resolveDbKey's 'persistent' branch).
     const keyA = deviceSecretA;
@@ -775,7 +728,7 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
     expect(() => openStore(dbPath, { encryptionKey: keyA })).toThrow();
   });
 
-  it("P1-1 passphrase mode: SAME passphrase + a freshly-minted device secret still yields a brand-new key — wiping opens a fresh DB the OLD passphrase-derived key can never open, and no plaintext DB is ever created", () => {
+  it("passphrase mode: SAME passphrase + a freshly-minted device secret still yields a brand-new key — wiping opens a fresh DB the OLD passphrase-derived key can never open, and no plaintext DB is ever created", () => {
     const passphrase = "the operator's unchanged passphrase";
     const deviceSecretA = "device-secret-a-32-random-bytes-hex";
     // 'passphrase' mode: key = SHA256(passphrase + ':' + deviceSecret) — see resolveDbKey's 'passphrase'
@@ -812,11 +765,11 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
     expect(() => openStore(dbPath, { encryptionKey: keyA })).toThrow();
   });
 
-  describe("rekey (P1-1, Sol round 5 — passphrase key-derivation migration)", () => {
+  describe("rekey (passphrase key-derivation migration)", () => {
     it("re-encrypts an already-open store under a new key in place: the old key stops opening it, the new key opens it, and data survives", () => {
       // Simulates exactly the scenario `openInitialStore` (app.ts) migrates: an EXISTING passphrase DB
-      // encrypted under the pre-round-4 derivation `SHA256(passphrase)` (legacyKey) needs to end up
-      // openable under the round-4+ derivation `SHA256(passphrase + ':' + deviceSecret)` (currentKey),
+      // encrypted under the legacy derivation `SHA256(passphrase)` (legacyKey) needs to end up
+      // openable under the current derivation `SHA256(passphrase + ':' + deviceSecret)` (currentKey),
       // with its data intact and the OLD key no longer usable.
       const passphrase = "the operator's passphrase, unchanged across the migration";
       const legacyKey = sha256Hex(passphrase);
@@ -824,7 +777,7 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
       const currentKey = sha256Hex(`${passphrase}:${deviceSecret}`);
       expect(currentKey).not.toBe(legacyKey);
 
-      // Create the "existing" DB under the legacy derivation (pre-round-4 install).
+      // Create the "existing" DB under the legacy derivation (an older install).
       const legacy = openStore(dbPath, { encryptionKey: legacyKey });
       legacy.upsertUser(makeUser("user.pre-round-4"));
       legacy.insertMessage(makeChannelPost("msg_pre_migration"));
@@ -858,7 +811,7 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
     });
   });
 
-  describe("checkpoint (RF6-e, Sol round 6 — verify the WAL was actually truncated)", () => {
+  describe("checkpoint (verify the WAL was actually truncated)", () => {
     it("folds committed WAL frames into the main file and truncates the WAL to zero (busy=0, no throw)", () => {
       const store = openStore(dbPath, { encryptionKey: KEY });
       try {
@@ -929,7 +882,7 @@ describe("encrypted store (SQLCipher via better-sqlite3-multiple-ciphers)", () =
   });
 });
 
-// Pre-release review 2026-09-25: a keyed open must PROVE the file on disk is ciphertext. A driver build
+// A keyed open must PROVE the file on disk is ciphertext. A driver build
 // without the codec compiled in accepts `PRAGMA key` as a silent no-op and writes plaintext SQLite.
 describe("encrypted store — plaintext-on-disk guard", () => {
   let dataDir: string;

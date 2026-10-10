@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { FixedWindowCounter, parseTimeWindow, rateLimitKey, registerRateLimit } from "./rate-limit.js";
+import { FixedWindowCounter, addressKey, ipv6SubnetKey, parseTimeWindow, rateLimitKey, registerRateLimit } from "./rate-limit.js";
 
 describe("rateLimitKey", () => {
   it("keeps IPv4 as-is", () => {
@@ -26,6 +26,23 @@ describe("rateLimitKey", () => {
 
   it("handles a dotted IPv4 tail on a non-mapped IPv6 address", () => {
     expect(rateLimitKey("64:ff9b::1.2.3.4")).toBe(rateLimitKey("64:ff9b::"));
+  });
+});
+
+describe("addressKey and ipv6SubnetKey", () => {
+  it("keys one address in one spelling, IPv4-mapped folded, zone id dropped", () => {
+    expect(addressKey("192.168.4.20")).toBe("192.168.4.20");
+    expect(addressKey("::ffff:127.0.0.1")).toBe("127.0.0.1");
+    expect(addressKey("2001:DB8:85A3:0:0:8A2E:370:7334")).toBe(addressKey("2001:db8:85a3::8a2e:370:7334"));
+    expect(addressKey("2001:db8:85a3::1")).not.toBe(addressKey("2001:db8:85a3::2"));
+    expect(addressKey("fe80::1%en0")).toBe(addressKey("fe80::1"));
+  });
+
+  it("gives a native IPv6 address its /64, and IPv4 (mapped or not) none", () => {
+    expect(ipv6SubnetKey("2001:db8:85a3::1")).toBe(ipv6SubnetKey("2001:db8:85a3::2"));
+    expect(ipv6SubnetKey("2001:db8:85a3::1")).toBe(rateLimitKey("2001:db8:85a3::1"));
+    expect(ipv6SubnetKey("192.168.4.20")).toBeUndefined();
+    expect(ipv6SubnetKey("::ffff:127.0.0.1")).toBeUndefined();
   });
 });
 
@@ -114,7 +131,7 @@ describe("registerRateLimit", () => {
     await statuses("/a", 3);
     const refused = await server.inject({ method: "GET", url: "/a", remoteAddress: "10.0.0.1" });
     expect(refused.statusCode).toBe(429);
-    expect(refused.json()).toMatchObject({ statusCode: 429, message: "Rate limit exceeded, retry in 1 minute" });
+    expect(refused.json()).toMatchObject({ statusCode: 429, code: "rate_limited", message: "Rate limit exceeded, retry in 1 minute" });
     expect(refused.headers["retry-after"]).toBe("60");
     const allowed = await server.inject({ method: "GET", url: "/a", remoteAddress: "10.0.0.9" });
     for (const response of [refused, allowed]) {
@@ -140,6 +157,17 @@ describe("registerRateLimit", () => {
     });
     expect(await statuses("/open", 5, { "x-exempt": "1" })).toEqual([200, 200, 200, 200, 200]);
     expect(await statuses("/strict", 2, { "x-exempt": "1" })).toEqual([200, 429]);
+  });
+
+  it("counts a perAddress route per address, while other routes fold IPv6 to its /64", async () => {
+    await build((app) => {
+      app.get("/own", { config: { rateLimit: { max: 1, perAddress: true } } }, async () => ({ ok: true }));
+      app.get("/shared", { config: { rateLimit: { max: 1 } } }, async () => ({ ok: true }));
+    });
+    expect(await statuses("/own", 2, {}, "2001:db8::1")).toEqual([200, 429]);
+    expect(await statuses("/own", 1, {}, "2001:db8::2")).toEqual([200]);
+    expect(await statuses("/shared", 1, {}, "2001:db8::1")).toEqual([200]);
+    expect(await statuses("/shared", 1, {}, "2001:db8::2")).toEqual([429]);
   });
 
   it("uses a route's errorResponseBuilder, with no retry-after", async () => {

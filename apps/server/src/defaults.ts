@@ -1,4 +1,4 @@
-// Seed data and small tunables shared across the server. Extracted from app.ts (2026-09-04 split).
+// Seed data and small tunables shared across the server.
 import type { Channel } from "@loam/schema";
 
 export const sessionCookieName = "loam_session";
@@ -8,6 +8,9 @@ export const sessionCookieMaxAge = 60 * 60 * 24 * 365;
 export const defaultChannelCreatedAt = 1_704_067_200_000;
 
 export const claimAttemptLimit = 5;
+
+/** How many times `claimAttemptLimit` a whole IPv6 /64 may spend on claim / panic guesses per window. */
+export const subnetAttemptFactor = 8;
 
 export const claimAttemptWindowMs = 5 * 60_000;
 

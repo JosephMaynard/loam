@@ -26,3 +26,20 @@ onlyBuiltDependencies:
   # prebuilt libs, gradle silently produces NO librnllama_jni.so, and the on-device LLM fails at runtime
   # with "JSI bindings not installed". (build-apk.mjs also runs the downloader explicitly as a backstop.)
   - llama.rn
+
+# Wait a day before installing a newly published version: most malicious releases are caught and
+# pulled within hours. Applies when pnpm resolves (pnpm add / update, Dependabot); a frozen-lockfile
+# install only fetches what the lockfile already names.
+minimumReleaseAge: 1440
+
+# `pnpm audit --prod --audit-level=high` runs in CI. These advisories have no patched release and reach
+# LOAM only through Expo build tooling (`expo` > `@expo/cli`), which runs on the build machine and is not
+# bundled into the APK or the server. Remove each entry once a fixed version exists.
+auditConfig:
+  ignoreGhsas:
+    # node-forge <=1.4.0: RSA PKCS#1 v1.5 signature verification accepts extra nested DigestAlgorithm
+    # elements. Path: expo > @expo/cli > node-forge (dev-server certificates, not used by LOAM at runtime).
+    - GHSA-86w9-cpqp-85rv
+    # braces <=3.0.3: stack exhaustion on deeply nested patterns. Path: expo > @expo/cli >
+    # @expo/metro-file-map > micromatch > braces (Metro file watching at build time, fixed patterns).
+    - GHSA-vfj7-8cjw-p6xm

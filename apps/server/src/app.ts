@@ -34,7 +34,7 @@ import {
 import { generateDisplayName } from "@loam/display-name";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 
-import { importLegacyJsonData, type StoredRowReport } from "./db.js";
+import type { StoredRowReport } from "./db.js";
 import { createLlmLayer, INTERRUPTED_ASSISTANT_BODY } from "./llm.js";
 import { createMeshLayer } from "./mesh.js";
 import type { Runtime } from "./runtime.js";
@@ -56,11 +56,12 @@ import { type ClientFiles, registerClientFiles } from "./static-files.js";
 import { createTransportServer, loamLogController, loamLoggerOptions, registerTransportHooks, registerTransportRoutes } from "./transport-server.js";
 import { createSyncEngine } from "./sync.js";
 import { resolveLanIPv4 } from "./net.js";
+import { addressKey, ipv6SubnetKey } from "./rate-limit.js";
 
-import type { AppData, AppOptions, LoamApp } from "./types.js";
+import type { AppData, AppOptions, LoamApp, PendingUpload } from "./types.js";
 
 import { IdentityLimitError, errorBody } from "./errors.js";
-import { sessionCookieName, sessionCookieMaxAge, claimAttemptLimit, claimAttemptWindowMs, defaultTombstoneHorizonMs, defaultChannels, legacyDemoUserIds } from "./defaults.js";
+import { sessionCookieName, sessionCookieMaxAge, claimAttemptLimit, claimAttemptWindowMs, subnetAttemptFactor, defaultTombstoneHorizonMs, defaultChannels, legacyDemoUserIds } from "./defaults.js";
 import { defaultLoamConfig, mergeConfig, reconcileLegacyProfile, sanitizeLegacyConfigJson, withoutLauncherOwnedKeys } from "./config.js";
 
 import { makeUser, makeSessionUserId, makeSessionToken, makeAdminSetupCode, encodeCookieValue, readCookie } from "./identity.js";
@@ -102,7 +103,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   /**
    * The host advertised in the join URL: an explicit `joinHost` wins outright (a caller that
-   * resolved it at boot, or pinned a hostname); otherwise re-resolved on every call (docs/15 A7) so
+   * resolved it at boot, or pinned a hostname); otherwise re-resolved on every call so
    * the web-served QR reflects whatever's reachable right now, not whatever was up at listen() time.
    */
   // The host's own screen can pin a different join address at runtime (`LoamApp.host.setJoinHost`).
@@ -124,7 +125,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     // unauthenticated ones) a 4× transient-allocation amplifier on a Pi/phone host.
     serverFactory: (handler) => createServer(handler),
   });
-  // Per-route body ceiling for the upload paths (Sol P2-7): the advertised 1 MiB attachment cap
+  // Per-route body ceiling for the upload paths: the advertised 1 MiB attachment cap
   // base64-inflates (×4/3) inside its JSON envelope, and a tunnelled upload wraps that AGAIN in a
   // sealed+base64 `{ s, b }` envelope — so a 1 MiB file needs ≈2 MiB of headroom. 4 MiB keeps the
   // ceiling bounded while the real, decoded limits stay enforced semantically (avatar 128 KiB,
@@ -178,16 +179,19 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   const identityWindowMs = options.identityWindowMs ?? 10 * 60_000;
   // How long an identity nobody ever used may linger before `reapUnusedIdentities` removes it.
   const unusedIdentityMaxAgeMs = options.unusedIdentityMaxAgeMs ?? 24 * 3_600_000;
+  // The same for one waiting in a greeter's queue: longer, so a greeter away for a weekend still finds
+  // a real newcomer there, but not for ever.
+  const pendingIdentityMaxAgeMs = options.pendingIdentityMaxAgeMs ?? 7 * 24 * 3_600_000;
   const tombstoneHorizonMs = options.tombstoneHorizonMs ?? defaultTombstoneHorizonMs;
-  // Uploaded-but-unattached attachment ids → uploader + upload time. A message may only reference
-  // the uploader's own pending uploads; each id is consumed on first use. RAM-only: entries a
-  // restart loses (and uploads abandoned past the grace period) are swept by
-  // reapOrphanedAttachments, so unclaimed files never accumulate on disk.
-  const attachmentOwners = new Map<string, { userId: string; uploadedAt: number }>();
+  // Uploaded-but-unattached attachment ids → uploader, upload time and the upload's own record. A message
+  // may only reference the uploader's own pending uploads; each id is consumed on first use, and the
+  // message stores the upload's record. RAM-only: entries a restart loses (and uploads abandoned past the
+  // grace period) are swept by reapOrphanedAttachments, so unclaimed files never accumulate on disk.
+  const attachmentOwners = new Map<string, PendingUpload>();
   const attachmentPendingGraceMs = 15 * 60_000;
   // Message ids deliberately deleted on this node — node-to-node sync never re-imports these.
   const tombstones = new Set<string>();
-  // Channel ids IMPORTED from a sync peer (C1 provenance) — only these are eligible for peer-driven
+  // Channel ids IMPORTED from a sync peer (provenance, docs/25 C1) — only these are eligible for peer-driven
   // metadata re-sync, so a locally-created or default channel can never be clobbered. Loaded at boot.
   const syncedChannelIds = new Set<string>();
   // Bumped by every kill-switch wipe. A sync round captures it before its first await and abandons
@@ -198,17 +202,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // A generation bump alone only catches a pass that was ALREADY RUNNING when a wipe starts; a pass
   // that starts partway through a wipe (e.g. between `store.close()` and the reopen) would capture the
   // POST-bump generation and see no further change, so it needs its own explicit "don't start" guard
-  // (SF3) — `retryMissingAttachments` checks this before doing any work.
+  // — `retryMissingAttachments` checks this before doing any work.
   let wipeInProgress = false;
-  // Single-flight guard for `executeKillSwitch` (CodeRabbit round-10): the in-flight wipe promise, so
+  // Single-flight guard for `executeKillSwitch`: the in-flight wipe promise, so
   // concurrent callers reuse it instead of racing a second destructive wipe. Cleared in its `finally`.
   let wipeInFlight: Promise<KillSwitchResult> | undefined;
-  // RF1: set for the remainder of this process's life once a persistent/passphrase-encrypted node's
-  // kill switch hands off to the RN launcher for a key-rotation restart (executeKillSwitchBody). The
-  // ciphertext is already deleted and in-memory state is cleared at that point, but this process keeps
-  // running until the launcher actually restarts it — so every route except the liveness probe must
-  // refuse (503) rather than let a stale in-memory read or a surviving transport session serve content
-  // in the gap between "wipe requested" and "process restarted".
+  // The kill switch's 503 gate (see `executeKillSwitchBody`): raised synchronously at the start of every
+  // wipe, lifted only when an in-process wipe has reloaded the fresh store. It stays raised for the rest
+  // of this process's life when a fixed-key wipe hands off to the launcher for a restart, or when a wipe
+  // fails closed (also set by the boot-time wipe resume). While it is up, every route except the liveness
+  // probe refuses (503), so neither a stale in-memory read nor a surviving transport session can serve
+  // content between "wipe requested" and "fresh store loaded" (or "process restarted").
   let awaitingWipeRestart = false;
   let staticFilesRegistered = false;
   /** The web client's file server, once `registerStaticFiles` finds a client build. */
@@ -230,15 +234,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * The admin-bootstrap strategy actually ENFORCED right now (review 2026-09-04). A launcher that hands
+   * The admin-bootstrap strategy actually ENFORCED right now. A launcher that hands
    * `buildApp` a per-boot `hostToken` (the Android host) forces `hostDevice`: admin is granted only to
    * the caller that presents that token via `POST /api/admin/claim`, never to "the first session". Like
    * `effectiveTransportEncryption` this is a read-time projection that never mutates `appConfig` — the
    * configured strategy stays the operator's persisted intent, and the same data dir booted without a
    * token (desktop/Pi) resolves to it unchanged. Why: the embedded server listens on every interface from
    * the moment it boots, but the host's own WebView (the operator) only reaches `/api/config` after the
-   * readiness probe + bootstrap fetch + client load — under `firstUser` that gap let any LAN peer polling
-   * the endpoint mint the admin identity on every fresh-DB boot (every boot in ephemeral mode).
+   * readiness probe + bootstrap fetch + client load — under `firstUser` that gap would let any LAN peer
+   * polling the endpoint mint the admin identity on every fresh-DB boot (every boot in ephemeral mode).
    */
   function effectiveAdminBootstrap(): AdminBootstrapStrategy {
     return options.hostToken ? "hostDevice" : appConfig.admin.bootstrap;
@@ -282,7 +286,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   } = lifecycle;
   let store = resumeWipePhaseThenOpenStore();
 
-  // ---- Subsystem composition (2026-09-04 split) ----------------------------------------------------
+  // ---- Subsystem composition -------------------------------------------------------------------------
   // The shared `Runtime` view hands the extracted subsystems live access to the mutable app state
   // (getters, so a kill-switch reopen/reload is seen immediately) and to the domain helpers they call.
   // Function declarations below are hoisted, so referencing them here is safe.
@@ -337,7 +341,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     linked: (peer, result) => applyPeerLinked(peer, result),
   });
 
-  // ---- The composition seam (2026-09-04 split) -------------------------------------------------
+  // ---- The composition seam ---------------------------------------------------------------------
   // Everything the extracted modules (transport, realtime, kill switch, routes) need, as ONE object:
   // accessor-backed views of the mutable bindings above, the shared containers, the subsystems, and the
   // domain helpers (hoisted function declarations below). Modules created after this add their own
@@ -516,7 +520,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * token when this node has none, so both sides present and require the same one. Applied like an admin
    * save. A node that already has a different token keeps its own (the operator has to reconcile them).
    * An answer that comes back after an admin turned sync off, removed or replaced the peer, or changed its
-   * pinned key or code is dropped (review 2026-10-03 #4): it must not bring back a token for a peer the
+   * pinned key or code is dropped: it must not bring back a token for a peer the
    * operator has just let go of.
    */
   function applyPeerLinked(used: SyncPeer, result: SyncLinkResponse): void {
@@ -649,7 +653,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       });
       // config.json is authoritative for the launcher-owned `llm.onDevice` block when it carries one: the
       // DB row holds a full snapshot from the last admin save, which must not freeze the launcher's later
-      // model activate/deactivate (rows written before this fix contain it too — it is simply ignored).
+      // model activate/deactivate (whatever `llm.onDevice` the row holds is simply ignored).
       const storedUpdate = fileOwnsOnDevice ? withoutLauncherOwnedKeys(parsedStored) : parsedStored;
 
       // Heal configs saved before the profile became authoritative (see reconcileLegacyProfile):
@@ -829,13 +833,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       // can handshake + show the fingerprint. The client still prefers the QR-delivered key (docs/08).
       transportPublicKey:
         effectiveTransportEncryption() === "off" ? undefined : transportIdentity?.publicKey,
-      // Report the EFFECTIVE posture, not the merely-configured one (F5/P2-1): `security.dbEncryption`
+      // Report the EFFECTIVE posture, not the merely-configured one: `security.dbEncryption`
       // is a declarative admin setting, decoupled from whether the store actually got opened with a
-      // key — `dbState.encryptionEnabled` is boot-resolved truth (including the F4/SF2 fallback downgrade), so
-      // when it's false the wire must say "off" regardless of what's configured. When it's true, prefer
-      // the caller's boot-resolved `dbEncryptionMode` (P2-1: the Android launcher's actual key strategy,
+      // key — `dbState.encryptionEnabled` is boot-resolved truth (including `openInitialStore`'s fallback
+      // downgrade), so when it's false the wire must say "off" regardless of what's configured. When it's
+      // true, prefer the caller's boot-resolved `dbEncryptionMode` (the Android launcher's actual key strategy,
       // which nobody PATCHes into the admin config) over the declarative axis, falling back to it only
-      // when the caller didn't supply one (desktop/Pi CLI). Never claim encryption that isn't active.
+      // when the caller didn't supply one (a direct `buildApp` embedder). Never claim encryption that
+      // isn't active.
       dbEncryption: dbState.encryptionEnabled ? options.dbEncryptionMode ?? appConfig.security.dbEncryption : "off",
       locale: appConfig.node.locale,
       // Self-announce Developer Mode so every client shows the "traffic is plaintext" banner. Always false
@@ -935,9 +940,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
   /**
    * Why a user may not read or create content on this node: banned users are fully locked out, and
-   * under the `approval` join policy a pending user gets nothing until a greeter lets them in
-   * (previously only *posting* was gated, so an unapproved or banned session could still read every
-   * channel and DM feed over REST). `/api/config` stays open — it is how the client learns it is
+   * under the `approval` join policy a pending user gets nothing until a greeter lets them in (reads
+   * are gated as well as posts, so an unapproved or banned session can't read any channel or DM feed
+   * over REST). `/api/config` stays open — it is how the client learns it is
    * banned/pending and shows the right screen.
    */
   function participationError(user: User): string | undefined {
@@ -1050,7 +1055,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     changes: Partial<Pick<User, "roles" | "banned" | "shadowBanned" | "pending" | "timeoutUntil">>,
   ): User {
     const next = UserSchema.parse({ ...user, ...changes });
+    const admitted = user.pending === true && next.pending !== true;
     store.upsertUser(next);
+    if (admitted) {
+      // Let in from the approval queue (approved, redeemed an invite, or promoted): the reaper measures
+      // "never used" from here, not from when the record joined the queue.
+      store.markUserAdmitted(user.id, Date.now());
+    }
     // Clearing works without deleting keys: a change like `timeoutUntil: undefined` is kept by Zod as an
     // undefined-valued key, Object.assign copies it onto the live record (so `isTimedOut` reads false), and
     // JSON.stringify omits it from what's persisted/broadcast.
@@ -1152,7 +1163,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       messageTtlMs:
         update.messageTtlMs === undefined ? channel.messageTtlMs : (update.messageTtlMs ?? undefined),
       // Stamp the metadata-change time so a peer that IMPORTED this channel can re-sync the rename/archive
-      // newer-wins (C1). Only ever applied to channels the peer marked as synced-origin (see syncWithPeer).
+      // newer-wins (docs/25 C1). Only ever applied to channels the peer marked as synced-origin (see syncWithPeer).
       updatedAt: Date.now(),
     });
     store.upsertChannel(next);
@@ -1394,7 +1405,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * exists, actor still in its audience, channel not archived). The create path enforces the same
    * rules via `channelPostingError` and the audience checks; this is their mirror for mutations, so a
    * state *transition* — a member removed from a private channel, a moderator timeout, an archive —
-   * can never be bypassed by editing or reacting to pre-transition messages (Sol review 2026-08-15).
+   * can never be bypassed by editing or reacting to pre-transition messages.
    *
    * `adminOverride` preserves the trusted-host moderation model for DELETE only: an admin may remove
    * content anywhere (including archived channels and private channels they aren't a member of),
@@ -1423,7 +1434,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
 
       // A runtime feature SHUTDOWN blocks edits — switching DMs or replies off must stop fresh
-      // content broadcasting through PATCH on pre-shutdown messages (Sol round 2, P1) — but not
+      // content broadcasting through PATCH on pre-shutdown messages — but not
       // deletes: removing content a disabled feature created is cleanup, not use of the feature.
       if (!opts.isDelete) {
         // An edit publishes new text, so it needs the member rules agreed like a new post does (someone who
@@ -1452,9 +1463,9 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
-    // A reaction has no channelId of its own — its conversation is its TARGET's. Without resolving
-    // it, deleting a reaction skipped every channel check (review finding: an ex-member or a user in
-    // an archived channel could still toggle reactions off via DELETE). A reaction on a vanished
+    // A reaction has no channelId of its own — its conversation is its TARGET's. Resolving it means
+    // deleting a reaction runs the channel checks too, so an ex-member or a user in an archived channel
+    // can't toggle reactions off via DELETE. A reaction on a vanished
     // target has no live conversation to protect — deleting it is pure cleanup, so it falls through.
     const channelScoped =
       target.type === "channelPost" || target.type === "channelReply"
@@ -1478,10 +1489,10 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         // The FULL "may write here, now" policy, not just the archived bit: a channel locked down
         // after the fact (allowPosting owner/admins, replies disabled, channel posting disabled
         // node-wide) must also stop edits of pre-lockdown content — otherwise lockdown doesn't stop
-        // content injection through PATCH (review finding). Reactions check their own posting rules
+        // content injection through PATCH. Reactions check their own posting rules
         // at create; for mutation purposes they inherit the target's channel state checked here.
         // Like the type-specific flags above, the node-wide shutdown blocks edits but not deletes.
-        if (!opts.isDelete && !appConfig.features.enablePublicChannels) {
+        if (!opts.isDelete && !channelOpenUnderFlags(channel)) {
           return { code: 403, error: "Channel posting is disabled on this LOAM node" };
         }
 
@@ -1578,6 +1589,12 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     return channel?.visibility === "private" ? channelMemberIds(channel) : undefined;
   }
 
+  /** Whether the node-wide channel flag leaves `channel` open to posts and edits: `enablePublicChannels`
+   *  covers the public channels only, never a private one. */
+  function channelOpenUnderFlags(channel: Channel): boolean {
+    return channel.visibility === "private" || appConfig.features.enablePublicChannels;
+  }
+
   /**
    * Validate input and create a new message record, or remove an existing reaction when toggled.
    *
@@ -1615,13 +1632,6 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
     if (authorRulesError) {
       return { error: authorRulesError, forbidden: true };
-    }
-
-    if (
-      (input.type === "channelPost" || input.type === "channelReply") &&
-      !appConfig.features.enablePublicChannels
-    ) {
-      return { error: "Channel posting is disabled on this LOAM node" };
     }
 
     if (input.type === "channelReply" && !appConfig.features.enableReplies) {
@@ -1668,6 +1678,13 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         return { error: "Channel does not exist" };
       }
 
+      // `enablePublicChannels` switches off the PUBLIC channels only: a private channel is governed by
+      // `enablePrivateChannels` (which gates creating new ones) and its own roster, and keeps working.
+      // Checked after the access check, so a non-member still can't tell a private channel exists.
+      if (!channelOpenUnderFlags(channel)) {
+        return { error: "Channel posting is disabled on this LOAM node" };
+      }
+
       const policyError = channelPostingError(channel, authorId, input.type === "channelReply");
 
       if (policyError) {
@@ -1711,8 +1728,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
 
       // A channel-scoped target is only reactable while the reactor can still write there: the
       // channel must exist, be accessible, and not be archived (archive = read-only). Mirrors
-      // channelPostingError for posts — without this, reactions were the one create path that
-      // ignored the channel's current state (Sol review 2026-08-15).
+      // channelPostingError for posts, so no create path ignores the channel's current state.
       if (target.type === "channelPost" || target.type === "channelReply") {
         const targetChannel = ensureChannel(target.channelId);
 
@@ -1808,7 +1824,14 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
           ? undefined
           : { markdown: appConfig.features.enableMarkdown, source: "human" as const },
     };
-    const message = MessageSchema.parse({ ...input, ...base });
+    // Each attachment is the upload's own record (checked above to be the author's pending upload), never
+    // the client's copy: a message that claimed another type, name or size for a file would point readers
+    // at a file that isn't there, and its deletion would remove the wrong path and leave the real one.
+    const pinnedAttachments =
+      input.type !== "reaction" && input.attachments?.length
+        ? { attachments: input.attachments.map((attachment) => attachmentOwners.get(attachment.id)?.attachment ?? attachment) }
+        : {};
+    const message = MessageSchema.parse({ ...input, ...pinnedAttachments, ...base });
     store.insertMessage(message);
     data.messages.push(message);
 
@@ -1850,16 +1873,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Loads persisted application data into memory: runs the one-time legacy JSON import, loads all
-   * tables, seeds default channels on first boot, ensures (non-admin) seed users — demoting any
-   * legacy admin seed, since admin now comes only from the bootstrap strategies — and ensures the
-   * Ollama bot user if configured.
+   * Loads persisted application data into memory: loads all tables, seeds default channels on first
+   * boot, ensures (non-admin) seed users — demoting any legacy admin seed, since admin now comes only
+   * from the bootstrap strategies — and ensures the Ollama bot user if configured.
    */
   function loadData(): void {
-    if (importLegacyJsonData(store, dataDir)) {
-      server.log.info("Imported legacy .loam JSON data into SQLite (originals renamed to *.json.bak)");
-    }
-
     // A row an older release wrote that no longer validates (e.g. an id past `ID_MAX_LENGTH`) is not fatal:
     // an upgraded node must still boot. The store repairs what it provably can (in memory) and QUARANTINES the
     // rest — not loaded, left on disk, and its id refused to every write (see `LoamStore.quarantine`).
@@ -2045,10 +2063,17 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Track a secret-guess attempt under the given key (session user id or IP) and report whether
-   * that key is over the limit for the current window.
+   * Track a secret-guess attempt (an admin claim, a panic token) from peer address `ip` and report whether
+   * it is over the limit for the current window. Two bounds:
+   *
+   * - `claimAttemptLimit` per ADDRESS. Not per IPv6 /64 like the HTTP limiter: a SLAAC LAN is one /64, and
+   *   keying on it let any member spend the bucket and lock everyone else, the operator's real panic token
+   *   included, out for the window, renewably.
+   * - `subnetAttemptFactor` times that per /64, so cycling addresses inside a subnet still doesn't buy
+   *   unlimited guesses. Only attempts the address bound let through count here, so one address can spend
+   *   at most its own share of it; locking a /64 out takes many addresses.
    */
-  function attemptRateLimited(attempts: Map<string, { count: number; resetAt: number }>, key: string): boolean {
+  function attemptRateLimited(attempts: Map<string, { count: number; resetAt: number }>, ip: string): boolean {
     const now = Date.now();
 
     // Opportunistic pruning so a long-lived node doesn't accumulate one entry per source IP forever.
@@ -2060,6 +2085,15 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
       }
     }
 
+    if (countAttempt(attempts, `address:${addressKey(ip)}`, claimAttemptLimit, now)) {
+      return true;
+    }
+    const subnet = ipv6SubnetKey(ip);
+    return subnet !== undefined && countAttempt(attempts, `subnet:${subnet}`, claimAttemptLimit * subnetAttemptFactor, now);
+  }
+
+  /** Count one attempt against `key`'s window and report whether that puts it over `limit`. */
+  function countAttempt(attempts: Map<string, { count: number; resetAt: number }>, key: string, limit: number, now: number): boolean {
     const entry = attempts.get(key);
 
     if (!entry || entry.resetAt <= now) {
@@ -2068,7 +2102,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     }
 
     entry.count += 1;
-    return entry.count > claimAttemptLimit;
+    return entry.count > limit;
   }
 
   /**
@@ -2076,7 +2110,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * the new-identity budget. Each keys on source IP and is written only on its semantic path, so
    * without periodic pruning a long-lived node facing many distinct peers would retain one dead entry
    * per IP forever. Runs on the 30s reaper timer, bounding growth to the IPs active within a single
-   * window rather than every IP ever seen (docs/15 #9). Behaviour is otherwise unchanged: an expired
+   * window rather than every IP ever seen (docs/15 #9). Pruning never changes behaviour: an expired
    * entry and a pruned one both reset on the next access.
    */
   function pruneExpiredRateLimiters(): void {
@@ -2118,7 +2152,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
     pruneTombstonesHorizon();
 
     const globalTtl = appConfig.retention.messageTtlMs;
-    // A channel may override the node default with its own `messageTtlMs` (P12). Fast-path out only when
+    // A channel may override the node default with its own `messageTtlMs`. Fast-path out only when
     // there is neither a global TTL nor any per-channel override, so a channel TTL works even with the
     // node default off.
     const anyChannelTtl = data.channels.some((channel) => channel.messageTtlMs);
@@ -2134,7 +2168,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
      * The retention TTL that applies to a channel: the shorter of its own `messageTtlMs` and the node default.
      * A channel TTL may only SHORTEN retention: the node-wide TTL is the
      * operator's ceiling, so a channel setting above it never keeps messages past it. With the node default
-     * off, the channel TTL stands alone (P12). `|| undefined` (not `??`) so a zero/NaN TTL is treated as
+     * off, the channel TTL stands alone. `|| undefined` (not `??`) so a zero/NaN TTL is treated as
      * OFF, never as "expire everything now" — a 0 would make `createdAt < now - 0` true for every message.
      */
     const ttlForChannel = (channelId: string | null | undefined): number | undefined => {
@@ -2287,7 +2321,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   }
 
   /**
-   * Boot-time sweep of avatar image files no user record references (review 2026-09-04). Avatars are
+   * Boot-time sweep of avatar image files no user record references. Avatars are
    * written to disk on upload and only ever removed with their user or by the kill switch — so any path
    * that drops user rows without touching the files (an ephemeral-mode restart deleting the DB, a
    * preserve-and-start-fresh recovery, a crash between the file write and the user upsert) strands
@@ -2320,7 +2354,7 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         continue;
       }
 
-      // Same in-flight grace as the attachment sweep (round-2 review): an upload writes its file BEFORE the
+      // Same in-flight grace as the attachment sweep: an upload writes its file BEFORE the
       // user record references it, so a file younger than the grace window is a live upload, not an orphan.
       const path = join(avatarsDir, fileName);
       const info = await stat(path).catch(() => undefined);
@@ -2371,27 +2405,46 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
    * curl, a HEAD) mints and persists a user record, which then sits on the People list and in the DM picker
    * for ever. A human record older than `unusedIdentityMaxAgeMs` that never agreed to the member rules,
    * neither wrote nor received a message, owns or belongs to no channel, holds no admin flag, role or
-   * moderation state, is not waiting in a greeter's queue (`pending`: such a person cannot agree to the rules
-   * until admitted), has no report still open in the moderators' queue (reporting, like reading and
+   * moderation state, has no report still open in the moderators' queue (reporting, like reading and
    * blocking, is allowed before agreeing), and has no socket open or mid-challenge is such a ghost. Its row,
    * sessions, identity tokens and mesh keypair go, with the rows that exist only for it (`deleteUser`: its
    * block-list rows, private-channel join requests and mesh address book), all in one transaction; a
    * returning cookie mints afresh, and clients drop it when they next reconcile the roster from
    * `GET /api/users`. Nothing is broadcast: nobody ever saw it do anything. Only meaningful while the rules
    * gate is on, since agreeing is the signal that a person is behind the record.
+   *
+   * On an approval-only node every newcomer is minted `pending` (waiting in a greeter's queue) and can't
+   * agree to the rules until admitted, so a probe there would wait in the queue for ever. A pending ghost
+   * (the same criteria) is therefore reaped too, after the longer `pendingIdentityMaxAgeMs`, and its queue
+   * entry goes with it (the queue is the pending records themselves). A pending record that did agree to
+   * the rules is a person waiting and is never reaped; nothing queues such a record today, so that guard is
+   * defensive. Once let in, a record's window starts again from the admission (`markUserAdmitted`), and a
+   * live bound transport session counts as connected like a socket does.
+   *
+   * A block is deliberately NOT a sign of use: the Welcome screen keeps a real member from blocking anyone
+   * before agreeing, so a block-list row on an unagreed record is a probe's, and counting it would let a
+   * probe keep itself alive by blocking someone. Its block rows go with it.
    */
   function reapUnusedIdentities(): void {
     if (!requireRulesAcceptance) {
       return;
     }
 
-    const cutoff = Date.now() - unusedIdentityMaxAgeMs;
+    const now = Date.now();
+    const cutoff = now - unusedIdentityMaxAgeMs;
+    const pendingCutoff = now - pendingIdentityMaxAgeMs;
     const connected = new Set<string>();
     for (const session of sockets) {
       connected.add(session.userId);
     }
     for (const pending of pendingSockets) {
       connected.add(pending.userId);
+    }
+    // A pinned client between socket connections (backgrounded, reconnecting) still holds a bound session.
+    for (const session of transportSessions.values()) {
+      if (session.authMode === "bound" && session.userId !== undefined && session.expiresAt > now) {
+        connected.add(session.userId);
+      }
     }
     const referenced = new Set<string>();
     for (const message of data.messages) {
@@ -2416,14 +2469,16 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
         user.rulesVersion === undefined &&
         !user.isAdmin &&
         !user.roles?.length &&
-        !user.pending &&
         !user.banned &&
         !user.shadowBanned &&
         user.timeoutUntil === undefined &&
-        user.createdAt < cutoff &&
+        user.createdAt < (user.pending ? pendingCutoff : cutoff) &&
         !connected.has(user.id) &&
         !referenced.has(user.id) &&
-        // Last, so only the few records that are otherwise ghosts cost a query (the indexed reporter column).
+        // Last, so only the few records that are otherwise ghosts cost a query each: someone let in from the
+        // approval queue gets the full window from that moment (they may have waited longer than it, and
+        // can't agree to the rules until they next open the app), and an open report keeps its reporter.
+        (store.userAdmittedAt(user.id) ?? Number.NEGATIVE_INFINITY) < cutoff &&
         store.countOpenReports(user.id) === 0,
     );
 
@@ -2556,11 +2611,11 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   void reapOrphanedAvatars().catch((error: unknown) => server.log.error(error));
 
   const reaperTimer = setInterval(() => {
-    // P1-2(c): once a fixed-key kill switch has handed off to the launcher for a restart, `store` is
-    // closed and its files are being (or already are) deleted — every one of these calls touches the
-    // store or the in-memory mirrors that `awaitingWipeRestart` deliberately froze at `{}` (RF1). A tick
-    // that lands in the gap between "wipe requested" and "process actually restarted" must be a pure
-    // no-op, not a crash against a closed handle or a resurrection of the frozen (empty) in-memory state.
+    // While a kill-switch wipe is in flight or has handed off to the launcher for a restart
+    // (`awaitingWipeRestart`), `store` may be closed and its files being (or already) deleted, and the
+    // in-memory mirrors are emptied — every one of these calls touches one or the other. A tick that lands
+    // in that window must be a pure no-op, not a crash against a closed handle or a resurrection of the
+    // emptied in-memory state.
     if (awaitingWipeRestart) {
       return;
     }
@@ -2588,8 +2643,8 @@ export async function buildApp(options: AppOptions): Promise<LoamApp> {
   // Sync ticker: a fixed 5s heartbeat; runSyncLoop itself enforces the configured interval (so an
   // admin shortening sync.intervalMs takes effect without re-arming a timer).
   const syncTimer = setInterval(() => {
-    // P1-2(c): same reasoning as the reaper gate above — a sync round touches the store and peer
-    // sessions, neither of which this process may read/write once a wipe-restart is pending.
+    // Same reasoning as the reaper gate above — a sync round touches the store and peer
+    // sessions, neither of which this process may read/write while the wipe gate is up.
     if (awaitingWipeRestart) {
       return;
     }

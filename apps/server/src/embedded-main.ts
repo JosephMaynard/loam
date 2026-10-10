@@ -19,7 +19,7 @@ process.env.NODE_ENV ??= "production";
 // does its real work asynchronously (load config, then `server.listen`), so a config-load or listen
 // failure surfaces as a REJECTED PROMISE well after `require()` has already returned: the launcher's
 // try/catch never sees it, the process just exits, and the host UI has nothing to show but its
-// multi-minute readiness-poll timeout (docs/15 A8). Report it instead over the same `global.__loam*`
+// multi-minute readiness-poll timeout. Report it instead over the same `global.__loam*`
 // bridge the on-device-LLM hook uses: `main.js` installs a function on `global` before requiring this
 // bundle (same pattern as `globalThis.__loamOnDeviceChat`), so the RN host screen gets a real error.
 
@@ -42,8 +42,8 @@ function reportBootError(message: string, code: string): void {
 
 /**
  * Best-effort: tell the RN host screen that boot succeeded, directly — independent of main.js's own
- * `/api/health` readiness poll (`waitForServer`/`retry`, P2, Sol round 4), which gives up after ~5
- * minutes and never restarts itself. Without a direct signal, a LATER successful boot (this file's own
+ * `/api/health` readiness poll (`waitForServer`/`retry`), which gives up after ~5 minutes. Without a
+ * direct signal, a LATER successful boot (this file's own
  * in-process retry after a `db_encryption_unreadable` recovery, possibly minutes after the original poll
  * gave up) would never tell RN it's ready: `startFreshBusy` stays stuck true and the WebView never
  * mounts, even though the server is actually healthy. Same install pattern as `__loamReportBootError`
@@ -64,7 +64,7 @@ function messageOf(error: unknown): string {
 }
 
 /**
- * The one error code (see `openInitialStore` in app.ts, P1-1) that means boot failed NON-destructively
+ * The one error code (see `openInitialStore` in store-lifecycle.ts) that means boot failed NON-destructively
  * — an encrypted DB the current key can't open, with no start-fresh confirmation on disk (yet) — as
  * opposed to every other boot failure, which is presumed unrecoverable without operator/developer
  * intervention outside this process. Recovery from THIS one specific failure is possible from right
@@ -77,18 +77,18 @@ const DB_ENCRYPTION_UNREADABLE_CODE = "db_encryption_unreadable";
 /**
  * The set of typed boot-error `.code`s that mean boot failed NON-destructively and RECOVERABLY from within
  * this same still-alive process — so, uniquely, the process must NOT be torn down (`process.exit`) for them:
- *  - `db_encryption_unreadable`          — an unopenable DB with no start-fresh confirmation (app.ts). The
+ *  - `db_encryption_unreadable`          — an unopenable DB with no start-fresh confirmation (store-lifecycle.ts). The
  *                                          RN launcher bridge (main.js's `loam-db-start-fresh`) recovers it.
  *  - `db_encryption_plaintext_unconverted` — an existing PLAINTEXT DB under a configured encrypted mode
- *                                          (P1-4-server, Sol round 8). The RN UI offers "delete data and
- *                                          start encrypted", which writes the same start-fresh marker.
- *  - `db_encryption_wipe_resume`         — the boot-time wipe-phase resume (P1-1, Sol round 8) either
+ *                                          The RN UI offers "delete data and start encrypted", which
+ *                                          writes the same start-fresh marker.
+ *  - `db_encryption_wipe_resume`         — the boot-time wipe-phase resume either
  *                                          re-ran deletion and handed off to the launcher for a key-clear +
  *                                          restart, or is still awaiting a durable deletion. Either way the
  *                                          imminent launcher restart / a later reopen drives it forward —
  *                                          exiting would kill the very listeners that finish it.
  *  - `db_encryption_driver_missing`      — an encrypted mode with a SQLCipher driver that won't load (the
- *                                          launcher's probe normally catches this first). app.ts already
+ *                                          launcher's probe normally catches this first). store-lifecycle.ts already
  *                                          reported the code; exiting would replace it with `boot_failed`
  *                                          and hide the "start without encryption" recovery.
  * In every other case boot is presumed unrecoverable without intervention outside this process, so it exits.
@@ -112,7 +112,7 @@ function hasStayAliveBootErrorCode(error: unknown): boolean {
   );
 }
 
-// RF2: guards against a re-entrant `bootEmbeddedServer()` call racing an already-in-flight one. Without
+// Guards against a re-entrant `bootEmbeddedServer()` call racing an already-in-flight one. Without
 // this, a double-tap of the RN launcher's "start fresh" button (or any duplicate `loam-db-start-fresh`
 // message — see main.js) could call `globalThis.__loamBootEmbeddedServer()` a second time while the
 // first retry's `buildApp()`/`server.listen()` is still mid-flight: two `listen()` calls race the same
@@ -123,7 +123,7 @@ function hasStayAliveBootErrorCode(error: unknown): boolean {
 // the work, instead of resolving early and racing ahead of it.
 let bootInFlight: Promise<void> | undefined;
 
-// P3 (Sol round 4): RF2's `bootInFlight` guard only protects against a re-entrant call while an attempt
+// The `bootInFlight` guard only protects against a re-entrant call while an attempt
 // is ACTUALLY running — it says nothing about what happened once that attempt settled. After a
 // successful recovery, `bootInFlight` clears (as it must, so a LATER genuinely-new failure can still
 // retry), but a DELAYED duplicate `loam-db-start-fresh` (e.g. two taps whose second message is still in
@@ -143,19 +143,19 @@ let bootState: BootState = "idle";
  * test can drive the failure path without booting a real nodejs-mobile/rn-bridge runtime; the real
  * entry point at the bottom of this file calls it with no arguments.
  *
- * Idempotent-safe to call more than once (P1-1, docs/15, Sol round 3): also exported on
+ * Idempotent-safe to call more than once: also exported on
  * `globalThis.__loamBootEmbeddedServer` (below) so `nodejs-project-template/main.js`'s
  * `loam-db-start-fresh` listener can re-invoke boot, in this SAME still-alive process, once the
  * operator has confirmed the start-fresh marker. A prior attempt that failed with
  * `db_encryption_unreadable` never reached `app.server.listen()`, so nothing is bound/leaked to redo —
  * a later successful call just picks up where the first one left off.
  *
- * Re-entrant-safe (RF2): a call made while a previous call is still running does not start a second
+ * Re-entrant-safe: a call made while a previous call is still running does not start a second
  * concurrent attempt — it just returns the SAME in-flight promise, so both callers observe the one
  * attempt's real outcome. The guard clears once that attempt settles (success, the recoverable
  * `db_encryption_unreadable` return, or the fatal `process.exit`), so a later, genuinely separate call
  * (e.g. a second start-fresh confirmation after the first attempt already finished) still boots — UNLESS
- * (P3) the settled state is already `"ready"`, in which case this no-ops instead: a server is already up
+ * the settled state is already `"ready"`, in which case this no-ops instead: a server is already up
  * and healthy, and a second `listen()` against its own port can only ever fail destructively.
  */
 export function bootEmbeddedServer(start: () => Promise<LoamApp> = startEmbeddedServer): Promise<void> {
@@ -164,7 +164,7 @@ export function bootEmbeddedServer(start: () => Promise<LoamApp> = startEmbedded
   }
 
   if (bootState === "ready") {
-    // No-op (P3): already healthy — nothing to retry, and retrying would only risk killing it.
+    // No-op: already healthy — nothing to retry, and retrying would only risk killing it.
     return Promise.resolve();
   }
 
@@ -200,8 +200,8 @@ async function runBootAttempt(start: () => Promise<LoamApp>): Promise<void> {
       }
     ).__loamEmergencyReset = () => app.emergencyReset();
     bootState = "ready";
-    // P2 (Sol round 4): tell RN directly, independent of main.js's own `/api/health` readiness poll
-    // (`waitForServer`/`retry`), which gives up after ~5 minutes and never restarts. Without this, a
+    // Tell RN directly, independent of main.js's own `/api/health` readiness poll
+    // (`waitForServer`/`retry`), which gives up after ~5 minutes. Without this, a
     // LATER successful boot (e.g. this very retry, minutes after the original poll gave up) would never
     // tell RN it's ready — the WebView never mounts and the operator is stuck on a stale error screen
     // even though the server is actually healthy. Idempotent on the RN side (see main.js's
@@ -211,15 +211,15 @@ async function runBootAttempt(start: () => Promise<LoamApp>): Promise<void> {
     console.error("Failed to start embedded LOAM server:", error);
 
     if (hasStayAliveBootErrorCode(error)) {
-      // FATAL, but recoverable without restarting the process (one of STAY_ALIVE_BOOT_ERROR_CODES —
-      // `db_encryption_unreadable`, `db_encryption_plaintext_unconverted`, or `db_encryption_wipe_resume`).
-      // `app.ts` already reported it over the SAME bridge, with the SAME code, immediately before throwing
+      // FATAL, but recoverable without restarting the process (one of STAY_ALIVE_BOOT_ERROR_CODES).
+      // store-lifecycle.ts already reported it over the SAME bridge immediately before throwing (the wipe
+      // resume as `kill_switch_wipe_incomplete` / `kill_switch_wipe_resumed`, the others under their own code)
       // — that report is what the RN host screen needs to show the right recovery action (start-fresh /
       // delete-and-encrypt) — so re-reporting here would just duplicate it. The one thing THIS layer
       // uniquely owns is deciding whether to exit — and, critically, it must NOT process.exit() for these:
       // the bridge listeners that recover from them (main.js's `loam-db-start-fresh` / the launcher's
       // wipe-restart handoff) live in THIS process, so exiting here would kill them before they could ever
-      // receive the message, permanently stranding the operator (the exact bug this redesign fixes).
+      // receive the message, permanently stranding the operator.
       bootState = "boot_recoverable";
       return;
     }

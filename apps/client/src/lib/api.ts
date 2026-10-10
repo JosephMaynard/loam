@@ -12,10 +12,10 @@ import { encryptedFetch } from "./transport";
 export const REQUEST_TIMEOUT_MS = 10_000;
 
 /**
- * A non-2xx reply from a LOAM endpoint. `message` is the localized, human-readable text (as before);
+ * A non-2xx reply from a LOAM endpoint. `message` is the localized, human-readable text;
  * `status` and the server's stable error `code` (when it sent one) let callers branch on WHAT failed
  * without string-matching that text — which is localized and server-supplied, so it can never be relied
- * on (pre-release review 2026-09-25: a `message.endsWith("404")` check never matched).
+ * on.
  */
 export class ApiError extends Error {
   readonly status: number;

@@ -9,7 +9,7 @@ import { buildApp, type AppOptions, type LoamApp } from "./app.js";
 import { openStore, type LoamStore } from "./db.js";
 
 // ---------------------------------------------------------------------------
-// Horizon-based tombstone GC (docs/15 #7).
+// Horizon-based tombstone GC.
 //
 // A tombstone is written on EVERY local delete (unconditionally — never gated on `sync.enabled`) so
 // node-to-node sync / mesh carriers can't re-hand a locally deleted message back. Left unbounded the

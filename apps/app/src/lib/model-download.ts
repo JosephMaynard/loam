@@ -7,6 +7,9 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { sha256 } from 'js-sha256';
 
+import { formatBytes } from './format-bytes';
+import { t } from './i18n';
+
 /** Where downloaded model files live — inside this app's own sandboxed document directory. */
 export const MODELS_DIR = `${FileSystem.documentDirectory}models/`;
 
@@ -18,7 +21,7 @@ export async function ensureModelsDir(): Promise<void> {
 }
 
 export type DownloadProgressCallback = (writtenBytes: number, totalBytes: number) => void;
-/** Hashing is a distinct, slower phase after the download completes (P2-4/AF7) — GB-scale files take
+/** Hashing is a distinct, slower phase after the download completes — GB-scale files take
  * real wall-clock time to stream through the hasher, so the UI needs its own progress signal rather
  * than looking hung between "download done" and "verified". */
 export type HashProgressCallback = (hashedBytes: number, totalBytes: number) => void;
@@ -69,7 +72,7 @@ export function isWithinModelsDir(uri: string): boolean {
   return resolved.length > 0;
 }
 
-/** Suffix for an in-progress download's on-disk name (P2-7 round 4) — see `downloadModel`'s doc
+/** Suffix for an in-progress download's on-disk name — see `downloadModel`'s doc
  * comment for why this exists, and `sweepOrphanedModelFiles` for the matching sweep-side handling. */
 const PARTIAL_SUFFIX = '.partial';
 
@@ -84,46 +87,41 @@ const PARTIAL_SUFFIX = '.partial';
  * Integrity check order:
  *   1. Exact byte size against `expectedSizeBytes` — cheap, always run, and the primary check. Catches
  *      truncated downloads and "the upstream file silently changed" just as well as a hash would.
- *   2. SHA-256 against `expectedSha256` — a real STREAMING check now (P2-4/AF7: it used to be capped at
- *      100MB and every catalog GGUF was far above that, so it never actually ran for a shipped model —
- *      see model-catalog.ts's `sha256` doc comment for that history). `expectedSha256` is only ever
- *      passed for CURATED catalog entries (see model-manager.tsx — a pasted custom URL always passes
- *      `undefined` here, since there's nothing to pin it against), so whenever it's present this now
- *      FAILS CLOSED: a mismatch, or a hashing failure of any kind (I/O error, OOM, etc.), deletes the
- *      file and rejects the download — never silently falls back to "size-check was enough". A custom
- *      URL with no pin gets exactly the same best-effort treatment as before (size + TLS only), plus the
- *      explicit "unverified" warning the model-manager UI already shows for it.
+ *   2. SHA-256 against `expectedSha256`, a STREAMING check with no size cap (see "streaming SHA-256"
+ *      below). `expectedSha256` is only ever passed for CURATED catalog entries (see model-manager.tsx —
+ *      a pasted custom URL always passes `undefined` here, since there's nothing to pin it against), so
+ *      whenever it's present this FAILS CLOSED: a mismatch, or a hashing failure of any kind (I/O error,
+ *      OOM, etc.), deletes the file and rejects the download — never silently falls back to "size-check
+ *      was enough". A custom URL with no pin gets best-effort treatment (size bound + TLS only), plus the
+ *      explicit "unverified" warning the model-manager UI shows for it.
  *
- * `.partial` staging (P2-7 round 4): the file lives at `<fileName>.partial` for the ENTIRE download +
- * verify, and is only renamed to its final `<fileName>` once every check above has passed. Before this
- * the file was written directly to its final name for the whole duration, which meant
- * `sweepOrphanedModelFiles` — run on first overlay open to reclaim orphans from a killed-mid-verify
- * process — could delete a download that was *currently in progress this session*: its destination
- * isn't yet in the `referencedUris` list (registration only happens after this function returns
- * `ok: true`), so the sweep's "unreferenced -> delete" logic couldn't tell it apart from an actual
- * orphan. `.partial` files are categorically exempt from that logic now (see
- * `sweepOrphanedModelFiles`), independent of the ALSO-fixed race in `model-manager.tsx` (the initial
- * sweep is now awaited before download controls are enabled) — either fix alone closes the race.
+ * `.partial` staging: the file lives at `<fileName>.partial` for the ENTIRE download + verify, and is
+ * only renamed to its final `<fileName>` once every check above has passed. `sweepOrphanedModelFiles`
+ * (run on first overlay open to reclaim orphans from a killed-mid-verify process) must never delete a
+ * download that is *in progress this session*, whose destination isn't yet in the `referencedUris` list
+ * (registration only happens after this function returns `ok: true`). `.partial` files are categorically
+ * exempt from its "unreferenced -> delete" logic (see `sweepOrphanedModelFiles`), independent of
+ * `model-manager.tsx` awaiting the initial sweep before enabling download controls; either guard alone
+ * closes the race.
  *
  * Either a fresh `createDownloadResumable` failure or a failed verification deletes the partial/bad
  * file before returning, so a rejected download never leaves junk behind.
  *
- * `maxBytes` (optional) BOUNDS the download by the free space that must remain (Finding B): custom
+ * `maxBytes` (optional) BOUNDS the download by the free space that must remain: custom
  * (pasted-URL) downloads have no `expectedSizeBytes` to pin against, so without this a large — or
  * dishonest — response could keep streaming until the device is nearly full. The caller passes a limit
  * computed from a FRESH free-space probe minus the required headroom (see `model-manager.tsx`); the
  * download is aborted and rejected the moment its declared size OR its cumulative written byte count
  * exceeds the limit (a final on-disk size check catches anything the progress callback missed). Absent
- * (`undefined`) leaves the download unbounded — the pre-Finding-B behaviour — but every caller now
- * passes one.
+ * (`undefined`) leaves the download unbounded, but every caller passes one.
  *
- * `signal` (optional) makes both phases CANCELLABLE (Sol's hash-performance/device-gate note): abort
+ * `signal` (optional) makes both phases CANCELLABLE: abort
  * it to stop an in-flight download outright, or to break out of the streaming hash loop between
  * chunks. Either way the outcome is treated exactly like a checksum mismatch — fail closed, delete
  * whatever bytes are on disk, return `ok: false` — so a cancel (e.g. the app being backgrounded mid-
  * verify, see `model-manager.tsx`) can never leave a partially-hashed file registered as valid. A hard
  * process kill has no JS-level hook at all; that case is instead made safe by construction, since
- * `model-manager.tsx` only ever registers a model in `model-manager-store.json` AFTER this function
+ * `model-manager.tsx` only ever registers a model in `loam-model-manager.json` AFTER this function
  * returns `ok: true` — a killed-mid-verify run leaves an unregistered `.partial` orphan, never a
  * "half-registered" final file (see `sweepOrphanedModelFiles` below, which age-reclaims those).
  */
@@ -141,19 +139,17 @@ export async function downloadModel(
   const finalUri = `${MODELS_DIR}${fileName}`;
   const destUri = `${finalUri}${PARTIAL_SUFFIX}`;
   if (!isWithinModelsDir(destUri) || !isWithinModelsDir(finalUri)) {
-    return { ok: false, error: 'Refusing to download: the resolved file name would escape the models directory.' };
+    return { ok: false, error: t('model.errOutsideDir') };
   }
   if (signal?.aborted) {
-    return { ok: false, error: 'Cancelled before the download started.' };
+    return { ok: false, error: t('model.errCancelledBeforeStart') };
   }
 
-  /** Uniform message when `maxBytes` is breached (Finding B) — the file was/would be too large for the
+  /** Uniform message when `maxBytes` is breached — the file was/would be too large for the
    * free space that must remain after headroom. */
-  const overLimitError = () =>
-    `The download exceeded the ${maxBytes} bytes of free space available (after reserving headroom) and ` +
-    'was stopped before it could fill the device.';
+  const overLimitError = () => t('model.errTooLarge', { size: formatBytes(maxBytes ?? null) });
 
-  // Set once the download's declared or written size crosses `maxBytes` (Finding B). Checked BEFORE the
+  // Set once the download's declared or written size crosses `maxBytes`. Checked BEFORE the
   // generic cancel/`!result` handling below so the failure reports the size limit, not a bare "cancelled".
   let exceededMax = false;
   const resumable = FileSystem.createDownloadResumable(url, destUri, {}, (data) => {
@@ -185,7 +181,7 @@ export async function downloadModel(
     signal?.removeEventListener('abort', onAbort);
     await safeDelete(destUri);
     // A `cancelAsync` triggered by the size limit can surface as a throw rather than a falsy resolve —
-    // report the size limit, not the raw stack (Finding B).
+    // report the size limit, not the raw stack.
     return { ok: false, error: exceededMax ? overLimitError() : error instanceof Error ? error.message : String(error) };
   }
   signal?.removeEventListener('abort', onAbort);
@@ -195,21 +191,21 @@ export async function downloadModel(
   }
   if (!result || signal?.aborted) {
     await safeDelete(destUri);
-    return { ok: false, error: 'The download was cancelled.' };
+    return { ok: false, error: t('model.errCancelled') };
   }
   if (result.status >= 400) {
     await safeDelete(destUri);
-    return { ok: false, error: `Server returned HTTP ${result.status}.` };
+    return { ok: false, error: t('model.errHttp', { status: result.status }) };
   }
 
   // `size` is always present on an existing-file result — no option needed to request it.
   const info = await FileSystem.getInfoAsync(destUri);
   if (!info.exists || info.isDirectory) {
-    return { ok: false, error: 'The downloaded file is missing.' };
+    return { ok: false, error: t('model.errMissing') };
   }
   const sizeBytes = info.size;
 
-  // Final backstop for the free-space bound (Finding B): if the file on disk is somehow larger than the
+  // Final backstop for the free-space bound: if the file on disk is somehow larger than the
   // limit despite the streaming guard above (e.g. the progress callback never fired), refuse it too.
   if (maxBytes !== undefined && sizeBytes > maxBytes) {
     await safeDelete(destUri);
@@ -220,14 +216,12 @@ export async function downloadModel(
     await safeDelete(destUri);
     return {
       ok: false,
-      error:
-        `Downloaded file size (${sizeBytes} bytes) doesn't match the expected ${expectedSizeBytes} ` +
-        'bytes: the download may be truncated, or the upstream file changed.',
+      error: t('model.errSizeMismatch', { actual: sizeBytes, expected: expectedSizeBytes }),
     };
   }
 
   if (expectedSha256) {
-    // FAIL CLOSED (P2-4/AF7): `expectedSha256` only ever arrives here for a curated catalog entry
+    // FAIL CLOSED: `expectedSha256` only ever arrives here for a curated catalog entry
     // (see this function's doc comment) — a mismatch OR a hashing failure both delete the file and
     // reject the download, never a silent fall-through to "the size check already passed". A cancel
     // via `signal` takes this same path (`verifySha256Streaming` returns `false` rather than throwing
@@ -242,10 +236,7 @@ export async function downloadModel(
       await safeDelete(destUri);
       return {
         ok: false,
-        error:
-          signal?.aborted
-            ? 'Verification was cancelled: the partial file was deleted.'
-            : 'SHA-256 checksum did not match (or could not be verified): the file was deleted.',
+        error: signal?.aborted ? t('model.errVerifyCancelled') : t('model.errChecksum'),
       };
     }
   }
@@ -253,7 +244,7 @@ export async function downloadModel(
   // Every check above passed — promote the verified `.partial` staging file to its final name. Only
   // from this point on does the file look like a normal registered model to `sweepOrphanedModelFiles`
   // (subject to the ordinary "unreferenced -> delete" check, same as any other final `.gguf`); that's
-  // fine because `model-manager.tsx` registers it in `model-manager-store.json` immediately after this
+  // fine because `model-manager.tsx` registers it in `loam-model-manager.json` immediately after this
   // returns `ok: true`.
   try {
     await FileSystem.deleteAsync(finalUri, { idempotent: true });
@@ -262,15 +253,15 @@ export async function downloadModel(
     await safeDelete(destUri);
     return {
       ok: false,
-      error: `Verified download, but couldn't finalize the file (${error instanceof Error ? error.message : String(error)}).`,
+      error: t('model.errFinalize', { error: error instanceof Error ? error.message : String(error) }),
     };
   }
 
   return { ok: true, uri: finalUri, sizeBytes };
 }
 
-/** A `.partial` staging file older than this is assumed abandoned by a killed/crashed process (P2-7
- * round 4). Nothing in a live session leaves a `.partial` sitting around this long without either
+/** A `.partial` staging file older than this is assumed abandoned by a killed/crashed process.
+ * Nothing in a live session leaves a `.partial` sitting around this long without either
  * finishing (renamed away by `downloadModel`) or being aborted (deleted by it) — this is the
  * age/session-ownership stand-in `sweepOrphanedModelFiles` uses instead of ever treating a `.partial`
  * as "just another unreferenced file". Deliberately conservative (an hour, not a minute) so a slow
@@ -280,25 +271,25 @@ const STALE_PARTIAL_AGE_MS = 60 * 60 * 1000;
 /**
  * Delete any unreferenced FINAL `.gguf` file inside `MODELS_DIR` (never a `.partial` staging file —
  * see below), plus any `.partial` old enough to be certainly abandoned. Cleans up an orphan left by a
- * download that finished writing bytes but was never registered in `model-manager-store.json` — most
+ * download that finished writing bytes but was never registered in `loam-model-manager.json` — most
  * notably a real process kill mid-verify, which (unlike an in-app-JS abort via `signal` in
  * `downloadModel`) has no hook this module can observe. Because registration only ever happens AFTER
  * `downloadModel` returns `ok: true` (at which point the file has already been renamed off its
  * `.partial` staging name — see there), an unreferenced FINAL file is by construction wasted storage,
  * never a "half-registered" model — this just reclaims the space.
  *
- * `.partial` files are handled separately and NEVER by the referenced-uris check (P2-7 round 4): a
- * download in progress THIS session has a destination that, by design, isn't in `referencedUris` yet
- * (it's only added to `model-manager-store.json` once the download finishes) — treating that the same
- * as an orphan is exactly the bug this split fixes (see `downloadModel`'s doc comment). Instead a
+ * `.partial` files are handled separately and NEVER by the referenced-uris check: a download in
+ * progress THIS session has a destination that, by design, isn't in `referencedUris` yet (it's only
+ * added to `loam-model-manager.json` once the download finishes), so it must not be treated as an
+ * orphan (see `downloadModel`'s doc comment). Instead a
  * `.partial` is only ever reclaimed once it's old enough (`STALE_PARTIAL_AGE_MS`) that it cannot
  * possibly still be an in-flight download.
  *
- * `pendingReferencedUris` (P2-b) is a SECOND do-not-sweep set, for files a durable pending action still
+ * `pendingReferencedUris` is a SECOND do-not-sweep set, for files a durable pending action still
  * references even though they're no longer in `referencedUris` (the `downloaded` list): most critically
  * a pending `'delete'`'s `fileUri`, whose bytes were deliberately kept because the launcher clear was
- * never confirmed. Sweeping such a file is exactly the dangling-pointer bug this guards against — the
- * launcher's config.json may STILL point at it. A pending `'setActive'`'s file is normally still in
+ * never confirmed. Sweeping such a file would leave a dangling pointer — the launcher's config.json may
+ * STILL point at it. A pending `'setActive'`'s file is normally still in
  * `downloaded` too, but is included here for good measure. Bytes are only ever reclaimed once the
  * corresponding clear/activate is CONFIRMED (reconciliation drops the pending entry then).
  *
@@ -340,14 +331,15 @@ export async function sweepOrphanedModelFiles(
 }
 
 /**
- * CHECKED, strict deletion for an IRREVERSIBLE model-byte removal (Finding 1). Unlike `safeDelete`
+ * CHECKED, strict deletion for an IRREVERSIBLE model-byte removal. Unlike `safeDelete`
  * below — which is deliberately best-effort and swallows EVERY error — this both PROPAGATES a
  * filesystem failure AND verifies the file is actually gone afterwards: a `deleteAsync` that resolves
  * while the bytes are still on disk (a driver quirk, a read-only mount, a stale handle) is treated as a
  * FAILURE and throws. Every caller that must not claim a model is "deleted" until its multi-GB GGUF is
  * genuinely reclaimed uses this — the delete transaction + reconciliation in `model-manager-actions.ts`
- * (which keep the durable delete-pending and retry on a throw) and the custom persist-failure cleanup in
- * `model-manager.tsx` (which retains the orphan URI and blocks another download until this succeeds). A
+ * (which keep the durable delete-pending and retry on a throw), and the persist-failure cleanup
+ * (`discardUnregisteredDownload`, for both catalog and custom downloads) plus `clearRetainedOrphans`
+ * below (which retain the orphan URI and block another download until this succeeds). A
  * silent no-op delete can therefore never leave an orphan while the UI or the journal report success.
  *
  * Idempotent (`{ idempotent: true }` plus the post-delete existence check): deleting an already-absent
@@ -356,20 +348,20 @@ export async function sweepOrphanedModelFiles(
  * and settles.
  */
 export async function deleteModelFileChecked(uri: string): Promise<void> {
-  // Path-traversal defense in depth (Finding C): never route a path outside MODELS_DIR into
+  // Path-traversal defense in depth: never route a path outside MODELS_DIR into
   // `deleteAsync`. A corrupted persisted-state file (or a bug upstream) must not be able to make this
   // unlink an unrelated file elsewhere in the app's document directory — refuse rather than delete.
   if (!isWithinModelsDir(uri)) {
-    throw new Error(`Refusing to delete a path outside the models directory: ${uri}`);
+    throw new Error(t('model.errDeleteOutsideDir'));
   }
   await FileSystem.deleteAsync(uri, { idempotent: true });
   const info = await FileSystem.getInfoAsync(uri);
   if (info.exists) {
-    throw new Error(`Failed to delete model file: ${uri} still exists after deletion.`);
+    throw new Error(t('model.errStillThere'));
   }
 }
 
-/** Best-effort deletion for GENUINELY discardable cleanup ONLY (Finding 1): failed/partial download
+/** Best-effort deletion for GENUINELY discardable cleanup ONLY: failed/partial download
  * staging files and orphan-sweep reclaims, where a delete that can't complete is harmless (the file is
  * already unreferenced and will be retried by a later sweep). It swallows every error and never verifies
  * — so it must NEVER be used for a delete whose success anything reports or depends on. Those use the
@@ -382,7 +374,7 @@ async function safeDelete(uri: string): Promise<void> {
   }
 }
 
-// ---- retained-orphan registry (Finding 2) ---------------------------------------------------------
+// ---- retained-orphan registry --------------------------------------------------------------------
 // A download whose bytes landed on disk but then failed BOTH to register in the model list AND to be
 // checked-deleted leaves a multi-GB orphan. Its URI is retained at MODULE level (survives the model-manager
 // overlay unmounting/remounting — component state would lose it) so the NEXT download attempt cleans it
@@ -394,7 +386,7 @@ async function safeDelete(uri: string): Promise<void> {
 
 const retainedOrphanUris = new Set<string>();
 
-/** Record a just-downloaded file whose registration AND checked cleanup both failed (Finding 2) so the next
+/** Record a just-downloaded file whose registration AND checked cleanup both failed so the next
  * download attempt re-attempts its deletion before starting. Prefer `discardUnregisteredDownload`, which
  * only retains after a cleanup actually fails; this is exposed for tests / direct callers. */
 export function retainOrphanUri(uri: string): void {
@@ -407,7 +399,7 @@ export function retainedOrphanCount(): number {
 }
 
 /**
- * Discard a just-downloaded file that couldn't be registered in the model list (Finding 2): CHECKED-delete
+ * Discard a just-downloaded file that couldn't be registered in the model list: CHECKED-delete
  * its bytes so no unreferenced final model accumulates. On success the file is gone and nothing is retained;
  * on a cleanup FAILURE the URI is retained in the module-level orphan set so the next download attempt
  * (`clearRetainedOrphans`) cleans it first. Never throws — returns whether the file was cleanly removed.
@@ -423,7 +415,7 @@ export async function discardUnregisteredDownload(uri: string): Promise<{ remove
 }
 
 /**
- * Before ANY new download, atomically clean EVERY retained orphan (Finding 2): CHECKED-delete each, dropping
+ * Before ANY new download, atomically clean EVERY retained orphan: CHECKED-delete each, dropping
  * it from the set ONLY on confirmed deletion. Returns `{ ok: true }` once the set is empty; `{ ok: false }`
  * (with the first failure's message) if any orphan still can't be removed — the caller MUST abort the new
  * download so orphans can never accumulate. Idempotent and safe to call before every download.
@@ -445,22 +437,22 @@ export async function clearRetainedOrphans(): Promise<{ ok: true } | { ok: false
     : { ok: false, error: firstError ?? 'a retained model file could not be removed' };
 }
 
-// ---- custom (pasted-URL) download validation & redaction (Finding 2) ------------------------------
+// ---- custom (pasted-URL) download validation & redaction -----------------------------------------
 
 /** The one trusted public host custom (pasted-URL) downloads are allowed to reach. The curated catalog
  * only ever uses `huggingface.co` (see model-catalog.ts), so this is the whole allowlist. */
 export const CUSTOM_DOWNLOAD_ALLOWED_HOST = 'huggingface.co';
 
 /**
- * Whether a pasted custom-URL host is on the allowlist. The previous approach — reject textual
- * loopback/link-local hosts — was NOT a real boundary: it was bypassed by the device's OWN LAN/hotspot
+ * Whether a pasted custom-URL host is on the allowlist. Rejecting textual loopback/link-local hosts
+ * would NOT be a real boundary: it is bypassed by the device's OWN LAN/hotspot
  * RFC1918 address (192.168.x.x, 10.x.x.x, 172.16/12), IPv6 ULA (fc00::/7), IPv4-mapped hex forms that
  * WHATWG URL normalization produces (`[::ffff:7f00:1]`), a public hostname that RESOLVES to a private
  * address (DNS rebinding), and a public URL that REDIRECTS to a local address (`createDownloadResumable`
  * follows redirects; validation only ever sees the original URL). The embedded server listens on
  * non-loopback interfaces, so any of those could aim a GET at `http://<device-lan-ip>/api/config` and
  * consume the one-time `firstUser` admin grant exactly like a loopback URL. The Expo downloader can't
- * enforce the final destination or redirect chain, so — per Sol's blessed fallback — we PIN custom
+ * enforce the final destination or redirect chain, so we PIN custom
  * downloads to an explicit HTTPS allowlist of trusted model hosts instead. Redirect-to-local is then out
  * of scope because the initial host is a trusted public domain, not because we inspect the hops.
  *
@@ -475,7 +467,7 @@ export function isAllowedCustomDownloadHost(hostname: string): boolean {
   return host === CUSTOM_DOWNLOAD_ALLOWED_HOST || host.endsWith(`.${CUSTOM_DOWNLOAD_ALLOWED_HOST}`);
 }
 
-/** Validated result of preparing a pasted custom-model URL (Finding 2). `downloadUrl` is the FULL
+/** Validated result of preparing a pasted custom-model URL. `downloadUrl` is the FULL
  * authorized URL to fetch with; `sourceUrl` is the REDACTED value to PERSIST (origin + pathname only —
  * never credentials or query); `displayName`/`fileName` are the sanitized on-disk name parts (`fileName`
  * has `.gguf` ensured, but NOT the per-download id prefix — the caller composes that). */
@@ -484,7 +476,7 @@ export type CustomModelUrlResult =
   | { ok: false; error: string };
 
 /**
- * Redact a custom model's `sourceUrl` down to `origin + pathname` (Finding 2 / Finding D). `URL.origin`
+ * Redact a custom model's `sourceUrl` down to `origin + pathname`. `URL.origin`
  * for an http(s) URL is `https://<host>[:port]` with NO userinfo, so this strips any embedded
  * credential (`user:pass@`), query string (`?token=…`), and fragment — leaving only a safe, display-
  * worthy path. This is the SINGLE source of truth for that redaction: `prepareCustomModelDownload`
@@ -502,37 +494,36 @@ export function redactCustomSourceUrl(sourceUrl: string): string {
 }
 
 /**
- * Parse, authorize, and redact a user-pasted custom-model URL (Finding 2) — a PURE function extracted
- * out of `model-manager.tsx`'s async press handler so its edge cases are unit-testable (the component's
- * `.tsx` isn't mounted by the node-only vitest harness). Fixes two bugs the inline version had:
+ * Parse, authorize, and redact a user-pasted custom-model URL — a PURE function, kept out of
+ * `model-manager.tsx`'s async press handler so its edge cases are unit-testable (the component's
+ * `.tsx` isn't mounted by the node-only vitest harness). Two edge cases it owns:
  *
  *   1. `decodeURIComponent` of the last path segment can THROW on a malformed percent-escape (a bare
- *      `%`, `%2`, …). Inline it sat OUTSIDE the URL-parse `try` inside a `try/finally`, so a
- *      syntactically valid URL like `https://huggingface.co/%` made the whole press handler reject with
- *      no useful status. Here it's wrapped and surfaces the same invalid-name message as any other bad
- *      name.
- *   2. Userinfo (`user:pass@host`) and a `?token=…` query both defeat the allowlist as a trust boundary
- *      and — worse — used to be PERSISTED verbatim as `sourceUrl` in the plain Expo JSON store, i.e.
- *      credentials/tokens at rest OUTSIDE SecureStore/SQLCipher. Userinfo is now REJECTED outright, and
- *      the persisted `sourceUrl` is reduced to `origin + pathname` (query + hash + any userinfo
- *      stripped). The FULL pasted URL is still returned as `downloadUrl` so the fetch itself is
- *      unaffected; `sourceUrl` isn't used for redownload, so redacting it is lossless.
+ *      `%`, `%2`, …), so a syntactically valid URL like `https://huggingface.co/%` must not reject the
+ *      press handler with no useful status. It's wrapped and surfaces the same invalid-name message as
+ *      any other bad name.
+ *   2. Userinfo (`user:pass@host`) and a `?token=…` query both defeat the allowlist as a trust boundary,
+ *      and persisting them verbatim as `sourceUrl` in the plain Expo JSON store would put
+ *      credentials/tokens at rest OUTSIDE SecureStore/SQLCipher. Userinfo is REJECTED outright, and the
+ *      persisted `sourceUrl` is reduced to `origin + pathname` (query + hash + any userinfo stripped).
+ *      The FULL pasted URL is still returned as `downloadUrl` so the fetch itself is unaffected;
+ *      `sourceUrl` isn't used for redownload, so redacting it is lossless.
  */
 export function prepareCustomModelDownload(rawUrl: string): CustomModelUrlResult {
   const trimmed = rawUrl.trim();
   if (!trimmed) {
-    return { ok: false, error: 'Enter a link to a .gguf model file.' };
+    return { ok: false, error: t('model.urlEmpty') };
   }
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
   } catch {
-    return { ok: false, error: "That doesn't look like a valid URL." };
+    return { ok: false, error: t('model.urlInvalid') };
   }
   // Require HTTPS AND an allowlisted host (see `isAllowedCustomDownloadHost`). `http:` is dropped
   // entirely for custom URLs.
   if (parsed.protocol !== 'https:') {
-    return { ok: false, error: 'Only https:// links are supported for custom models.' };
+    return { ok: false, error: t('model.urlHttps') };
   }
   // Reject userinfo BEFORE anything else trusts the host: `user:pass@huggingface.co` would otherwise
   // pass the allowlist (hostname is still `huggingface.co`) and smuggle a plaintext credential into the
@@ -540,13 +531,13 @@ export function prepareCustomModelDownload(rawUrl: string): CustomModelUrlResult
   if (parsed.username || parsed.password) {
     return {
       ok: false,
-      error: 'Remove the username/password from the link: credentials embedded in a URL are not allowed.',
+      error: t('model.urlCredentials'),
     };
   }
   if (!isAllowedCustomDownloadHost(parsed.hostname)) {
     return {
       ok: false,
-      error: `Custom downloads are limited to ${CUSTOM_DOWNLOAD_ALLOWED_HOST} (and its subdomains). Host the .gguf there, or request it be added to the catalog.`,
+      error: t('model.urlHost', { host: CUSTOM_DOWNLOAD_ALLOWED_HOST }),
     };
   }
 
@@ -559,10 +550,10 @@ export function prepareCustomModelDownload(rawUrl: string): CustomModelUrlResult
     const decodedName = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() ?? 'model') || 'model';
     guessedName = sanitizeModelFileName(decodedName);
   } catch {
-    return { ok: false, error: "That URL's file name isn't valid: try a direct link with a plain file name." };
+    return { ok: false, error: t('model.urlNameInvalid') };
   }
   if (!guessedName) {
-    return { ok: false, error: "That URL's file name isn't safe to use: try a direct link with a plain file name." };
+    return { ok: false, error: t('model.urlNameUnsafe') };
   }
 
   return {
@@ -577,25 +568,23 @@ export function prepareCustomModelDownload(rawUrl: string): CustomModelUrlResult
   };
 }
 
-// ---- streaming SHA-256 (P2-4/AF7) -----------------------------------------------------------------
-// Reading a multi-hundred-MB-to-multi-GB file into a single base64 string/byte array (the old
-// approach) risks exhausting heap or wedging the JS thread for a long time on a phone — GGUF models
-// here run 700MB-4.5GB. This reads the file in fixed-size chunks (via `readAsStringAsync`'s
-// `position`/`length` options, base64-encoded) and feeds each chunk into an INCREMENTAL js-sha256
-// hasher (`sha256.create()` + repeated `.update()`), so at most one chunk is ever held in memory at
-// once regardless of total file size — this is what actually makes verification runnable for every
-// catalog entry today, not just a future smaller model.
+// ---- streaming SHA-256 ---------------------------------------------------------------------------
+// Reading a multi-hundred-MB-to-multi-GB file into a single base64 string/byte array risks exhausting
+// heap or wedging the JS thread for a long time on a phone — GGUF models here run 700MB-4.5GB. This
+// reads the file in fixed-size chunks (via `readAsStringAsync`'s `position`/`length` options,
+// base64-encoded) and feeds each chunk into an INCREMENTAL js-sha256 hasher (`sha256.create()` +
+// repeated `.update()`), so at most one chunk is ever held in memory at once regardless of total file
+// size, which is what makes verification runnable for every catalog entry.
 const HASH_CHUNK_BYTES = 8 * 1024 * 1024; // 8MB per chunk — small enough to keep peak memory low,
 // large enough that a multi-GB file doesn't need thousands of round trips through the bridge.
 
 /** Stream-hash `uri` and compare against `expectedHex`. Throws on I/O error (deliberately — see
  * `downloadModel`'s FAIL CLOSED handling above; this function does NOT swallow I/O errors into a
- * `false`/`undefined` return the way the old best-effort version did). Returns `false` (not a throw)
- * when `signal` is aborted mid-loop — cancellation isn't an error, but `downloadModel` treats the two
- * identically (fail closed either way).
+ * `false`/`undefined` return). Returns `false` (not a throw) when `signal` is aborted mid-loop —
+ * cancellation isn't an error, but `downloadModel` treats the two identically (fail closed either way).
  *
- * DEVICE-VERIFY GATE (Sol, round 3 — not resolved by this change, just made as cheap as reasonable
- * without a native hash): the largest catalog entry is a 4.5GB GGUF, which means ~6GB of base64 text
+ * DEVICE-VERIFY GATE (open; this loop is only as cheap as is reasonable without a native hash): the
+ * largest catalog entry is a 4.5GB GGUF, which means ~6GB of base64 text
  * streamed through this loop across ~560 sequential 8MB reads. `base64ToBytes` below is the one part
  * of that loop worth hand-optimizing in JS (see its own comment); the fundamentally expensive part —
  * SHA-256 over multiple GB in RN's JS thread via `js-sha256`, with no native accelerator — is not
@@ -640,8 +629,8 @@ const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012345
 // Precomputed char-code -> 6-bit value lookup, built once at module load. `base64ToBytes` runs over
 // ~6GB of base64 text for the largest catalog entry (across ~8MB-base64-string chunks) — an
 // `indexOf` scan of a 64-char string per input character, PLUS a separate `.replace(/regex/)` pass to
-// strip non-alphabet characters first (the old approach), is two extra full passes over that much
-// text for no algorithmic reason. A flat lookup table turns each character into an O(1) array read,
+// strip non-alphabet characters first, would be two extra full passes over that much text for no
+// algorithmic reason. A flat lookup table turns each character into an O(1) array read,
 // and folding the "skip non-alphabet characters" check into the same loop removes the `.replace` pass
 // entirely — one pass over the string instead of three.
 const BASE64_LOOKUP = new Int16Array(128).fill(-1);
@@ -653,8 +642,8 @@ for (let i = 0; i < BASE64_CHARS.length; i += 1) {
  * Single pass over `base64` via the lookup table above rather than a `.replace()` pre-pass followed by
  * a per-character `.indexOf()` scan — see the table's comment for why that matters at this scale. */
 function base64ToBytes(base64: string): Uint8Array<ArrayBuffer> {
-  // Sized off the raw (unfiltered) length, same upper bound the old `clean.length`-based sizing used
-  // (padding/skipped characters only make this a slight overestimate); trimmed to the real length
+  // Sized off the raw (unfiltered) length, an upper bound (padding/skipped characters only make this
+  // a slight overestimate); trimmed to the real length
   // below via `subarray`, which is a view, not a copy.
   const bytes = new Uint8Array(Math.floor((base64.length * 6) / 8));
   let bitBuffer = 0;

@@ -116,7 +116,7 @@ Consequently:
   - the **Node ABI entry symbol `node_register_module_v108`** is DEFINED — this is the ABI-108 /
     Node-18 lock. (This binary is a **Node/V8 ABI addon, not N-API**; earlier revisions of this recipe
     wrongly checked for `napi_register_module_v1`, which this module does **not** export, so the check
-    could never fail. That was Sol round-8 finding P2-2 and is now fixed.)
+    could never fail. That was finding P2-2 of the eighth external review round and is now fixed.)
   - the MultipleCiphers/SQLCipher encryption exports `sqlite3_key`, `sqlite3_rekey`, `sqlite3mc_config`
     are DEFINED (plus `sqlite3_key_v2` / `sqlite3mc_config_cipher` when present);
   - the dynamic `NEEDED` set is the minimal expected `libnode.so` / `libm.so` / `libdl.so` / `libc.so`

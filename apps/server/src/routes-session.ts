@@ -1,5 +1,5 @@
-// Liveness, public bootstrap, authenticated config, and cookie session end. Extracted verbatim from
-// app.ts (2026-09-04 split) over the shared AppContext.
+// Liveness, public bootstrap, authenticated config, and cookie session end, registered over the shared
+// AppContext.
 import type { AppContext } from "./app-context.js";
 import { sessionCookieName } from "./defaults.js";
 import { readCookie } from "./identity.js";

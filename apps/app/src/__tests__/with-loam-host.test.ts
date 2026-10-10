@@ -9,7 +9,7 @@ import { delimiter, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { hotspotPermissionsToRequest } from "@/lib/hotspot-permissions";
+import { LOCATION_PERMISSION_MAX_SDK, hotspotPermissionsToRequest } from "@/lib/hotspot-permissions";
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const plugin = require("../../plugins/with-loam-host.js");
@@ -19,10 +19,13 @@ const {
   FINGERPRINT_FILE,
   HOTSPOT_PERMISSIONS,
   LEGACY_BLUETOOTH_PERMISSIONS,
+  LOCATION_MAX_SDK,
+  LOCATION_PERMISSIONS,
   NETWORK_SECURITY_CONFIG_RESOURCE,
   OPTIONAL_FEATURES,
   STALE_GUARD_GRADLE,
   addLegacyBluetoothPermissions,
+  capLocationPermissions,
   addOptionalFeatures,
   applyApplicationAttributes,
   applyMainActivityAttributes,
@@ -100,14 +103,50 @@ describe("with-loam-host: hotspot permissions", () => {
     expect(new Set(HOTSPOT_PERMISSIONS).size).toBe(HOTSPOT_PERMISSIONS.length);
   });
 
-  it("declares every permission the runtime request asks for, on every API level", () => {
+  it("declares every permission the runtime request asks for, on every API level, uncapped there", () => {
     // The manifest side and the JS side (src/lib/hotspot-permissions.ts) must agree, or the request for the
-    // missing one silently auto-denies (the API 33+ regression described in the plugin).
-    for (const apiLevel of [24, 30, 31, 32, 33, 35]) {
+    // missing one silently auto-denies (the API 33+ regression described in the plugin). Build the manifest
+    // the way the plugin does (plain names, then the location cap) and read each entry's maxSdkVersion.
+    const manifest = {
+      "uses-permission": HOTSPOT_PERMISSIONS.map((name: string) => ({ $: { "android:name": name } })),
+    };
+    capLocationPermissions(manifest);
+    const perms = manifest["uses-permission"] as { $: Record<string, string> }[];
+    for (const apiLevel of [24, 30, 31, 32, 33, 35, 36]) {
       for (const name of hotspotPermissionsToRequest(apiLevel)) {
-        expect(HOTSPOT_PERMISSIONS, `API ${apiLevel}: ${name}`).toContain(`android.permission.${name}`);
+        const entry = perms.find((permission) => permission.$["android:name"] === `android.permission.${name}`);
+        expect(entry, `API ${apiLevel}: ${name} declared`).toBeDefined();
+        const max = entry?.$["android:maxSdkVersion"];
+        if (max !== undefined) {
+          expect(Number(max), `API ${apiLevel}: ${name} capped below the level that requests it`).toBeGreaterThanOrEqual(apiLevel);
+        }
       }
     }
+  });
+
+  it("caps fine and coarse location at API 32, where the runtime request stops asking for them", () => {
+    expect(LOCATION_PERMISSIONS).toEqual([
+      "android.permission.ACCESS_FINE_LOCATION",
+      "android.permission.ACCESS_COARSE_LOCATION",
+    ]);
+    expect(LOCATION_MAX_SDK).toBe(String(LOCATION_PERMISSION_MAX_SDK));
+    const manifest = {
+      "uses-permission": [
+        { $: { "android:name": "android.permission.ACCESS_FINE_LOCATION" } },
+        { $: { "android:name": "android.permission.NEARBY_WIFI_DEVICES" } },
+      ],
+    };
+    capLocationPermissions(manifest);
+    capLocationPermissions(manifest);
+    const perms = manifest["uses-permission"] as { $: Record<string, string> }[];
+    expect(perms).toHaveLength(3);
+    for (const name of LOCATION_PERMISSIONS) {
+      const matches = perms.filter((permission) => permission.$["android:name"] === name);
+      expect(matches).toHaveLength(1);
+      expect(matches[0].$["android:maxSdkVersion"]).toBe("32");
+    }
+    const nearby = perms.find((permission) => permission.$["android:name"] === "android.permission.NEARBY_WIFI_DEVICES");
+    expect(nearby?.$["android:maxSdkVersion"]).toBeUndefined();
   });
 
   it("is not undone by app.json's blockedPermissions", () => {

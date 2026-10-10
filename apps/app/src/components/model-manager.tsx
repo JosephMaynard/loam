@@ -50,7 +50,7 @@ import { MODEL_CATALOG, type ModelCatalogEntry } from '@/lib/model-catalog';
 import {
   dispositionFromLoad,
   migrateLegacyCustomSourceUrls,
-  MODEL_LIST_UNREADABLE_MESSAGE,
+  modelListUnreadableMessage,
   mutateModelManagerState,
   pendingProtectedUris,
   readModelManagerState,
@@ -59,7 +59,7 @@ import {
 } from '@/lib/model-manager-store';
 
 /** In-flight download/verify progress, keyed by the same id used in `busy`/`state.downloaded`. `phase`
- * distinguishes the download from the (now real — P2-4/AF7) streaming-hash verification pass that
+ * distinguishes the download from the streaming-hash verification pass that
  * follows it for curated catalog entries, so the UI doesn't look hung between the two. */
 type ProgressMap = Record<string, { written: number; total: number; phase: 'download' | 'verify' }>;
 
@@ -71,17 +71,15 @@ type ProgressMap = Record<string, { written: number; total: number; phase: 'down
  * open after a fresh launch, so once is enough — see `model-download.ts`'s `sweepOrphanedModelFiles`
  * doc comment for why an orphan is safe to delete blindly (it was never registered as active).
  *
- * P2-7 round-4 fix: this used to be kicked off with `void` (fire-and-forget) while download controls
- * were already enabled, so a download started in the gap between "overlay opened" and "sweep
- * finished" could target a destination not yet in the `referencedUris` this sweep pass loaded — and
- * get deleted out from under `createDownloadResumable` mid-write. It's now AWAITED before
- * `sweepReady` flips true, and every download button is disabled until `sweepReady` is set (see the
- * `visible` effect and the button `disabled` props below). This is a second, independent guard on top
- * of `model-download.ts`'s `.partial`-suffix staging fix — either alone closes the race; both together
- * is cleanest (per the round-4 review note). */
+ * The sweep is AWAITED before `sweepReady` flips true, and every download button is disabled until
+ * `sweepReady` is set (see the `visible` effect and the button `disabled` props below): a download
+ * started while the sweep was still running could target a destination not in the `referencedUris`
+ * this sweep pass loaded, and be deleted out from under `createDownloadResumable` mid-write. This is a
+ * second, independent guard on top of `model-download.ts`'s `.partial`-suffix staging; either alone
+ * closes the race. */
 let orphanSweepDone = false;
 
-/** Runs the legacy custom-`sourceUrl` redaction migration (Finding D) at most once per process — like
+/** Runs the legacy custom-`sourceUrl` redaction migration at most once per process — like
  * `orphanSweepDone`, module-level so a remount doesn't re-run it. Strips any credential/`?token=…` an
  * older build persisted verbatim; a no-op when there's nothing to redact. */
 let legacyRedactionDone = false;
@@ -112,7 +110,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   const [progress, setProgress] = useState<ProgressMap>({});
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(new Set());
   const [customUrl, setCustomUrl] = useState('');
-  /** True while ANY download (catalog OR custom) is running ANYWHERE in the process (Sol P2: downloads are
+  /** True while ANY download (catalog OR custom) is running ANYWHERE in the process (downloads are
    * serialized by the MODULE-LEVEL `download-coordinator`, not by this component instance). Disables EVERY
    * download entry point — all catalog rows AND the "Add & download" button — for its duration, so two
    * downloads can never run against the same stale free-space snapshot or race the clean-first orphan guard.
@@ -122,32 +120,32 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    * `false` that would let it start a second concurrent download. */
   const [downloadInFlight, setDownloadInFlight] = useState(isDownloadActive);
   const [statusMessage, setStatusMessage] = useState<string | undefined>();
-  /** Gates every download-start control (P2-7 round 4) until the orphan sweep below has actually
+  /** Gates every download-start control until the orphan sweep below has actually
    * finished — initialized from the module-level flag so a remount after the sweep already ran once
    * doesn't re-block controls. */
   const [sweepReady, setSweepReady] = useState(orphanSweepDone);
   /** True while ANY activate/deactivate/delete transaction is running. Globally disables the
    * conflicting controls (Set active / Delete / Deactivate on every row, plus downloads) so two
-   * transactions can't be started concurrently (P2-2) — a UI-level complement to the mutex in
+   * transactions can't be started concurrently — a UI-level complement to the mutex in
    * `model-manager-actions.ts` that serializes them even if they somehow both start. */
   const [operationInFlight, setOperationInFlight] = useState(false);
-  /** True while durable pending actions (P2-b) remain unsettled after a reconciliation pass — the
+  /** True while durable pending actions remain unsettled after a reconciliation pass — the
    * launcher couldn't be reached to confirm one or more earlier writes. Disables the action controls
    * (like `operationInFlight`) and surfaces a banner, until a later reopen's reconcile settles them. */
   const [pendingUnsettled, setPendingUnsettled] = useState(false);
-  /** True when the persisted model list couldn't be READ on open (P1-4: `readModelManagerState` returned
+  /** True when the persisted model list couldn't be READ on open (`readModelManagerState` returned
    * `error` — an I/O failure or corruption that isn't a clean absence). The referenced-file set is
    * unknown, so the destructive orphan sweep is SKIPPED and the destructive controls (delete / set-active
    * / download) are BLOCKED, with a recovery banner — a transient read failure must never let the sweep
    * delete every downloaded `.gguf`. A later reopen retries the read and clears this. */
   const [loadFailed, setLoadFailed] = useState(false);
-  /** False once THIS overlay instance has unmounted (Sol P2). The download callbacks below `await`
+  /** False once THIS overlay instance has unmounted. The download callbacks below `await`
    * network/hash/persist work that can outlive the overlay — the host can transition `ready → error`
    * and tear this component down mid-download. Every setState reached AFTER an `await` in an async path
    * is guarded on this, so no state update ever runs against an unmounted overlay (React would warn, and
    * more importantly the write is meaningless). */
   const mountedRef = useRef(true);
-  /** A STABLE per-instance owner token for the download coordinator (Sol Fable-round-5 P2). The coordinator
+  /** A STABLE per-instance owner token for the download coordinator. The coordinator
    * records it SYNCHRONOUSLY at mutex acquisition (before its orphan-cleanup await), so the unmount effect can
    * `abortDownloadOwnedBy(token)` to cancel a download THIS instance started even if the overlay unmounts
    * during that cleanup window — and can never abort a download some other instance owns. `useRef` with an
@@ -163,11 +161,11 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       mutate: mutateModelManagerState,
       setActiveModel: (request) => setActiveModel(channel, request),
       clearActiveModel: () => clearActiveModel(channel),
-      // CHECKED delete (Finding 1): the transaction relies on a byte-delete failure THROWING so it keeps
+      // CHECKED delete: the transaction relies on a byte-delete failure THROWING so it keeps
       // the durable delete-pending and retries, rather than reporting a model deleted while its file
       // silently remains on disk.
       deleteModelFile: deleteModelFileChecked,
-      // The single-actor engine's target-aware synchronization (Fable-round-7). `reconcileActiveModel` is
+      // The single-actor engine's target-aware synchronization. `reconcileActiveModel` is
       // called after every DURABLE activeId outcome (release a now-stale loaded context, converge to the
       // target); `invalidateStaleLoad` runs at persist time BEFORE the fallible bridge (abandon an in-flight
       // load of the old model without releasing the loaded one, so a rollback can't destroy it); and
@@ -188,11 +186,11 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     }
     let cancelled = false;
     void (async () => {
-      // RF6-d (Sol round 6): the whole open-effect body is wrapped so a rejection from ANY of
-      // `probeDeviceCapabilities`/`loadModelManagerState`/`reconcilePendingActions`/
+      // The whole open-effect body is wrapped so a rejection from ANY of
+      // `probeDeviceCapabilities`/`readModelManagerState`/`reconcilePendingActions`/
       // `sweepOrphanedModelFiles` can't skip the `setSweepReady(true)` below — which would leave every
       // download/action control permanently disabled AND surface an unhandled promise rejection. The
-      // `finally` always flips `sweepReady` (the `.partial`-suffix staging fix in model-download.ts is
+      // `finally` always flips `sweepReady` (the `.partial`-suffix staging in model-download.ts is
       // the independent guard that keeps enabling controls after a FAILED sweep safe).
       try {
         const [caps, loaded] = await Promise.all([probeDeviceCapabilities(), readModelManagerState()]);
@@ -200,7 +198,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
           setCapabilities(caps);
         }
 
-        // P1-4: turn the discriminated load result into a disposition. On `error` (couldn't read the
+        // Turn the discriminated load result into a disposition. On `error` (couldn't read the
         // state — an I/O failure or corruption, NOT a clean absence) the referenced-file set is unknown,
         // so `canSweep` is false and `controlsBlocked` is true: we must NOT run the destructive orphan
         // sweep (it would treat every `.gguf` as orphaned) and must block the destructive controls, with
@@ -220,7 +218,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
           return;
         }
 
-        // Finding D: durably strip any credential/`?token=…` an older build persisted verbatim in a
+        // Durably strip any credential/`?token=…` an older build persisted verbatim in a
         // custom model's `sourceUrl`. Once per process, and a no-op (no write) when nothing needs
         // redacting. `normalizeState` already redacted the in-memory `disposition.state` shown above;
         // this is purely the durable disk rewrite so the plaintext secret is removed on upgrade.
@@ -229,7 +227,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
           await migrateLegacyCustomSourceUrls();
         }
 
-        // Reconcile durable pending actions FIRST (P2-b), before the orphan sweep runs or any control is
+        // Reconcile durable pending actions FIRST, before the orphan sweep runs or any control is
         // enabled: re-send each unconfirmed launcher write (idempotent) and settle it. If every retry
         // still times out, the pending set survives and the affected files stay protected below. `current`
         // is the post-reconcile state the sweep and UI must use.
@@ -237,7 +235,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         if ((current.pending ?? []).length > 0) {
           const reconciled = await reconcilePendingActions(actionDeps);
           if (reconciled.unreadable) {
-            // RF7-b: reconcile's OWN state read refused (a transient I/O error / corruption AFTER this
+            // Reconcile's OWN state read refused (a transient I/O error / corruption AFTER this
             // open's initial load). Its returned `state` is an untrusted EMPTY_STATE — adopting it and
             // sweeping against it would delete every downloaded model. Treat it EXACTLY like the
             // direct-load `error` path: keep the last good state on screen (already set above), BLOCK the
@@ -246,7 +244,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
             // `sweepReady`, so the "Preparing…" note clears while downloads stay gated by `loadFailed`.
             if (!cancelled) {
               setLoadFailed(true);
-              setStatusMessage(reconciled.message ?? MODEL_LIST_UNREADABLE_MESSAGE);
+              setStatusMessage(reconciled.message ?? modelListUnreadableMessage());
             }
             return;
           }
@@ -263,11 +261,10 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         }
 
         if (!orphanSweepDone) {
-          // AWAITED (P2-7 round 4, was fire-and-forget `void`): reclaim any `.gguf` left behind by a
-          // download whose verify/registration never finished because the app process was killed
-          // mid-way (hash-performance device-verify note — see model-download.ts). Download controls
+          // AWAITED: reclaim any `.gguf` left behind by a download whose verify/registration never
+          // finished because the app process was killed mid-way (see model-download.ts). Download controls
           // stay disabled (see `sweepReady` below) until this resolves, so nothing can start a download
-          // whose destination this sweep pass might treat as unreferenced. The second arg (P2-b) keeps any
+          // whose destination this sweep pass might treat as unreferenced. The second arg keeps any
           // file a still-unsettled pending action references — most critically a pending `delete`'s
           // kept-for-now bytes — from being swept while the launcher may still point at it.
           await sweepOrphanedModelFiles(
@@ -278,7 +275,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         }
       } catch (error) {
         if (!cancelled) {
-          // Finding A: preparation failed (probe / read / pending reconciliation / sweep rejected). The
+          // Preparation failed (probe / read / pending reconciliation / sweep rejected). The
           // `finally` below still flips `sweepReady` true so the "Preparing…" note clears, but a
           // reconciliation that couldn't confirm durable pending intent means destructive operations
           // (activate/deactivate/delete/download) must stay BLOCKED — otherwise they'd become available
@@ -300,11 +297,10 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   }, [visible, actionDeps]);
 
   // Cancel the in-flight download/verify when the app is backgrounded, rather than letting it keep
-  // running unattended (hash-performance device-verify note): Android can suspend or kill a
-  // backgrounded app's JS thread at any time, and a multi-GB hash left running unobserved is exactly
-  // the "corrupt state mid-verify" scenario Sol flagged. Aborting routes through the same fail-closed
-  // path as a checksum mismatch (see model-download.ts), so it always deletes the partial file rather
-  // than leaving something half-verified. Routed through the coordinator (Sol P2) so it aborts the one
+  // running unattended: Android can suspend or kill a backgrounded app's JS thread at any time, and a
+  // multi-GB hash left running unobserved risks a corrupt state mid-verify. Aborting routes through the
+  // same fail-closed path as a checksum mismatch (see model-download.ts), so it always deletes the partial
+  // file rather than leaving something half-verified. Routed through the coordinator so it aborts the one
   // process-global transaction — without releasing the mutex, which frees only when the aborted
   // transaction settles.
   useEffect(() => {
@@ -316,7 +312,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     return () => subscription.remove();
   }, []);
 
-  // Keep `downloadInFlight` in sync with the MODULE-LEVEL coordinator (Sol P2) so this overlay's download
+  // Keep `downloadInFlight` in sync with the MODULE-LEVEL coordinator so this overlay's download
   // controls reflect the true process-wide in-flight state — including a transaction a PRIOR overlay
   // instance started and that is still settling after this instance mounted. Reconcile once on mount (the
   // subscription can't replay an event that fired before it existed), then on every change.
@@ -327,7 +323,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   }, []);
 
   // On mount SET `mountedRef` true, and on unmount (a `ready → error` host transition tears the whole overlay
-  // down — see app/index.tsx) set it false AND abort a download THIS instance owns (Sol P2). Setting true in
+  // down — see app/index.tsx) set it false AND abort a download THIS instance owns. Setting true in
   // the effect SETUP (not only the one-time `useRef(true)`) is required for React StrictMode: its dev-mode
   // mount → cleanup → remount replay runs the cleanup (which sets false) and, without this, would leave the
   // remounted overlay permanently `mountedRef=false`, silently swallowing every guarded setState. Aborting by
@@ -345,7 +341,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   }, []);
 
   // These three are called from the async download path AFTER `await`s (progress ticks, busy toggles),
-  // so each is guarded on `mountedRef` (Sol P2) — a download that outlives the overlay must not push
+  // so each is guarded on `mountedRef` — a download that outlives the overlay must not push
   // state into an unmounted component.
   const setBusy = (id: string, isBusy: boolean) => {
     if (!mountedRef.current) {
@@ -383,7 +379,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     });
   };
 
-  /** Guarded `setStatusMessage` for the async download paths (Sol P2): a status update reached after an
+  /** Guarded `setStatusMessage` for the async download paths: a status update reached after an
    * `await` must no-op once the overlay has unmounted. Synchronous (pre-await) status sets call
    * `setStatusMessage` directly — the overlay is definitionally still mounted then. */
   const setStatusMessageIfMounted = (message: string) => {
@@ -394,22 +390,21 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
 
   /**
    * Apply `mutate` on top of whatever is CURRENTLY persisted — never on top of this component's
-   * possibly-stale `managerState` snapshot (P2-4: two downloads/activations finishing back-to-back
-   * used to each build their next state from the state captured when THEIR OWN async op started, so
-   * the last one to finish silently erased the other's write). `mutateModelManagerState` serializes
-   * this against every other in-flight mutation and writes atomically; a failed write is surfaced
-   * here (not swallowed) rather than letting the caller report success on a change that never landed.
+   * possibly-stale `managerState` snapshot, since two downloads/activations finishing back-to-back
+   * would otherwise each build their next state from the state captured when THEIR OWN async op
+   * started, and the last one to finish would silently erase the other's write.
+   * `mutateModelManagerState` serializes this against every other in-flight mutation and writes
+   * atomically; a failed write is surfaced here (not swallowed) rather than letting the caller report
+   * success on a change that never landed.
    *
    * Only adopts the mutated result into the component's `managerState` when the write actually
-   * landed (round-4 fix, adjacent to P2-4): the previous version called `setManagerState(state)`
-   * UNCONDITIONALLY, so a failed disk write still left the on-screen state showing the optimistic
-   * (never-persisted) mutation — a divergence between what's on screen and what's on disk, even
-   * before any bridge call. Every caller already bails out on `!persisted` before doing anything
-   * further, so leaving `managerState` untouched here is enough to keep the UI honest.
+   * landed, so a failed disk write never leaves the screen showing an optimistic (never-persisted)
+   * mutation. Every caller already bails out on `!persisted` before doing anything further, so leaving
+   * `managerState` untouched here is enough to keep the UI honest.
    */
   const persist = async (mutate: (current: ModelManagerState) => ModelManagerState): Promise<boolean> => {
     const { state, persisted } = await mutateModelManagerState(mutate);
-    // Guarded on `mountedRef` (Sol P2): `persist` is only ever called from the async download bodies, which
+    // Guarded on `mountedRef`: `persist` is only ever called from the async download bodies, which
     // can outlive this overlay if the host tears it down mid-download — the write still lands on disk
     // (`mutateModelManagerState` is process-global), we just don't push it into an unmounted component.
     if (mountedRef.current) {
@@ -425,8 +420,8 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   /** Run one serialized activate/deactivate/delete transaction (see `model-manager-actions.ts`),
    * flipping `operationInFlight` (and the acting row's `busy`) around it and adopting the resulting
    * state + status message. All rollback / timeout-ambiguity handling lives in the transaction; here we
-   * only surface its outcome. Returns the transaction's `ModelActionResult` so callers can react to the
-   * confirmed-`'ok'` outcome — e.g. releasing the native context after a deactivate/active-delete (Fix 2). */
+   * only surface its outcome. Returns the transaction's `ModelActionResult`; the native-context release
+   * after a deactivate/delete runs inside the transaction, so no caller needs to act on it. */
   const runOperation = async (
     busyId: string | undefined,
     action: () => Promise<ModelActionResult>,
@@ -439,7 +434,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       const outcome = await action();
       if (outcome.state) {
         setManagerState(outcome.state);
-        // An ambiguous op leaves a durable pending action (P2-b); reflect that so the controls gate and
+        // An ambiguous op leaves a durable pending action; reflect that so the controls gate and
         // the next reopen reconciles it. A clean op (`state.pending` empty) clears the gate.
         setPendingUnsettled((outcome.state.pending ?? []).length > 0);
       }
@@ -454,7 +449,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
   };
 
   /**
-   * Shared download transaction for BOTH the catalog and custom paths (Sol P2). Serialization now lives in
+   * Shared download transaction for BOTH the catalog and custom paths. Serialization lives in
    * the MODULE-LEVEL `download-coordinator` (`runDownload`) rather than in this component instance, so it
    * survives a `ready → error → ready` host transition that unmounts and remounts the overlay mid-download:
    *   1. `runDownload` REFUSES a second transaction process-wide — a same-tick double tap (another catalog
@@ -469,11 +464,11 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
    *      if below the floor for `sizeForStorageCheck` (the exact size for a catalog entry; 0 = the headroom
    *      floor for a custom URL whose size isn't known ahead of time).
    *   4. `body` (the actual download + registration) runs inside try/catch/finally so ANY throw still clears
-   *      the busy row and progress — the catalog path had no such guard before.
+   *      the busy row and progress.
    * `body` receives the transaction's `AbortSignal`; it does the download + registration and returns nothing.
    * The transaction is tagged with this instance's `downloadOwnerRef` token, established SYNCHRONOUSLY by the
    * coordinator, so the unmount effect can abort THIS instance's transaction even if the overlay unmounts
-   * during the coordinator's orphan-cleanup window (Sol Fable-round-5 P2).
+   * during the coordinator's orphan-cleanup window.
    */
   const runDownloadTransaction = async (
     id: string,
@@ -481,9 +476,9 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     body: (signal: AbortSignal, maxBytes: number) => Promise<void>,
   ): Promise<void> => {
     const outcome = await runDownload(downloadOwnerRef.current, async (signal) => {
-      // Keep the screen awake for the WHOLE accepted download + verify (device-test round 2): a multi-GB
-      // download plus a slow hash pass, and if the screen sleeps Android backgrounds the app and the
-      // AppState listener above aborts the download — exactly why long downloads kept failing. Activate
+      // Keep the screen awake for the WHOLE accepted download + verify: a multi-GB download plus a slow
+      // hash pass, and if the screen sleeps Android backgrounds the app and the AppState listener above
+      // aborts the download. Activate
       // INSIDE the accepted callback (not before `runDownload`): the keep-awake tag is shared and NOT
       // ref-counted, so a REFUSED same-tick double-tap / remounted overlay — whose transaction never runs —
       // must not toggle it; otherwise that loser's release (a plain `.finally`) would clear the tag out from
@@ -491,7 +486,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       // blocks the download; it's released in the `finally` below when THIS accepted download settles.
       await activateKeepAwakeAsync(MODEL_DOWNLOAD_KEEP_AWAKE_TAG).catch(() => undefined);
       try {
-        // Re-probe free storage immediately before the download (Sol P2) rather than trusting the open-time
+        // Re-probe free storage immediately before the download rather than trusting the open-time
         // snapshot, which other app activity could have invalidated.
         const caps = await probeDeviceCapabilities();
         if (mountedRef.current) {
@@ -501,7 +496,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
           setStatusMessageIfMounted(t('model.noStorage', { free: formatBytes(caps.freeStorageBytes) }));
           return;
         }
-        // Bound the download by the free space that must remain AFTER the required headroom (Finding B):
+        // Bound the download by the free space that must remain AFTER the required headroom:
         // passed into `downloadModel` so a custom (unpinned) URL — or any oversized/lying response — is
         // stopped before it can fill the device, not just gated up front. `storageFit` already rejected a
         // null `freeStorageBytes` above, so the `?? 0` is a type guard, not a real fallback.
@@ -532,11 +527,10 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     }
   };
 
-  /** Download one curated catalog entry into `<id>.gguf`, verifying size + (now real — P2-4/AF7)
-   * streaming SHA-256, fail-closed on a mismatch or a hashing failure. Runs inside the shared
-   * `runDownloadTransaction` (Finding 2): globally serialized, retained-orphan-cleaned, storage re-probed,
-   * and its busy/progress/controller state always torn down even on a throw (the catalog path had no such
-   * guard before). On a registration failure the just-downloaded file is CHECKED-deleted
+  /** Download one curated catalog entry into `<id>.gguf`, verifying size + streaming SHA-256,
+   * fail-closed on a mismatch or a hashing failure. Runs inside the shared `runDownloadTransaction`:
+   * globally serialized, retained-orphan-cleaned, storage re-probed, and its busy/progress/controller
+   * state always torn down even on a throw. On a registration failure the just-downloaded file is CHECKED-deleted
    * (`discardUnregisteredDownload`), retaining its URI only if that cleanup itself fails. */
   const handleDownloadCatalogEntry = (entry: ModelCatalogEntry) =>
     runDownloadTransaction(entry.id, entry.sizeBytes, async (signal, maxBytes) => {
@@ -555,10 +549,10 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         entry.sha256,
         (written, total) => setModelProgress(entry.id, written, total > 0 ? total : entry.sizeBytes, 'download'),
         // Hashing a multi-GB file is slow — show its own progress rather than looking hung once the
-        // download bar completes (P2-4/AF7).
+        // download bar completes.
         (hashed, total) => setModelProgress(entry.id, hashed, total, 'verify'),
         signal,
-        // Bound by remaining free space (Finding B). `storageFit` above already guaranteed
+        // Bound by remaining free space. `storageFit` above already guaranteed
         // `entry.sizeBytes + headroom` fits, so this never wrongly caps a legit catalog download.
         maxBytes,
       );
@@ -586,16 +580,15 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       }
       // Registration failed and the one-per-process orphan sweep already ran, so the just-downloaded file is
       // unreferenced right now. Discard it (CHECKED) so nothing accumulates; if the checked cleanup itself
-      // fails, its URI is retained for the next attempt to clean first (Finding 2) — this closes the gap
-      // where a catalog persist-failure did no cleanup and retained nothing, orphaning the file.
+      // fails, its URI is retained for the next attempt to clean first, so the file is never orphaned.
       const discard = await discardUnregisteredDownload(outcome.uri);
       setStatusMessageIfMounted(unregisteredMessage(entry.displayName, discard));
     });
 
   /** Download a user-pasted URL — no size/hash to verify against, so it's always best-effort + warned.
-   * URL parsing/authorization/redaction is the pure `prepareCustomModelDownload` (Finding 2 — malformed
+   * URL parsing/authorization/redaction is the pure `prepareCustomModelDownload` (malformed
    * percent-escapes, userinfo, and credential/token redaction of the persisted `sourceUrl`); the shared
-   * `runDownloadTransaction` provides the process-global single-download guard (Sol P2), the clean-first
+   * `runDownloadTransaction` provides the process-global single-download guard, the clean-first
    * orphan guard, the storage re-probe, and the always-torn-down busy/progress state. A persist failure
    * after a successful download discards the orphaned file with a CHECKED delete
    * (`discardUnregisteredDownload`), retaining its URI to block another download only if that cleanup fails. */
@@ -622,7 +615,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         undefined,
         signal,
         // Custom URLs have no pinned size, so this free-space bound is the ONLY upper limit on how much
-        // a large/dishonest response can write (Finding B).
+        // a large/dishonest response can write.
         maxBytes,
       );
       if (!outcome.ok) {
@@ -635,15 +628,15 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
         uri: outcome.uri,
         sizeBytes: outcome.sizeBytes,
         isCustom: true,
-        // REDACTED (Finding 2): origin+pathname only — never the pasted URL's credentials/query/hash.
+        // REDACTED: origin+pathname only — never the pasted URL's credentials/query/hash.
         sourceUrl: prepared.sourceUrl,
         downloadedAt: Date.now(),
       };
       const persisted = await persist((current) => ({ ...current, downloaded: [...current.downloaded, model] }));
       if (persisted) {
         // Clear the input only on a fully successful download+persist — a persistence failure keeps the
-        // entered URL so the operator can retry without re-typing it (CodeRabbit). Guarded: this runs after
-        // the download `await`, which can outlive the overlay (Sol P2).
+        // entered URL so the operator can retry without re-typing it. Guarded: this runs after
+        // the download `await`, which can outlive the overlay.
         if (mountedRef.current) {
           setCustomUrl('');
         }
@@ -652,23 +645,12 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
       }
       // Registration failed: discard the orphaned final `.gguf` (CHECKED) BEFORE offering retry so no
       // unreferenced model accumulates; if the checked cleanup itself fails the URI is retained to block
-      // (and be cleaned first by) the next download (Finding 2).
+      // (and be cleaned first by) the next download.
       const discard = await discardUnregisteredDownload(outcome.uri);
       setStatusMessageIfMounted(unregisteredMessage(prepared.displayName, discard));
     });
   };
 
-  /**
-   * Delete a downloaded model. The whole persist → bridge → rollback transaction now lives in
-   * `model-manager-actions.ts` (`deleteAction`, P2-2), serialized against every other
-   * activate/deactivate/delete op by that module's global mutex; here we just run it under
-   * `operationInFlight` and surface the outcome. The transaction sequences the metadata removal, the
-   * launcher clear (checked), the native-context release, and the IRREVERSIBLE byte delete so a failure
-   * at any step leaves a safe, recoverable state — and never deletes the bytes when the launcher clear
-   * couldn't be confirmed. Releasing the (multi-GB) native context before the byte delete is now driven
-   * from inside the transaction via the delete BARRIER `actionDeps.confirmActiveModelReleased` (Finding 1)
-   * — path-aware, and it CONFIRMS native disposal before the unlink — so there is no post-`ok` release here.
-   */
   /** Show the size + Wi-Fi/metered-data disclosure (docs/30 H4) and start the download only on an explicit
    * confirm. `sizeBytes` undefined = unknown up front (a custom URL). */
   const confirmThenDownload = (name: string, sizeBytes: number | undefined, start: () => void) =>
@@ -685,29 +667,40 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
     confirmThenDownload(prepared.displayName, undefined, handleAddCustomUrl);
   };
 
+  /**
+   * Delete a downloaded model. The whole persist → bridge → rollback transaction lives in
+   * `model-manager-actions.ts` (`deleteAction`), serialized against every other
+   * activate/deactivate/delete op by that module's global mutex; here we just run it under
+   * `operationInFlight` and surface the outcome. The transaction sequences the metadata removal, the
+   * launcher clear (checked), the native-context release, and the IRREVERSIBLE byte delete so a failure
+   * at any step leaves a safe, recoverable state — and never deletes the bytes when the launcher clear
+   * couldn't be confirmed. Releasing the (multi-GB) native context before the byte delete is driven
+   * from inside the transaction via the delete BARRIER `actionDeps.confirmActiveModelReleased`
+   * — path-aware, and it CONFIRMS native disposal before the unlink — so there is no post-`ok` release here.
+   */
   const handleDelete = (model: DownloadedModel) => runOperation(model.id, () => deleteAction(actionDeps, model));
 
   /**
-   * Make `model` the active on-device model. Delegates to `setActiveAction` (P2-2): persist the durable
+   * Make `model` the active on-device model. Delegates to `setActiveAction`: persist the durable
    * local record FIRST, then mirror it to the launcher config, with a DEFINITE-failure-only conditional
-   * rollback and — for a bridge TIMEOUT — no rollback at all (the write may have landed; P2-1). Runs
+   * rollback and — for a bridge TIMEOUT — no rollback at all (the write may have landed). Runs
    * under the global operation mutex so it can't interleave with another op and clobber its selection.
    */
   const handleSetActive = (model: DownloadedModel) => runOperation(model.id, () => setActiveAction(actionDeps, model));
 
-  /** Clear the active model — `deactivateAction` (P2-2), same serialized persist-then-mirror
+  /** Clear the active model — `deactivateAction`, same serialized persist-then-mirror
    * transaction with conditional rollback on a definite failure and no rollback on a timeout. The
-   * native-context release is now driven from inside the transaction (`actionDeps.reconcileActiveModel(null)`,
-   * Finding 1) after the CONFIRMED launcher clear, so it fires on every confirmed clear (including one
+   * native-context release is driven from inside the transaction (`actionDeps.reconcileActiveModel(null)`)
+   * after the CONFIRMED launcher clear, so it fires on every confirmed clear (including one
    * that only settles on reconciliation) rather than only on a direct `'ok'` here — no post-`ok` release
    * to do in the component. */
   const handleDeactivate = () => runOperation(undefined, () => deactivateAction(actionDeps));
 
   const customModels = managerState.downloaded.filter((model) => model.isCustom);
-  /** Activate/deactivate/delete + download controls are disabled while an op is in flight (P2-2) OR
-   * while durable pending actions remain unsettled (P2-b) — reconciliation couldn't reach the launcher,
+  /** Activate/deactivate/delete + download controls are disabled while an op is in flight OR
+   * while durable pending actions remain unsettled — reconciliation couldn't reach the launcher,
    * so starting a NEW change (which could contradict an unconfirmed one) is gated until a reopen settles
-   * them — OR when the persisted model list couldn't be read (P1-4, `loadFailed`): acting destructively
+   * them — OR when the persisted model list couldn't be read (`loadFailed`): acting destructively
    * on an unknown model set risks deleting a file the launcher still points at. */
   const actionsBlocked = operationInFlight || pendingUnsettled || loadFailed;
   /** "Add & download" (the button and the URL field's Enter key alike): nothing typed, or any gate above. */
@@ -739,7 +732,7 @@ export function ModelManagerOverlay({ visible, onClose, channel }: ModelManagerO
                     })}
                   </ThemedText>
                   <ThemedText type="small" themeColor="textSecondary">
-                    {capabilities.acceleratorNote}
+                    {t('model.acceleratorNote')}
                   </ThemedText>
                 </ThemedView>
               ) : null}
@@ -878,12 +871,13 @@ function CatalogRow({
   isActive: boolean;
   isBusy: boolean;
   progress: { written: number; total: number; phase: 'download' | 'verify' } | undefined;
-  /** True while the P2-7 round-4 orphan sweep is still in flight OR an activate/deactivate/delete op is
-   * in flight — disables starting a NEW download (a fresh `createDownloadResumable` could race the
-   * sweep, and a new download shouldn't start on top of an in-flight op). */
+  /** True while the orphan sweep is still in flight, the action controls are blocked (`actionsBlocked`:
+   * an op in flight, unsettled pending actions, or an unreadable model list), or another download is
+   * running — disables starting a NEW download (a fresh `createDownloadResumable` could race the sweep,
+   * and a new download shouldn't start on top of an in-flight op). */
   downloadDisabled: boolean;
-  /** True while an activate/deactivate/delete transaction is running anywhere in the manager (P2-2) —
-   * globally disables this row's Set-active/Delete so a second op can't start concurrently. */
+  /** The manager's `actionsBlocked` (an activate/deactivate/delete transaction running anywhere, unsettled
+   * pending actions, or an unreadable model list) — disables this row's Set-active/Delete. */
   opInFlight: boolean;
   onDownload: () => void;
   onDelete: (model: DownloadedModel) => void;
@@ -906,9 +900,9 @@ function CatalogRow({
       <ThemedText type="small" themeColor="textSecondary">
         {entry.params} · {entry.quant} · {formatBytes(entry.sizeBytes)}
       </ThemedText>
-      {entry.note ? (
+      {entry.noteKey ? (
         <ThemedText type="small" themeColor="textSecondary">
-          {entry.note}
+          {t(entry.noteKey)}
         </ThemedText>
       ) : null}
       {ramVerdict === 'insufficient' ? (
@@ -986,8 +980,8 @@ function DownloadedRow({
   model: DownloadedModel;
   isActive: boolean;
   isBusy: boolean;
-  /** True while any activate/deactivate/delete op is running (P2-2) — globally disables this row's
-   * actions so a second op can't start concurrently. */
+  /** The manager's `actionsBlocked` (any activate/deactivate/delete op running, unsettled pending actions,
+   * or an unreadable model list) — disables this row's actions. */
   opInFlight: boolean;
   onDelete: () => void;
   onSetActive: () => void;
@@ -1037,7 +1031,7 @@ function ProgressBar({
 }: {
   written: number;
   total: number;
-  /** 'verify' = the (now real, P2-4/AF7) post-download SHA-256 streaming pass — shown distinctly so a
+  /** 'verify' = the post-download SHA-256 streaming pass — shown distinctly so a
    * slow multi-GB hash doesn't look like a hung download. */
   phase?: 'download' | 'verify';
 }) {

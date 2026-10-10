@@ -1,22 +1,20 @@
-// scrypt-hashed secret storage + constant-time comparison. Extracted from app.ts (2026-09-04 split).
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+// scrypt-hashed secret storage + constant-time comparison.
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
 export const secretHashPrefix = "scrypt:";
 
 export const secretHashPattern = /^scrypt:[0-9a-f]{32}:[0-9a-f]{64}$/;
 
-export const secretCompareLength = 256;
-
 /**
- * Compare two short secrets in constant time by padding both to a fixed length. Suitable only for
- * high-entropy, memory-only values (the one-time setup code) — stored secrets use scrypt instead.
+ * Compare two secrets in constant time, whatever their lengths: both are reduced to SHA-256 digests (always
+ * 32 bytes) and the digests compared with `timingSafeEqual`, so neither the length nor the position of the
+ * first difference shows in the timing, and two different strings never compare equal (no truncation).
+ * Suitable only for high-entropy, memory-only values (the one-time setup code, the host token); stored
+ * secrets use scrypt instead.
  */
 export function timingSafeEqualStrings(left: string, right: string): boolean {
-  const leftPadded = Buffer.alloc(secretCompareLength);
-  const rightPadded = Buffer.alloc(secretCompareLength);
-  Buffer.from(left).copy(leftPadded);
-  Buffer.from(right).copy(rightPadded);
-  return timingSafeEqual(leftPadded, rightPadded) && left.length === right.length;
+  const digest = (value: string): Buffer => createHash("sha256").update(value, "utf8").digest();
+  return timingSafeEqual(digest(left), digest(right));
 }
 
 /**

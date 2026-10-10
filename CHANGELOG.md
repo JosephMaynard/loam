@@ -7,6 +7,8 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **A maskable app icon**, so Android's launcher shapes the installed web app's icon instead of shrinking it
+  onto a white disc.
 - **Tablets, foldables and Android laptops.** The Android host runs in portrait and landscape and in
   resizable windows: the portrait lock is gone, the main activity is declared resizable, and the
   touchscreen is declared optional so an Android laptop with only a keyboard and trackpad (the Googlebook)
@@ -163,10 +165,43 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   failure with a 404 so a prober can't tell it exists, but the old rate limiter added
   `x-ratelimit-limit` (and `retry-after` once tripped) to its responses and to no unknown path. The
   server's own limiter sends no `x-ratelimit-*` headers.
+- **Encrypted replies are tied to the request that asked for them** (`optional` mode, which most nodes run):
+  each reply is sealed under its request's sequence number and its HTTP status, and the web app refuses a
+  reply whose encryption was stripped mid-session (only the node's own "session unknown", "wrong address"
+  and "resetting" answers get through, without their text). So someone on the network can no longer replay an
+  old reply or swap in a forged one. Older clients still open across the upgrade are answered as before.
+- **A flood of new encrypted sessions can no longer push people off the node.** One device identity holds at
+  most 16 sessions (its tabs share one), making room by dropping sessions no open tab is using and otherwise
+  refusing, never by closing an open tab; when the table is full the busiest source loses its oldest
+  unused session first.
+- **On IPv6 networks, one device can no longer use up the admin-claim, panic or connection limits for
+  everyone else on the network**: those limits count each address, with a looser bound per network so
+  cycling addresses still doesn't buy unlimited guesses.
+- **Secret comparison is correct at any length** (it compared only the first 256 bytes; every secret LOAM
+  checks is shorter, so nothing was exposed).
+- **The admin claim answer no longer includes the raw user record**, which showed a shadow-banned claimer
+  that they were shadow-banned.
+- **A message's attachments are the server's record of the upload**, not what the client said about them,
+  so deleting a message always removes the right file.
+- **Emergency Reset on an unencrypted node leaves no deleted text in the database file**: plaintext
+  databases now overwrite deleted rows, and the reset compacts the file, which also clears rows deleted
+  before this release. It is still not secure erasure on flash storage; encrypt the database for that.
+- **Mesh mail gives away less about where it was sent from.** A new message starts with a hop budget picked
+  at random from the top three, its stated send time moves back by up to an hour, and a relay dates carried
+  mail by when it took it in (so a relay with message retention no longer deletes fresh mail on arrival).
+  Where a message first appears still points to its origin; docs/16 §9 says what is and isn't hidden.
+- **Mesh: a recipient refuses mail whose sender key isn't a proper 32-byte key**, so the inner signature
+  can't be read with a different split between key and message. Mail from every released version still
+  opens.
+- **Vendored, checksum-pinned SQLite wrapper packages for the Android build**, so building the APK no
+  longer downloads anything from the npm registry. Release APKs get a `.sha256` file and a build provenance
+  attestation, CI runs `pnpm audit`, and pnpm refuses package versions less than a day old.
 
 ### Fixed
-- **Unused identities are kept while they wait in a greeter's queue or have an open report**, and removing
-  one also removes its pending channel join requests and mesh contacts.
+- **Unused identities are kept while they have an open report, and for a week while they wait in a
+  greeter's queue**; someone let in from the queue is kept for a day from when they were let in, not from
+  when they first asked. Removing an identity also removes its pending channel join requests and mesh
+  contacts. The greeter's queue shows how long each person has been waiting.
 - **An ephemeral-key node stops at start-up if it cannot save its marker file** instead of creating a
   database the next start would refuse; a node started without an ephemeral key refuses to start if it
   cannot remove a leftover marker, so a later ephemeral start can never mistake its database for leftovers.
@@ -176,10 +211,11 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 - **Android host: both screen orientations are declared optional again.** Google's code scanner, included
   through expo-camera, adds a portrait-locked activity that made the built app require a portrait screen,
   so Play could have hidden LOAM from landscape-only devices such as Android laptops.
-- **Android host: the hotspot requests coarse location together with fine** on every Android version
-  (Android 12 ignored the fine-only request, so a fresh install there could never start the hotspot), and
-  from Android 13 a hotspot start is gated on Nearby Wi-Fi devices alone, so choosing "Approximate" no
-  longer blocks it.
+- **Android host: the hotspot asks only for what each Android version needs.** On Android 13 and later it
+  asks for Nearby Wi-Fi devices alone, and the app no longer declares location there at all (the manifest
+  caps it at Android 12). On Android 12 it asks for coarse and fine location together (Android 12 ignored
+  the fine-only request, so a fresh install there could never start the hotspot). Not yet tried on a real
+  Android 12 or 13+ phone.
 - **Sync: a message in a channel the per-round channel cap put off is fetched again** by the round that
   imports its channel, instead of being remembered as refused for an hour.
 - **Threads survive the offline cache cap.** The root of a cached reply is kept with it however old it is
@@ -285,6 +321,18 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
   Node it crashed the process when loaded; `loam --encrypt` there now says to upgrade. The package is
   ~9.5 MB larger, and 32-bit ARM (older Raspberry Pi OS) has no prebuilt binary, so `--encrypt` there
   needs a `node-gyp` build (the error says how). An unencrypted node never loads the driver.
+- **Windows: saving the config and the reset journal works.** Every durable write on a Windows `loamnet`
+  host failed (Windows can't flush a read-only file handle or a folder), so an Emergency Reset would have
+  locked the node. The rename itself is best-effort on Windows. Not yet tried on a real Windows machine.
+- **Turning public channels off no longer freezes private channels.**
+- **Rate-limit refusals carry a code** (`rate_limited`), so the web app shows them in the network's language.
+- **The radio courier hands over every queued mesh message in turn** instead of the same oldest 200.
+- **Android host: errors appear in the chosen language**: hotspot, model download and manager, database
+  encryption and reset errors were still English. Arabic, Persian, Dari, Pashto and Urdu now read right to
+  left and align right on the host's own screens.
+- **Translations checked** for every string added in the last two releases, in all 14 languages besides
+  English: terms now match the rest of each language (Emergency Reset, peer, mesh card and others), and the
+  host app's Portuguese is Brazilian throughout, like the web app's.
 
 ### Changed
 - **Deleting a message, handing over a private channel and leaving one use the app's own confirmation
@@ -361,6 +409,16 @@ the project is pre-1.0, so the surface can still change. Dates are UTC.
 - **Android host: Expo SDK 57 patch updates** (expo 57.0.26, React Native 0.86.3). `pnpm audit --prod`
   goes from 29 findings to 1: a moderate `decode-uri-component` advisory under expo-router with no reachable path in LOAM, whose fix is an ESM-only release expo-router can't load.
 - CI now installs the packed `loamnet` tarball and drives the installed CLI (`pnpm smoke:cli`).
+- **The web app loads the admin area, the mesh screen and the privacy policy only when opened**, so the
+  main download drops from 507 kB to 465 kB. All of it is still saved for offline use.
+- **Android host: unused Expo template packages and files are gone**, and there is no web build of the host
+  app any more.
+- **Removed the flat-JSON importer** for data from before LOAM used SQLite. No released version wrote those
+  files, and a stray `users.json` in the data folder could stop a node from starting.
+- **Server tests are organised by subject** instead of one 12,000-line file and files named after review
+  dates, and the test files are now type-checked in CI. Code comments no longer carry review ticket numbers;
+  `docs/audit-history.md` records the reviews instead. The docs gained status lines, the roadmap is written
+  for readers outside the project, and HTTPS reverse proxies are documented as unsupported (docs/12).
 
 ## [0.5.0] - 2026-09-28
 

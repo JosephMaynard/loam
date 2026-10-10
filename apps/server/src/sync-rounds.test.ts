@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { type IncomingHttpHeaders, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -22,8 +22,9 @@ import { buildApp, type LoamApp } from "./app.js";
 import type { AppOptions } from "./types.js";
 
 /**
- * Pre-release review 2026-09-25 — sync / mesh / kill-switch / transport fixes. Each security test here
- * was mutation-checked: with its fix reverted, it fails.
+ * Sync and sealed-mail pull rounds against a scripted peer: batching and bisection bounds, remembered
+ * refusals, which peer users are imported, the sync token on plaintext pulls. Each security test here was
+ * mutation-checked: with its fix reverted, it fails.
  */
 
 const cleanups: (() => Promise<void> | void)[] = [];
@@ -70,51 +71,6 @@ async function newSession(app: LoamApp): Promise<{ cookie: string; userId: strin
   return { cookie, userId: (response.json() as { currentUser: { id: string } }).currentUser.id };
 }
 
-describe("Emergency Reset sweeps preserve-recovery snapshots in every branch (#7)", () => {
-  /** Plant a `.loam-recovery-*` snapshot dir (with an old DB copy) + the recovery anchor after boot. */
-  function plantRecoveryArtifacts(dataDir: string): string[] {
-    const snapshot = join(dataDir, ".loam-recovery-1700000000000-abcd");
-    mkdirSync(join(snapshot, "avatars"), { recursive: true });
-    writeFileSync(join(snapshot, "loam.db"), "old still-readable database");
-    writeFileSync(join(snapshot, "avatars", "a.png"), "old avatar");
-    const anchor = join(dataDir, ".loam-recovery-state");
-    writeFileSync(anchor, ".loam-recovery-1700000000000-abcd");
-    return [snapshot, anchor];
-  }
-
-  async function wipe(app: LoamApp): Promise<number> {
-    const admin = await newSession(app);
-    const res = await app.server.inject({
-      method: "POST",
-      url: "/api/admin/kill-switch",
-      headers: { cookie: admin.cookie },
-      payload: { confirm: "wipe" },
-    });
-    return res.statusCode;
-  }
-
-  it("plaintext (logical) wipe removes the snapshot dir and the anchor", async () => {
-    const { app, dataDir } = await makeApp({ killSwitch: { enabled: true } });
-    const planted = plantRecoveryArtifacts(dataDir);
-    expect(await wipe(app)).toBe(200);
-    for (const path of planted) {
-      expect(existsSync(path)).toBe(false);
-    }
-  });
-
-  it("ephemeral-key (cryptographic) wipe removes the snapshot dir and the anchor", async () => {
-    const { app, dataDir } = await makeApp(
-      { killSwitch: { enabled: true } },
-      { ephemeralDbKey: true, dbEncryptionMode: "ephemeral" },
-    );
-    const planted = plantRecoveryArtifacts(dataDir);
-    expect(await wipe(app)).toBe(200);
-    for (const path of planted) {
-      expect(existsSync(path)).toBe(false);
-    }
-  });
-});
-
 /** Handshake + bind a transport session (docs/08 + docs/20) — the first identity on a firstUser node is its
  *  admin — and return a sender for requests through the sealed tunnel. */
 async function boundTunnel(app: LoamApp): Promise<(method: string, path: string, body?: unknown) => Promise<{ status: number; json: unknown }>> {
@@ -150,51 +106,6 @@ async function boundTunnel(app: LoamApp): Promise<(method: string, path: string,
     return { status: descriptor.status, json: text ? (JSON.parse(text) as unknown) : undefined };
   };
 }
-
-describe("request logs never reveal tunnelled paths or query strings (#10)", () => {
-  /** An app whose logs are captured line-by-line. */
-  async function makeLoggedApp(): Promise<{ app: LoamApp; logs: string[] }> {
-    const logs: string[] = [];
-    const { app } = await makeApp(undefined, { logger: true, logStream: { write: (line) => void logs.push(line) } });
-    return { app, logs };
-  }
-
-  it("a tunnelled request's real path + query never reach the log; the outer tunnel request does", async () => {
-    const { app, logs } = await makeLoggedApp();
-    const tunnel = await boundTunnel(app);
-    expect((await tunnel("GET", "/api/search?q=TUNNELLED_SECRET_TERM")).status).toBe(200);
-    const text = logs.join("");
-    expect(text).toContain("/api/transport/tunnel");
-    expect(text).not.toContain("TUNNELLED_SECRET_TERM");
-    expect(text).not.toContain("/api/search");
-  });
-
-  it("Fastify's own double-send warning doesn't name the (tunnelled) path or its query", async () => {
-    const { app, logs } = await makeLoggedApp();
-    // Tunnelled: the path itself is secret. Direct: the path is on the wire anyway, the query isn't logged.
-    for (const path of ["/api/test/double-send-PATH_SECRET", "/api/test/double-send"]) {
-      app.server.get(path, (_request, reply) => {
-        void reply.send({ first: true });
-        void reply.send({ second: true });
-      });
-    }
-    const tunnel = await boundTunnel(app);
-    expect((await tunnel("GET", "/api/test/double-send-PATH_SECRET?q=TUNNEL_QUERY_SECRET")).status).toBe(200);
-    expect((await app.server.inject({ method: "GET", url: "/api/test/double-send?q=DIRECT_QUERY_SECRET" })).statusCode).toBe(200);
-    const text = logs.join("");
-    expect(text).toContain("Reply was already sent");
-    expect(text).not.toContain("PATH_SECRET");
-    expect(text).not.toContain("QUERY_SECRET");
-  });
-
-  it("strips the query string from every logged request URL", async () => {
-    const { app, logs } = await makeLoggedApp();
-    expect((await app.server.inject({ method: "GET", url: "/api/health?probe=DIRECT_QUERY_SECRET" })).statusCode).toBe(200);
-    const text = logs.join("");
-    expect(text).toContain("/api/health");
-    expect(text).not.toContain("DIRECT_QUERY_SECRET");
-  });
-});
 
 // ---- Sync / mesh pulls against a scripted peer ---------------------------------------------------------
 
@@ -308,7 +219,7 @@ async function puller(peerUrl: string, config: Record<string, unknown> = {}) {
 const MESH_RELAY = { enabled: true, relay: true, ttlMs: 3_600_000, hopLimit: 6, maxCarried: 1000, maxContacts: 1000 };
 const MESH_NO_RELAY = { ...MESH_RELAY, relay: false };
 
-describe("sealed pulls: no refetch loop, no endpoint leak, sender-chosen TTL (#1 #4 #5 #6)", () => {
+describe("sealed pulls: no refetch loop, no endpoint leak, sender-chosen TTL", () => {
   it("a hop-1 blob a relay can't carry is fetched once, not every round", async () => {
     const hop1 = sealedRecord("seal_hop1", { hopLimit: 1 });
     const peer = await servingPeer([hop1]);
@@ -365,7 +276,7 @@ describe("sealed pulls: no refetch loop, no endpoint leak, sender-chosen TTL (#1
     // Nothing that used to clear the RAM refusal cache may make the node go back for the dropped blob while
     // the delivered one stays skipped — a peer diffing the fetch sets would learn which one was delivered.
     const fetchCounts = () => ["seal_mine", "seal_foreign"].map((id) => requestedIds(peer).filter((asked) => asked === id).length);
-    const patch = async (target: LoamApp, payload: unknown) =>
+    const patch = async (target: LoamApp, payload: object) =>
       (await target.server.inject({ method: "PATCH", url: "/api/admin/config", headers: { cookie: admin.cookie }, payload })).statusCode;
 
     expect(await patch(app, { node: { name: "Renamed node" } })).toBe(200); // a no-op for sync
@@ -472,7 +383,7 @@ describe("sealed pulls: no refetch loop, no endpoint leak, sender-chosen TTL (#1
   });
 });
 
-describe("byte-budgeted sync batches (#2)", () => {
+describe("byte-budgeted sync batches", () => {
   it("splits a batch whose response blows the size cap, imports the rest, and skips an unusable record", async () => {
     const posts = ["msg.big1", "msg.big2", "msg.big3"].map((id) => peerPost(id, `body of ${id}`));
     const peer = await fakePeer((path, body) => {
@@ -542,7 +453,7 @@ describe("bisection is bounded against a peer that serves junk", () => {
   });
 });
 
-describe("refused new messages are remembered per peer, not refetched every round (#6)", () => {
+describe("refused new messages are remembered per peer, not refetched every round", () => {
   it("a reply to a deleted post and an over-cap body are each fetched once", async () => {
     let parentId = "";
     const oversized = peerPost("msg.oversized", "x".repeat(300 * 1024));
@@ -585,7 +496,7 @@ describe("refused new messages are remembered per peer, not refetched every roun
   });
 });
 
-describe("a local policy change forgets remembered refusals (follow-up to #6)", () => {
+describe("a local policy change forgets remembered refusals", () => {
   const parent = peerPost("msg.parent");
   const reply = {
     id: "msg.reply",
@@ -640,7 +551,7 @@ describe("a local policy change forgets remembered refusals (follow-up to #6)", 
   });
 });
 
-describe("peer users: only accepted authors, no reserved ids, no mesh keys minted for them (#3 #8)", () => {
+describe("peer users: only accepted authors, no reserved ids, no mesh keys minted for them", () => {
   it("imports just the author of an accepted message and refuses mesh.* / bot-id records and authors", async () => {
     const peerKey = createMeshIdentity();
     const author = {
@@ -786,7 +697,7 @@ describe("peer users: only accepted authors, no reserved ids, no mesh keys minte
   });
 });
 
-describe("a kill switch mid attachment fetch leaves no pre-wipe work item (#9)", () => {
+describe("a kill switch mid attachment fetch leaves no pre-wipe work item", () => {
   it("does not record a missing-attachment row into the fresh post-wipe store", async () => {
     let sawAttachmentRequest!: () => void;
     const attachmentRequested = new Promise<void>((resolve) => (sawAttachmentRequest = resolve));
@@ -826,7 +737,7 @@ describe("a kill switch mid attachment fetch leaves no pre-wipe work item (#9)",
   });
 });
 
-describe("the sync token never goes out in plaintext; no silent downgrade (#13)", () => {
+describe("the sync token never goes out in plaintext; no silent downgrade", () => {
   it("a REQUIRED node refuses to pull from a plaintext peer at all, and says why", async () => {
     const peer = await servingPeer([peerPost("msg.fine")]);
     // A required node serves its admin only through the tunnel, so drive the sync run through one.

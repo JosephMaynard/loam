@@ -16,7 +16,7 @@ function ipv4(address: string, internal = false): Iface {
   return { address, family: "IPv4", internal };
 }
 
-describe("resolveLanIPv4 (F3)", () => {
+describe("resolveLanIPv4", () => {
   afterEach(() => {
     vi.mocked(networkInterfaces).mockReset();
   });

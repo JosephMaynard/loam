@@ -25,7 +25,7 @@ function uninstallFakeBridge(): void {
   delete (globalThis as unknown as { __loamReportBootError?: unknown }).__loamReportBootError;
 }
 
-describe("embedded-main boot-error reporting (docs/15 A8)", () => {
+describe("embedded-main boot-error reporting", () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
   let listenersBefore: readonly NodeJS.UnhandledRejectionListener[];
 
@@ -103,7 +103,7 @@ describe("embedded-main boot-error reporting (docs/15 A8)", () => {
   });
 });
 
-describe("P1-1 end-to-end (Sol round 3): db_encryption_unreadable keeps the runtime alive so a start-fresh confirmation can retry boot in-process", () => {
+describe("end-to-end: db_encryption_unreadable keeps the runtime alive so a start-fresh confirmation can retry boot in-process", () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
   let listenersBefore: readonly NodeJS.UnhandledRejectionListener[];
   const envKeys = ["LOAM_DATA_DIR", "LOAM_CLIENT_DIST"] as const;
@@ -174,7 +174,7 @@ describe("P1-1 end-to-end (Sol round 3): db_encryption_unreadable keeps the runt
       };
 
       // First attempt: wrong key, no start-fresh marker present yet — must fail NON-destructively,
-      // report the typed `db_encryption_unreadable` code, and — the actual P1-1 bug — must NOT exit:
+      // report the typed `db_encryption_unreadable` code, and must NOT exit:
       // the old code called `process.exit(1)` here, killing the very process whose `loam-db-start-fresh`
       // bridge listener (main.js) was the operator's only way to recover.
       await globalBoot(start);
@@ -191,7 +191,7 @@ describe("P1-1 end-to-end (Sol round 3): db_encryption_unreadable keeps the runt
       await globalBoot(start);
 
       // Recovered: a fresh (empty) DB opened under key B, no exit, and the old ciphertext preserved on
-      // disk in a unique recovery-snapshot directory rather than deleted (Sol round-11 preserve recovery).
+      // disk in a unique recovery-snapshot directory rather than deleted (preserve recovery).
       expect(exitSpy).not.toHaveBeenCalled();
       expect(builtApp).toBeDefined();
       expect(builtApp?.store.getConfigValue("seed")).toBeUndefined();
@@ -205,7 +205,7 @@ describe("P1-1 end-to-end (Sol round 3): db_encryption_unreadable keeps the runt
   });
 });
 
-describe("RF2: bootEmbeddedServer is re-entrant-safe", () => {
+describe("bootEmbeddedServer is re-entrant-safe", () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
   let listenersBefore: readonly NodeJS.UnhandledRejectionListener[];
   const envKeys = ["LOAM_DATA_DIR", "LOAM_CLIENT_DIST"] as const;
@@ -290,12 +290,12 @@ describe("RF2: bootEmbeddedServer is re-entrant-safe", () => {
     expect(exitSpy).not.toHaveBeenCalled();
     expect(reports).toEqual([]);
 
-    // P3 (Sol round 4): `bootInFlight` clears once the attempt settles, but the settled STATE is now
+    // `bootInFlight` clears once the attempt settles, but the settled STATE is now
     // "ready" — a later call must be a no-op, NOT boot again. Before this fix, `bootInFlight` alone was
     // the only guard, so this exact call would have invoked `start` a second time and raced a second
     // `buildApp()`/`listen()` against the server that just recovered (EADDRINUSE → process.exit(1),
     // killing the healthy survivor). This was previously asserted the OTHER way (`laterCalls === 1`) —
-    // that assertion encoded the unsafe pre-P3 behaviour and has been flipped here.
+    // that assertion encoded the unsafe old behaviour and has been flipped here.
     let laterCalls = 0;
     await mod.bootEmbeddedServer(async () => {
       laterCalls += 1;
@@ -305,7 +305,7 @@ describe("RF2: bootEmbeddedServer is re-entrant-safe", () => {
     expect(exitSpy).not.toHaveBeenCalled();
   });
 
-  it("P3 (Sol round 4): a genuinely separate call still retries while the last settled state is recoverable (db_encryption_unreadable), not just while nothing has succeeded yet", async () => {
+  it("a genuinely separate call still retries while the last settled state is recoverable (db_encryption_unreadable), not just while nothing has succeeded yet", async () => {
     const reports = installFakeBridge();
 
     const mod = await import("./embedded-main.js");
@@ -325,7 +325,7 @@ describe("RF2: bootEmbeddedServer is re-entrant-safe", () => {
     expect(exitSpy).not.toHaveBeenCalled(); // recoverable — must not exit
 
     // A later call (e.g. the operator's start-fresh confirmation) must still retry: the recoverable
-    // state is NOT "ready", so the P3 no-op gate above must not suppress it.
+    // state is NOT "ready", so the no-op gate above must not suppress it.
     await mod.bootEmbeddedServer(async () => {
       attempts += 1;
       return app;
@@ -356,7 +356,7 @@ describe("RF2: bootEmbeddedServer is re-entrant-safe", () => {
   });
 });
 
-describe("P2 (Sol round 4): boot-ready is reported directly to RN, independent of main.js's own readiness poll", () => {
+describe("boot-ready is reported directly to RN, independent of main.js's own readiness poll", () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
   let listenersBefore: readonly NodeJS.UnhandledRejectionListener[];
 
@@ -406,14 +406,14 @@ describe("P2 (Sol round 4): boot-ready is reported directly to RN, independent o
     expect(exitSpy).not.toHaveBeenCalled();
   });
 
-  it("fake-timer test (Sol #4 / P2): exhausts the ~5-minute window main.js's own /api/health poll " +
+  it("fake-timer test: exhausts the ~5-minute window main.js's own /api/health poll " +
     "would have given up in, then a later in-process recovery still reports ready to RN", async () => {
     const reports = installFakeBridge();
     const readyCalls = installFakeReadyBridge();
 
     // Real (unmocked) `startEmbeddedServer` for the unrelated module-scope auto-boot — kept out of this
     // test's own controlled scenario by an explicit `start` function passed to every `globalBoot(...)`
-    // call below (mirroring the "P1-1 end-to-end"/"RF2" suites above), so the two never share state.
+    // call below (mirroring the "end-to-end"/"re-entrant-safe" suites above), so the two never share state.
     const mod = await import("./embedded-main.js");
     await new Promise((resolve) => setTimeout(resolve, 10));
     reports.length = 0;

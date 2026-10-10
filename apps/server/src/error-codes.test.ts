@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { SERVER_ERROR_CODES } from "@loam/schema";
 import { describe, expect, it } from "vitest";
 
+import { ALL_ERROR_CODES } from "./app.js";
 import { ERROR_CODES } from "./errors.js";
 
 const sourceDir = dirname(fileURLToPath(import.meta.url));
@@ -41,5 +42,20 @@ describe("server error messages", () => {
     const known = new Set<string>(SERVER_ERROR_CODES);
     const unknown = Object.entries(ERROR_CODES).filter(([, code]) => !known.has(code));
     expect(unknown).toEqual([]);
+  });
+});
+
+describe("error codes", () => {
+  it("every error code the server actually returns is drawn from the canonical @loam/schema list", () => {
+    // ALL_ERROR_CODES (Object.values of the server's ERROR_CODES map) is typed against
+    // ServerErrorCode, so this is really a belt-and-braces runtime check that nothing slipped
+    // through — the real guarantee is the compile-time type constraint in app.ts.
+    for (const code of ALL_ERROR_CODES) {
+      expect(SERVER_ERROR_CODES as readonly string[], `unknown code ${code}`).toContain(code);
+    }
+    // Several messages deliberately share a code (the member sees one translated sentence, the log keeps
+    // the precise text), so the map is many-to-one; the tests above guard the other direction (every
+    // message literal the routes answer with has a code).
+    expect(new Set(ALL_ERROR_CODES).size).toBeGreaterThan(0);
   });
 });

@@ -22,7 +22,7 @@
 // and read `.size` / `.lfs.oid`. A stale hash only ever causes a download to fail verification and
 // get deleted (see `model-download.ts`) — never a silent corruption.
 //
-// Hardware acceleration (Sol P2-5): every entry below is Q4_K_M. Android's OpenCL backend in
+// Hardware acceleration: every entry below is Q4_K_M. Android's OpenCL backend in
 // llama.rn/llama.cpp only accelerates a handful of quant formats — Q4_0 and Q6_K, notably, NOT
 // Q4_K_M — so a Q4_K_M download here most likely runs on CPU even on a phone with a usable GPU
 // backend (Hexagon/HTP offload is a separate, model-independent path — see on-device-llm.ts).
@@ -30,6 +30,8 @@
 // `tree/main` API used above) and could be added as accelerator-friendlier alternatives, but aren't
 // pinned here yet — that's a real follow-up, not done by adding this comment. Don't assume a
 // downloaded model here is GPU-accelerated; `on-device-llm.ts` logs the actual outcome per load.
+import type { AppCatalogKey } from './i18n';
+
 export type ModelCatalogEntry = {
   /** Stable id used for local storage + as the on-device config's cosmetic `model` label root. */
   id: string;
@@ -47,7 +49,7 @@ export type ModelCatalogEntry = {
    *
    * Every entry below IS pinned, and `model-download.ts` DOES verify it: hashing streams the file
    * through an incremental SHA-256 in fixed-size chunks (never holding more than one chunk in memory
-   * at once), so there's no size cap that skips the check for a large file any more — a mismatch, or
+   * at once), so no size cap skips the check for a large file — a mismatch, or
    * a hashing failure of any kind, fails closed (the file is deleted and the download rejected). See
    * `model-download.ts`'s "streaming SHA-256" section for the implementation, and its still-open
    * device-verification gate: hashing multi-GB files this way on a phone's JS thread has not yet been
@@ -57,7 +59,8 @@ export type ModelCatalogEntry = {
   sha256?: string;
   /** Minimum device RAM LOAM requires before offering a download — see provenance above. */
   minRamBytes: number;
-  note?: string;
+  /** A one-line description from the host catalog (`src/lib/i18n`), shown under the entry. */
+  noteKey?: AppCatalogKey;
 };
 
 const GIB = 1024 ** 3;
@@ -72,7 +75,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     sizeBytes: 806_058_272,
     sha256: '8270790f3ab69fdfe860b7b64008d9a19986d8df7e407bb018184caa08798ebd',
     minRamBytes: 3 * GIB,
-    note: 'The safe default: smallest and fastest, with headroom to spare on most phones.',
+    noteKey: 'model.noteGemma3_1b',
   },
   {
     id: 'gemma-3-4b-it-q4_k_m',
@@ -83,7 +86,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     sizeBytes: 2_489_894_016,
     sha256: '04a43a22e8d2003deda5acc262f68ec1005fa76c735a9962a8c77042a74a7d19',
     minRamBytes: 6 * GIB,
-    note: 'Noticeably better quality than the 1B; needs a higher-RAM phone and more time per reply.',
+    noteKey: 'model.noteGemma3_4b',
   },
   {
     id: 'gemma-3n-e2b-it-q4_k_m',
@@ -94,9 +97,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     sizeBytes: 3_026_881_888,
     sha256: '189d42b4303cb1078ea8d00963f437cd6d884069b7ba2ba80b38cd09585dc415',
     minRamBytes: 6 * GIB,
-    note:
-      "Google's MatFormer-family model built for edge devices (selectively activates a ~2B-parameter " +
-      'slice of a larger network); text-only usage here.',
+    noteKey: 'model.noteGemma3nE2b',
   },
   {
     id: 'gemma-3n-e4b-it-q4_k_m',
@@ -107,7 +108,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     sizeBytes: 4_539_054_208,
     sha256: '43b489bb77a81bda85180e7c490d40ad7f1d5c2ce654c9b05e15e104bd3c777e',
     minRamBytes: 8 * GIB,
-    note: 'The largest offered model: best quality, but needs a high-RAM phone and the most storage.',
+    noteKey: 'model.noteGemma3nE4b',
   },
 ];
 

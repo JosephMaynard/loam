@@ -15,7 +15,7 @@ import { openStore, QuarantinedRowError } from "./db.js";
 import type { AppOptions } from "./types.js";
 
 /**
- * Upgrade quarantine (pre-release review 2026-09-25, P1). v0.5.0 bounds every id at 128 chars; a row v0.4
+ * Upgrade quarantine. v0.5.0 bounds every id at 128 chars; a row v0.4
  * wrote past that no longer validates. The loader used to skip such a row but still load the messages
  * under a skipped channel and let anything claim the skipped id — so a private channel with one over-long
  * member id vanished at upgrade, and a sync peer's PUBLIC channel with the same slug was then upserted over
@@ -129,6 +129,17 @@ function peerPost(id: string, channelId: string, body: string, authorId = "user.
 }
 
 const peerUser: User = { id: "user.peer0001", displayName: "Peer", type: "human", isAdmin: false, createdAt: 1, ephemeral: true };
+
+/** Count the rows of a table straight from the SQLite file (the app must be closed). */
+function rawRowCount(dataDir: string, table: string, id: string): number {
+  const db = new DatabaseSync(join(dataDir, "loam.db"));
+  try {
+    const row = db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE id = ?`).get(id) as { n: number };
+    return row.n;
+  } finally {
+    db.close();
+  }
+}
 
 /** Compare a response to a reference response: same status, same body. */
 function expectSameAnswer(actual: InjectResponse, reference: InjectResponse): void {
@@ -477,7 +488,7 @@ describe("Emergency Reset removes quarantined rows like any other", () => {
   });
 });
 
-describe("upgrade: stored rows outside users/channels/messages (verifier round, 2026-09-25)", () => {
+describe("upgrade: stored rows outside users/channels/messages", () => {
   it("a v0.4 report naming an over-long target id doesn't fail boot or the moderator queue, and stays on disk", async () => {
     const dataDir = tempDataDir();
     const first = await boot(dataDir);
@@ -586,7 +597,7 @@ describe("upgrade: stored rows outside users/channels/messages (verifier round, 
   });
 });
 
-describe("upgrade: retention reaches quarantined message rows (verifier round, 2026-09-25)", () => {
+describe("upgrade: retention reaches quarantined message rows", () => {
   it("deletes and tombstones an expired quarantined row with the quarantined rows under it, and keeps a live one", async () => {
     const dataDir = tempDataDir();
     const first = await boot(dataDir);
@@ -616,5 +627,59 @@ describe("upgrade: retention reaches quarantined message rows (verifier round, 2
     expect(rawData(dataDir, "messages", root.id)).toBeUndefined();
     expect(rawData(dataDir, "messages", reply.id)).toBeUndefined();
     expect(rawData(dataDir, "messages", recent.id)).toBeDefined();
+  });
+});
+
+describe("rows an older release wrote past today's bounds don't stop an upgraded node from booting", () => {
+  it("quarantines an over-long-id row (left on disk), truncates an over-long meta.model and config model", async () => {
+    const dataDir = tempDataDir();
+    const first = await boot(dataDir);
+    const admin = await newSession(first);
+    const posted = await first.server.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: admin.cookie },
+      payload: { type: "channelPost", channelId: "general", body: "kept" },
+    });
+    expect(posted.statusCode).toBe(201);
+    const kept = (posted.json() as { message: Extract<Message, { type: "channelPost" }> }).message;
+
+    const longId = `x${"a".repeat(199)}`;
+    const longModel = "m".repeat(200);
+    const template = first.store.loadChannels()[0] as Channel;
+    first.store.upsertChannel({ ...template, id: longId, name: "legacy" });
+    const author = first.store.loadUsers().find((user) => user.id === admin.userId) as User;
+    first.store.upsertUser({ ...author, id: `user.${"b".repeat(200)}` });
+    first.store.insertMessage({ ...kept, id: longId, body: "legacy long id" });
+    first.store.updateMessage({ ...kept, meta: { ...kept.meta, source: "llm", model: longModel } });
+    await first.close();
+
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ llm: { ollama: { model: longModel } } }));
+
+    const app = await boot(dataDir);
+    expect(app.store.loadChannels().some((channel) => channel.id === longId)).toBe(false);
+    expect(app.store.loadMessages().some((message) => message.id === longId)).toBe(false);
+    expect(app.store.loadUsers().some((user) => user.id.length > 128)).toBe(false);
+    // Not loaded, and held: nothing may claim these ids while the rows are on disk (upgrade-quarantine.test.ts).
+    expect(app.store.quarantine().channels.has(longId)).toBe(true);
+    expect(app.store.quarantine().messages.has(longId)).toBe(true);
+    expect(app.store.quarantine().users.has(`user.${"b".repeat(200)}`)).toBe(true);
+
+    // The over-long model label is repaired, not the whole message dropped.
+    const history = (
+      await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: admin.cookie } })
+    ).json() as Message[];
+    const repaired = history.find((message) => message.id === kept.id);
+    expect(repaired?.meta?.model).toBe(longModel.slice(0, 120));
+
+    const config = (
+      await app.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: admin.cookie } })
+    ).json() as { llm: { ollama: { model: string } } };
+    expect(config.llm.ollama.model).toBe(longModel.slice(0, 120));
+
+    // Quarantined rows are left on disk, not deleted.
+    await app.close();
+    expect(rawRowCount(dataDir, "channels", longId)).toBe(1);
+    expect(rawRowCount(dataDir, "messages", longId)).toBe(1);
   });
 });

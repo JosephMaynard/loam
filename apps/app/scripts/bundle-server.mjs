@@ -24,7 +24,7 @@ const clientDist = join(repoRoot, "apps/client/dist");
 // Committed launcher template. The nodejs-project dir itself is gitignored build output; the files
 // under templateDir are its versioned source of truth. main.js `require('./helper')`s its siblings
 // (db-key-gate, start-fresh-marker, …) at boot, so EVERY template file must reach the runtime — a
-// missing helper throws MODULE_NOT_FOUND before the server starts (Sol P0).
+// missing helper throws MODULE_NOT_FOUND before the server starts.
 const templateDir = join(appDir, "nodejs-project-template");
 
 // The whole template is runtime source: every *.js helper plus package.json. Copying the directory's
@@ -148,9 +148,9 @@ for (const name of templateFiles) {
 // copied → Node throws MODULE_NOT_FOUND at boot before the server starts). Fails the build loudly.
 assertRelativeRequiresResolve(join(outDir, "main.js"), outDir);
 
-// Both SQLite native prebuilds must be in place (pre-release review 2026-09-25). The plain driver is what
+// Both SQLite native prebuilds must be in place. The plain driver is what
 // every `off`-mode boot opens; the SQLCipher one (better-sqlite3-multiple-ciphers) backs every encrypted
-// mode, and without it the launcher now LOCKS an encrypted node rather than booting it plaintext — so an
+// mode, and without it the launcher LOCKS an encrypted node rather than booting it plaintext — so an
 // APK missing it ships a build where encryption can never be turned on. Fail the bundle instead of warning.
 // `LOAM_ALLOW_MISSING_NATIVE=1` skips this for a desktop-only bundle smoke test (never for an APK).
 const nativePrebuilds = [

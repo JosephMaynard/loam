@@ -1,4 +1,4 @@
-// The composition seam of the server (2026-09-04 split). `buildApp` builds ONE object of this shape —
+// The composition seam of the server. `buildApp` builds ONE object of this shape —
 // its remaining closure state (accessor-backed, so writes land on the live bindings), its domain helpers,
 // and the extracted subsystems — and hands it to every route/transport/realtime/kill-switch module.
 // The member list is generated from app.ts's declarations; keep it in step when a helper's signature
@@ -16,7 +16,7 @@ import type { LinkCodes } from "./sync-links.js";
 import { type DbKeyState, createStoreLifecycle } from "./store-lifecycle.js";
 import { createSyncEngine } from "./sync.js";
 import type { TransportSession } from "./transport-server.js";
-import type { AppData, AppOptions, ClientEvent, SocketSession } from "./types.js";
+import type { AppData, AppOptions, ClientEvent, PendingUpload, SocketSession } from "./types.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 export type AppContext = {
@@ -58,7 +58,7 @@ export type AppContext = {
   maxNewIdentitiesPerWindow: number;
   identityWindowMs: number;
   tombstoneHorizonMs: number;
-  attachmentOwners: Map<string, { userId: string; uploadedAt: number }>;
+  attachmentOwners: Map<string, PendingUpload>;
   attachmentPendingGraceMs: number;
   tombstones: Set<string>;
   syncedChannelIds: Set<string>;
@@ -162,7 +162,7 @@ export type AppContext = {
 ): { message?: Message; deletedMessage?: Message; deletedMessageId?: string; error?: string; forbidden?: boolean };
   updateMessage(message: Message, nextBody: string, streaming: boolean): Message;
   loadData(): void;
-  attemptRateLimited(attempts: Map<string, { count: number; resetAt: number }>, key: string): boolean;
+  attemptRateLimited(attempts: Map<string, { count: number; resetAt: number }>, ip: string): boolean;
   pruneExpiredRateLimiters(): void;
   executeKillSwitch(): Promise<KillSwitchResult>;
   executeKillSwitchBody(): Promise<KillSwitchResult>;

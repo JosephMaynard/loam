@@ -1,11 +1,11 @@
 // The live-event layer: connected sockets, audience filtering, sealed WebSocket frames, presence, and
-// the `/ws` route with its reflection-safe key-confirmation. Extracted verbatim from app.ts
-// (2026-09-04 split) over the shared AppContext.
+// the `/ws` route with its reflection-safe key-confirmation, registered over the shared AppContext.
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { openTransport, sealTransport } from "@loam/crypto";
 import type { StreamEvent } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { errorBody } from "./errors.js";
+import { addressKey, ipv6SubnetKey } from "./rate-limit.js";
 import { originMatchesHost } from "./transport-server.js";
 import type { ClientEvent, SocketClient, SocketSession } from "./types.js";
 import type { FastifyReply, FastifyRequest } from "fastify";
@@ -23,8 +23,10 @@ const WS_UNCONFIRMED_CAP = 128;
 /** Tighter PER-IP cap on unconfirmed sockets, so a few LAN hosts can't exhaust the global pool and lock
  * everyone out. A real client confirms in milliseconds, so it never holds more than one or two at once. */
 const WS_UNCONFIRMED_PER_IP_CAP = 8;
+/** The cap on unconfirmed sockets from one IPv6 /64 (a whole SLAAC LAN), half the global pool. */
+const WS_UNCONFIRMED_PER_SUBNET_CAP = 64;
 /**
- * Largest client→server WebSocket frame the server will assemble (review 2026-09-04). The only frame a
+ * Largest client→server WebSocket frame the server will assemble. The only frame a
  * client ever legitimately sends is the ~200-byte sealed key-confirmation proof (confirmed sockets are
  * ignored, plaintext sockets register no listener) — but `ws` still buffers every inbound frame in full
  * before emitting it, and its default cap is 100 MiB, so an admitted socket could push several of those
@@ -32,7 +34,7 @@ const WS_UNCONFIRMED_PER_IP_CAP = 8;
  */
 export const WS_MAX_INBOUND_FRAME_BYTES = 16 * 1024;
 /**
- * Heartbeat period for every admitted socket (pre-release review 2026-09-25). A LOAM client never sends
+ * Heartbeat period for every admitted socket. A LOAM client never sends
  * after its key confirmation, so a connection whose peer silently vanished (phone left the hotspot, AP
  * dropped the flow) never errors on its side: it would show "live" forever and miss every event. The
  * server sends a content-free `{ type: "ping" }` on admission and then every interval; the client's
@@ -388,8 +390,17 @@ export function createRealtime(ctx: AppContext) {
       // — presence, events, admission to `sockets` — until the client answers a reflection-safe
       // challenge. Cap simultaneously-unconfirmed sockets both globally AND per-IP so this pre-auth path
       // can't be flooded (a few LAN hosts mustn't lock everyone out), and time out a socket that never proves.
+      // The per-source cap is per ADDRESS (an IPv4-mapped address counts as its IPv4 form), not per IPv6
+      // /64 like the HTTP limiter: a SLAAC LAN is one /64, and its devices all reconnecting after a restart
+      // would otherwise be refused. A /64 has its own, larger cap, so cycling addresses inside one still
+      // can't take the whole global pool.
       const ip = request.ip;
-      if (unconfirmedSocketCount >= WS_UNCONFIRMED_CAP || (unconfirmedByIp.get(ip) ?? 0) >= WS_UNCONFIRMED_PER_IP_CAP) {
+      const subnet = ipv6SubnetKey(ip);
+      const reservations: [key: string, cap: number][] = [[`address:${addressKey(ip)}`, WS_UNCONFIRMED_PER_IP_CAP]];
+      if (subnet !== undefined) {
+        reservations.push([`subnet:${subnet}`, WS_UNCONFIRMED_PER_SUBNET_CAP]);
+      }
+      if (unconfirmedSocketCount >= WS_UNCONFIRMED_CAP || reservations.some(([key, cap]) => (unconfirmedByIp.get(key) ?? 0) >= cap)) {
         connection.send(JSON.stringify({ type: "error", ...errorBody("Too many pending connections; try again") }));
         connection.close();
         return;
@@ -400,7 +411,9 @@ export function createRealtime(ctx: AppContext) {
       let confirmed = false;
       let settled = false; // guards the unconfirmed counters against a double decrement (confirm then close)
       unconfirmedSocketCount += 1;
-      unconfirmedByIp.set(ip, (unconfirmedByIp.get(ip) ?? 0) + 1);
+      for (const [key] of reservations) {
+        unconfirmedByIp.set(key, (unconfirmedByIp.get(key) ?? 0) + 1);
+      }
 
       /** Release the unconfirmed-socket reservation exactly once (on confirm, timeout, or close). */
       function releaseUnconfirmed(): void {
@@ -409,11 +422,13 @@ export function createRealtime(ctx: AppContext) {
         }
         settled = true;
         unconfirmedSocketCount -= 1;
-        const remaining = (unconfirmedByIp.get(ip) ?? 1) - 1;
-        if (remaining <= 0) {
-          unconfirmedByIp.delete(ip);
-        } else {
-          unconfirmedByIp.set(ip, remaining);
+        for (const [key] of reservations) {
+          const remaining = (unconfirmedByIp.get(key) ?? 1) - 1;
+          if (remaining <= 0) {
+            unconfirmedByIp.delete(key);
+          } else {
+            unconfirmedByIp.set(key, remaining);
+          }
         }
       }
 

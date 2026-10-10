@@ -1,20 +1,36 @@
-# 25 — Consolidated backlog (single source of outstanding work)
+# 25. Backlog (outstanding work)
 
-> **2026-08 UPDATE — several rows below are now SHIPPED (kept for their design notes; verified
-> against code 2026-08-15):** C1 (per-peer provenance re-sync), P4 (general @mentions), P10
-> (join requests), P11 (file attachments — 1 MB), P12 (per-channel TTL), P13 (lock/pin), P14
-> (typing indicators), the S5 admin-UI pinned-key field (the L-sized "per-peer signed authors"
-> half remains), **all** S7 keyed-join surfaces (the last gap — the CLI QR — closed on `feat/pre-tester-hardening`), D2/P15
-> (resolved-removed), and the moderation report loop (docs/26 → #109). **The active disposition
-> of every remaining item is [docs/29-next-phase.md](29-next-phase.md) §5** — read that first;
-> this file remains the per-item detail reference.
+> **Status: current. This is the list of open work.** §0 lists what is open after the 9 October 2026
+> review; more items will be added there. The numbered sections from §1 on are the older per-item
+> reference (July and August 2026). Some of their rows have shipped since and are kept for their design
+> notes, and [docs/29](29-next-phase.md), which used to assign them to tracks, is now historical. The
+> public summary is the [roadmap](roadmap.md).
 
-**Status: historical detail reference.** Originally the deduplicated, code-verified list of everything
-not yet built (cross-checked July 2026); rows called out in the banner above have SINCE SHIPPED and are
-kept for their design notes, so this file no longer claims to exclude shipped work — **the active
-disposition of every item is `docs/29` §5**. Stale/contradictory doc claims found by the consolidation
-sweep are in §8. Read `CLAUDE.md` for the built baseline. Per-topic design detail still lives in each
-row's cited doc.
+## 0. Open after the 9 October 2026 review
+
+| # | Item | Doc | Needs |
+|---|------|-----|-------|
+| O1 | **Real-device run of the Android host's Kotlin changes** from PR #153 (`LoamHostService.kt`: the hosting notification's translated labels passed in from the app and its new monochrome small icon; `LoamHotspotModule.kt`: the Wi-Fi station read reporting a wired Ethernet connection) and from the branch after it, plus #153's manifest changes for large screens (`plugins/with-loam-host.js`). They build into the APK; none has run on a phone. | 04, 21, 30 | Hardware |
+| O2 | **SQLCipher on a physical phone**: `PRAGMA key`, rekey and wipe with the vendored driver under the embedded Node 18 (S1 below). | 01, 21 §2 | Hardware |
+| O3 | **Windows host: durable writes.** Check that the config, the wipe journal and the database survive a crash or power cut on Windows, where file and directory syncing behave differently from Linux and macOS. The known failure (every durable write reported "not durable", because the flush used a read-only handle and a directory handle) is fixed and tested against emulated Windows rules (docs/02, "Durable writes on Windows"); it has not run on a real Windows machine. Even then the rename into place is best-effort on Windows (no directory flush, and Node's rename isn't write-through), so a power cut right after a write can leave the old file; making it durable would need a write-through rename from native code. | 02, 14 | Windows machine |
+| O4 | **Native-speaker review of the translations**: 14 of the 15 catalogs are machine-translated; their structure is tested, their quality isn't (D3 below). | 13 | Translators |
+| O5 | **Hotspot permissions on real phones**: Android 13+ asks only for Nearby Wi-Fi devices and the manifest caps location at Android 12; Android 12 asks for fine and coarse together. Tried on the API 35 emulator only. Also check whether Play still asks for a location declaration. A side effect to confirm is acceptable: on 13+ the Wi-Fi mode panel can no longer show the network name (that needs location). | 04, 30 | Hardware |
+| O6 | **Right-to-left on the host app beyond text**: strings now read and align right to left in ar/fa/ur/prs/ps, but rows and icons are not mirrored. Check on an OEM build too. | 13 | Hardware, translators |
+| O7 | **The app's own "Show the hosting notification?" prompt** did not appear on a first start on the emulator (the system dialog asked directly). Check on a phone whether that is intended. | 04 | Hardware |
+| O8 | **Template packages still linked through expo-router**: removing the unused Expo template dependencies left reanimated, gesture-handler and worklets in the APK, because expo-router depends on or optionally peers them. Revisit with Expo SDK 58, which also clears the `decode-uri-component` advisory. | 04 | Expo SDK 58 |
+| O9 | **A LAN neighbour can still tire the claim and panic limits for a network**: each address is counted on its own now, but the looser per-/64 bound (40 attempts per 5 minutes) can still be used up by one device cycling IPv6 addresses. That is the price of bounding guesses at all; revisit if it matters in practice. | 08, 12 | Decision |
+
+## Earlier notes
+
+**Shipped since this list was written** (verified against code 2026-08-15): C1 (per-peer provenance
+re-sync), P4 (general @mentions), P10 (join requests), P11 (file attachments, 1 MB), P12 (per-channel
+TTL), P13 (lock/pin), P14 (typing indicators), the S5 admin-UI pinned-key field (the L-sized "per-peer
+signed authors" half remains), **all** S7 keyed-join surfaces (the last gap, the CLI QR, closed on
+`feat/pre-tester-hardening`), D2/P15 (resolved-removed), and the moderation report loop (docs/26 → #109).
+
+Originally the deduplicated, code-verified list of everything not yet built (cross-checked July 2026).
+Stale/contradictory doc claims found by the consolidation sweep are in §8. Read `CLAUDE.md` or
+`ARCHITECTURE.md` for the built baseline. Per-topic design detail still lives in each row's cited doc.
 
 Size key: **S** ≈ hours–1 day · **M** ≈ days · **L** ≈ 1–2 weeks · **epic** ≈ multi-session/branch.
 
@@ -36,7 +52,7 @@ Size key: **S** ≈ hours–1 day · **M** ≈ days · **L** ≈ 1–2 weeks · 
 | S1 | **On-device SQLCipher runtime verification** — the encrypted arm64 prebuild loads, but `PRAGMA key`/rekey/wipe was never run on physical Node-18 hardware (the MC wrapper even declares `engines: node 20/22`). A **release gate**. | 01,04,21 | S | Hardware |
 | S2 | **E2EE for DMs / private channels** (docs/08 Layer 2) — server sees all plaintext; no client-side crypto. Strongest protest-model protection; disables server LLM/search for those convos; bundles into `hardened`. | 07,08,09 | epic | Product decision |
 | S3 | **Optional authentication / `identity.mode`** (Better Auth now, atproto later) — enables website/team hosting without touching the anonymous default. | 05 | epic | Product decision |
-| S4 | **Mesh delivery-acks** — convergence rests on TTL/hop/cap only. Design **now decided** (Sol review): a **hash-lock capability receipt** — sender commits `SHA-256("loam.mesh.ack.v1"‖msgId‖ackSecret)` in the public envelope, recipient publishes the preimage, carriers verify + delete + gossip. No recipient identity revealed; the sender can only prematurely delete its own message. Ready to build (docs/23 §11). | 16,19,23 | M | — |
+| S4 | **Mesh delivery-acks.** Convergence rests on TTL/hop/cap only. Design **now decided** (external review): a **hash-lock capability receipt**. The sender commits `SHA-256("loam.mesh.ack.v1"‖msgId‖ackSecret)` in the public envelope, recipient publishes the preimage, carriers verify + delete + gossip. No recipient identity revealed; the sender can only prematurely delete its own message. Ready to build (docs/23 §11). | 16,19,23 | M | — |
 | S5 | **Inter-node sync MITM hardening** — unpinned peer keys are TOFU-learned over plain HTTP; `SyncPeer.transportKey` pinning exists in config but the **admin-UI pinned-key field is unbuilt**; longer-term per-peer signed authors. | 08,11,15#1/#6a | S (UI) / L | — |
 | S6 | **Sync peer auth: per-member / rotating creds** — only a single shared `sync.token`; revoking one courier re-keys every node. | 16,19 | M | Product decision |
 | S7 | **Transport-encryption join-QR follow-ups** — thread the `#k=` host-key through the remaining join-QR surfaces (`InviteControl`, Android host-panel, `NodeLinkControl`) + live re-handshake on a runtime mode flip. | 08,15#5 | S–M | — |
@@ -79,7 +95,7 @@ Size key: **S** ≈ hours–1 day · **M** ≈ days · **L** ≈ 1–2 weeks · 
 | M1 | **Phase 3 native transport finish** — Kotlin BLE + Wi-Fi Aware scaffolded but never compiled/run against radios: Wi-Fi-Aware data-path handshake + port-exchange, the unimplemented BLE chunked fallback (`sendBlobFallback` throws), real-device fixes. | 16,17 | epic | Hardware (2–3 phones) |
 | M2 | **Phase 4 background duty-cycling + battery** — PendingIntent discovery, burst-scan/back-off, Doze-aware. "Where Briar stalled." | 16 | epic | Hardware |
 | M3 | **Phase 5 LoRa fixed relays** (Pi + LoRa hat; framing/bandwidth for the existing sync protocol) | 16,11 | epic | Hardware |
-| M4 | **AT-Proto-inspired portable identity + signed user repos** — the largest remaining epic. Plan of record **`docs/23`, revised after Sol round 1** (per-device operation logs, genesis-doc identity + off-grid recovery/freshness limit, fork-freeze-at-ancestor, publication as an explicit feature). One product call open — identity **Option A (portable pseudonym + encrypted backup) vs B (recovery-key hierarchy)** — then a revised Phase 0 spike. | 22,23 | epic | Product decision |
+| M4 | **AT-Proto-inspired portable identity + signed user repos**, the largest remaining epic. Plan of record **`docs/23`, revised after review round 1** (per-device operation logs, genesis-doc identity + off-grid recovery/freshness limit, fork-freeze-at-ancestor, publication as an explicit feature). One product call is open, identity **Option A (portable pseudonym + encrypted backup) vs B (recovery-key hierarchy)**, then a revised Phase 0 spike. | 22,23 | epic | Product decision |
 
 ## 4. Correctness / robustness
 

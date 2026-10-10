@@ -87,6 +87,36 @@ export function dayLabel(timestamp: number, now = Date.now()): string {
   return dateFormatter(locale, !sameYear).format(date);
 }
 
+/** The cached numeric relative formatter ("3 hours ago", never "yesterday") for a locale. */
+const ageFormatters = new Map<string, Intl.RelativeTimeFormat>();
+
+/**
+ * How long ago `timestamp` was, in the node's UI language: "5 minutes ago", "3 hours ago", "2 days ago".
+ * Minutes under an hour (at least one), hours under two days, days after that. Used for how long a newcomer
+ * has been waiting in the greeter's queue, where the rough size of the wait is what matters.
+ *
+ * @param timestamp - Milliseconds since the UNIX epoch.
+ * @param now - The reference "current time" (injectable for tests; defaults to Date.now()).
+ */
+export function ageLabel(timestamp: number, now = Date.now()): string {
+  const locale = intlLocale();
+  let formatter = ageFormatters.get(locale);
+
+  if (!formatter) {
+    formatter = new Intl.RelativeTimeFormat(locale, { numeric: "always" });
+    ageFormatters.set(locale, formatter);
+  }
+
+  const minutes = Math.max(1, Math.floor((now - timestamp) / 60_000));
+
+  if (minutes < 60) {
+    return formatter.format(-minutes, "minute");
+  }
+
+  const hours = Math.floor(minutes / 60);
+  return hours < 48 ? formatter.format(-hours, "hour") : formatter.format(-Math.floor(hours / 24), "day");
+}
+
 /** Uppercase the first character, so a divider reads "Today" not "today" at the start of a row.
  * The locale drives casing rules (e.g. Turkish dotted/dotless I) so it matches the active UI language. */
 function capitalize(value: string, locale: string): string {

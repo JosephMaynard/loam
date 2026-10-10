@@ -1,6 +1,5 @@
-import { closeSync, existsSync, openSync, readFileSync, readSync, renameSync } from "node:fs";
+import { closeSync, openSync, readSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
 
 import {
   ChannelSchema,
@@ -71,10 +70,10 @@ export type IdentityTokenRecord = {
 
 /**
  * A work item recording that a peer's attachment file failed to copy during a node-to-node sync
- * import (docs/15 A6): the message itself still imported (best-effort), but without this record a
+ * import: the message itself still imported (best-effort), but without this record a
  * later sync digest would see the message id as already-known and never re-offer the attachment,
  * stranding it image-less forever. `attempts` counts retries (used for backoff — see
- * `retryMissingAttachments` in `app.ts`); `lastAttemptAt` (0 = never attempted) is what that backoff
+ * `retryMissingAttachments` in `sync.ts`); `lastAttemptAt` (0 = never attempted) is what that backoff
  * is measured from, so the reaper's 30s tick doesn't hammer an unreachable peer every cycle.
  */
 export type MissingAttachmentRecord = {
@@ -88,7 +87,7 @@ export type MissingAttachmentRecord = {
   /**
    * When this record next becomes eligible for a retry (epoch ms; 0 = due immediately — a fresh,
    * never-attempted record). Stamped by `bumpMissingAttachmentAttempts` from the caller's own backoff
-   * policy (P2-2, docs/15 A6/F1) and used by `loadDueMissingAttachments` to select — and fairly order
+   * policy (`missingAttachmentBackoffMs`) and used by `loadDueMissingAttachments` to select — and fairly order
    * — only the records actually eligible right now, rather than every record in creation order.
    */
   nextAttemptAt: number;
@@ -213,6 +212,15 @@ export interface LoamStore {
   loadSessions(): SessionRecord[];
   upsertUser(user: User): void;
   /**
+   * Record when a user waiting in an approval queue was let in. Server-only (the `users.admitted_at`
+   * column, never part of the user record, so it is neither broadcast nor synced); it goes with the row.
+   * The unused-identity reaper measures its age window from it, so an approval doesn't leave a person who
+   * waited longer than that window to be reaped before they next open the app. No-op without a row.
+   */
+  markUserAdmitted(userId: string, admittedAt: number): void;
+  /** When `markUserAdmitted` last recorded `userId` as let in, or undefined if it never did. */
+  userAdmittedAt(userId: string): number | undefined;
+  /**
    * Delete a single user row by id, with the rows that exist only for that user: their block-list rows (as
    * blocker or blocked), their pending private-channel join requests, and their own mesh address book
    * (`mesh_contacts` they own; other users' contact entries are theirs to keep). Used by the legacy
@@ -265,7 +273,7 @@ export interface LoamStore {
   upsertMeshContact(ownerUserId: string, meshId: string, data: string): void;
   loadMeshContacts(): { ownerUserId: string; meshId: string; data: string }[];
   /**
-   * Record that a peer attachment failed to copy during a sync import (docs/15 A6), starting its
+   * Record that a peer attachment failed to copy during a sync import, starting its
    * attempt counter at 0. A conflict (same message+attachment already tracked) is a no-op — it keeps
    * the original `attempts`/`createdAt` rather than resetting the retry clock.
    */
@@ -274,7 +282,7 @@ export interface LoamStore {
   ): void;
   loadMissingAttachments(): MissingAttachmentRecord[];
   /**
-   * Records currently due for a retry (P2-2, docs/15 A6/F1): `nextAttemptAt <= nowMs`, fairly ordered
+   * Records currently due for a retry: `nextAttemptAt <= nowMs`, fairly ordered
    * (earliest-due first) and capped at `limit`. Unlike `loadMissingAttachments` (every record, creation
    * order), this is what the retry pass itself should page through — it guarantees the per-pass cap
    * applies to records that are actually ELIGIBLE right now, so a block of records still in backoff can
@@ -310,7 +318,7 @@ export interface LoamStore {
   /** How many reports are still open (open or escalated): node-wide, or filed by one reporter. */
   countOpenReports(reporterUserId?: string): number;
   /**
-   * Record that a channel was IMPORTED from a sync peer (C1 provenance) — local-only, never exported.
+   * Record that a channel was IMPORTED from a sync peer (provenance) — local-only, never exported.
    * Only channels marked here are eligible for peer-driven metadata re-sync; a locally-created channel
    * (including the seeded defaults, which every node shares an id for) is never in this set, so a peer
    * can't clobber it. Idempotent. Wiped with everything else by the kill switch.
@@ -318,7 +326,7 @@ export interface LoamStore {
   markChannelSynced(channelId: string): void;
   /** Forget a channel's synced-origin mark (channel delete) — otherwise a restart re-hydrates the
    * mark and a later same-slug LOCAL channel would falsely count as synced-origin, letting a peer's
-   * metadata clobber it (C1 provenance inversion). */
+   * metadata clobber it. */
   unmarkChannelSynced(channelId: string): void;
   loadSyncedChannelIds(): string[];
   /**
@@ -338,7 +346,7 @@ export interface LoamStore {
   markUserSynced(userId: string): void;
   isUserSynced(userId: string): boolean;
   /**
-   * Pending join requests for private channels (P10). Idempotent add; per-channel load (the requester ids);
+   * Pending join requests for private channels. Idempotent add; per-channel load (the requester ids);
    * removal on approve/deny; bulk removal when a channel is deleted, and of a requester's rows when that user
    * is deleted (`deleteUser`). Wiped by the kill switch.
    */
@@ -384,6 +392,13 @@ export interface LoamStore {
   /** Delete all users, channels, messages, and sessions in one transaction. Config is preserved. */
   wipeAll(): void;
   /**
+   * Rebuild the database file (`VACUUM`), so no page of it holds anything but live rows. The plaintext
+   * Emergency Reset runs it after `wipeAll()`, then `checkpoint()`: `secure_delete` zeroes what is deleted
+   * from now on, but pages a build without it freed earlier (an upgraded node) still hold old rows until
+   * they are reused, and VACUUM rewrites or truncates every one of them. Cheap on an emptied database.
+   */
+  vacuum(): void;
+  /**
    * Fold the write-ahead log back into the main `loam.db` file via `PRAGMA wal_checkpoint(TRUNCATE)`,
    * so that single file is a complete, standalone snapshot with nothing left to lose in `-wal`/`-shm`
    * (TRUNCATE also shrinks the WAL to zero, so a later file-level copy can't pick up stale frames).
@@ -391,23 +406,23 @@ export interface LoamStore {
    * DURABLE: under `synchronous = NORMAL` a WAL commit is never fsynced and a power cut can roll it back.
    *
    * Two callers, on every driver (`node:sqlite`, plain `better-sqlite3`, SQLCipher):
-   * - the passphrase key-migration in `openInitialStore` (P1-a, Sol round 6): the crash-atomic
+   * - the passphrase key-migration in `openInitialStore` (store-lifecycle.ts): the crash-atomic
    *   pre-migration backup is a raw copy of `loam.db` alone, which would otherwise MISS committed
    *   transactions still resident in the WAL; this makes the snapshot single-file-consistent first;
-   * - the plaintext Emergency Reset, right after `wipeAll()`: the deletion must be in the main file before
+   * - the plaintext Emergency Reset, right after `wipeAll()` and `vacuum()`: the deletion must be in the main file before
    *   the wipe journal (its only recovery record) is durably removed.
    *
-   * Throws if the checkpoint comes back `busy` or with fewer frames folded than the WAL holds (RF6-e, Sol
-   * round 6): another connection held a lock, so the WAL wasn't fully folded and truncated, the file is NOT
+   * Throws if the checkpoint comes back `busy` or with fewer frames folded than the WAL holds: another
+   * connection held a lock, so the WAL wasn't fully folded and truncated, the file is NOT
    * a complete snapshot, and it must neither be copied as a backup nor be trusted to hold a commit. Never
    * logs any key material.
    */
   checkpoint(): void;
   /**
-   * Re-encrypt an already-open SQLCipher-backed store under `newKey`, via `PRAGMA rekey` (P1-1, Sol
-   * round 5 — the passphrase key-derivation migration: round 4 changed the passphrase KDF from
-   * `SHA256(passphrase)` to `SHA256(passphrase + ':' + deviceSecret)`, so an existing passphrase DB
-   * opens only under the OLD derivation; the caller — `openInitialStore` in `app.ts` — opens with that
+   * Re-encrypt an already-open SQLCipher-backed store under `newKey`, via `PRAGMA rekey` (the passphrase
+   * key-derivation migration: the passphrase key changed from `SHA256(passphrase)` to
+   * `SHA256(passphrase + ':' + deviceSecret)`, so an older passphrase DB opens only under the legacy
+   * derivation; the caller — `openInitialStore` in `store-lifecycle.ts` — opens with that
    * legacy key and calls this to re-key it in place under the current one, so every later boot uses the
    * current key directly). SQLCipher applies the new key to the existing (already-decrypted) pages in
    * place; the connection stays open and usable immediately afterward under the new key. Throws if this
@@ -583,11 +598,11 @@ export function openStore(path: string, options: OpenStoreOptions = {}): LoamSto
 
   try {
     // Only an encrypted (SQLCipher) connection exposes `.pragma()` — threaded through separately so
-    // `buildStore` can implement `rekey()` (P1-1, Sol round 5) without needing to know the driver.
+    // `buildStore` can implement `rekey()` without needing to know the driver.
     const pragma = options.encryptionKey ? (db as EncryptedDatabase).pragma.bind(db as EncryptedDatabase) : undefined;
     const store = buildStore(db, pragma);
     if (pragma) {
-      // Prove the codec engaged (pre-release review 2026-09-25): a build of the driver without the cipher
+      // Prove the codec engaged: a build of the driver without the cipher
       // compiled in accepts `PRAGMA key` as a silent no-op and writes an ordinary plaintext database. Fold
       // the schema writes from the WAL into the main file, then refuse the store if that file starts with
       // the plaintext SQLite header. A real SQLCipher file is ciphertext from byte 0.
@@ -691,6 +706,17 @@ function migrateTombstonesCreatedAt(db: SqliteConnection): void {
 }
 
 /**
+ * Add the server-only `users.admitted_at` column (see `LoamStore.markUserAdmitted`). A fresh database gets
+ * it here too, right after `CREATE TABLE`. Existing rows keep NULL: nobody was recorded as let in before.
+ */
+function migrateUsersAdmittedAt(db: SqliteConnection): void {
+  const columns = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+  if (!columns.some((column) => column.name === "admitted_at")) {
+    db.exec("ALTER TABLE users ADD COLUMN admitted_at INTEGER");
+  }
+}
+
+/**
  * Add the indexed `reports.target_id` and `reports.reporter_user_id` columns to a database created before
  * they existed, filled from each row's JSON. They let the per-message queue check and the per-reporter cap
  * query one target or one reporter instead of parsing the whole table; the JSON stays the record of truth
@@ -716,7 +742,7 @@ function migrateReportsTargetColumns(db: SqliteConnection): void {
 
 /**
  * Backfill the `missing_attachments.last_attempt_at` column onto a database created before
- * retry-backoff existed (docs/15 A6 / F1). `0` (never attempted) is the correct backfill for
+ * retry-backoff existed. `0` (never attempted) is the correct backfill for
  * existing rows — the retry pass treats it as "due immediately", which is the same behaviour those
  * rows already had under the old no-backoff code.
  */
@@ -731,7 +757,7 @@ function migrateMissingAttachmentsLastAttempt(db: SqliteConnection): void {
 
 /**
  * Backfill the `missing_attachments.next_attempt_at` column onto a database created before
- * fair-ordered retry-due selection existed (docs/15 A6 / P2-2). `0` (due immediately) is the correct
+ * fair-ordered retry-due selection existed. `0` (due immediately) is the correct
  * backfill for existing rows: it's exactly the "never contacted yet" default new rows already get, so
  * every pre-existing record simply becomes eligible on the very next pass — nothing is starved worse
  * than it already was.
@@ -783,6 +809,15 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
 
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA synchronous = NORMAL");
+  if (!pragma) {
+    // A plaintext store has only the logical wipe (`wipeAll`) for Emergency Reset, so have SQLite overwrite
+    // deleted content with zeros instead of leaving it in free pages and freed cell space, where a copy of
+    // the file would still give it up. That covers what is deleted from here on; pages an older build freed
+    // without it keep their old content until reused, which is why the reset also runs `vacuum()` before
+    // its checkpoint. Not secure erasure on flash (the device may keep the old blocks; see docs/02).
+    // A SQLCipher store's free pages are ciphertext already and its wipes delete the files.
+    db.exec("PRAGMA secure_delete = ON");
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
@@ -879,10 +914,13 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   migrateMissingAttachmentsNextAttempt(db);
   migrateReportsTargetColumns(db);
   createSealedOffersSeenTable(db);
+  migrateUsersAdmittedAt(db);
 
   const upsertUserStmt = db.prepare(
     "INSERT INTO users (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
   );
+  const markUserAdmittedStmt = db.prepare("UPDATE users SET admitted_at = ? WHERE id = ?");
+  const userAdmittedAtStmt = db.prepare("SELECT admitted_at FROM users WHERE id = ?");
   const upsertChannelStmt = db.prepare(
     "INSERT INTO channels (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
   );
@@ -1166,6 +1204,13 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       refuseQuarantined("users", user.id);
       upsertUserStmt.run(user.id, JSON.stringify(user));
     },
+    markUserAdmitted(userId, admittedAt) {
+      markUserAdmittedStmt.run(admittedAt, userId);
+    },
+    userAdmittedAt(userId) {
+      const row = userAdmittedAtStmt.get(userId) as { admitted_at: number | null } | undefined;
+      return typeof row?.admitted_at === "number" ? row.admitted_at : undefined;
+    },
     deleteUser(userId) {
       deleteUserStmt.run(userId);
       deleteUserBlocksForUserStmt.run(userId, userId);
@@ -1404,6 +1449,9 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       quarantinedChannels.clear();
       quarantinedMessages.clear();
     },
+    vacuum() {
+      db.exec("VACUUM");
+    },
     checkpoint() {
       // TRUNCATE folds all committed WAL frames back into the main DB file, syncs it, and resets the WAL to
       // zero bytes. This store is the sole open connection when its callers run it (nothing else can hold a
@@ -1411,7 +1459,7 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
       // afterward. SQLCipher goes through its own `pragma()` as it always has; the plaintext drivers read the
       // same single result row through a prepared statement (`exec` would discard it).
       //
-      // RF6-e (Sol round 6): DON'T trust that silently. `wal_checkpoint(TRUNCATE)` returns a single
+      // DON'T trust that silently. `wal_checkpoint(TRUNCATE)` returns a single
       // `(busy, log, checkpointed)` row; `busy !== 0` means another connection held a lock and the WAL
       // was NOT fully folded/truncated, and `checkpointed < log` means frames were left behind. Either way
       // the sole-connection invariant is broken: the migration's raw file copy would MISS WAL-resident rows
@@ -1459,86 +1507,4 @@ function buildStore(db: SqliteConnection, pragma?: (source: string) => unknown):
   };
 
   return store;
-}
-
-function isSessionRecord(value: unknown): value is SessionRecord {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const record = value as Partial<SessionRecord>;
-  return (
-    typeof record.token === "string" &&
-    record.token.length > 0 &&
-    typeof record.userId === "string" &&
-    record.userId.length > 0
-  );
-}
-
-function readLegacyJsonArray(dataDir: string, file: string): unknown[] {
-  const path = join(dataDir, `${file}.json`);
-
-  if (!existsSync(path)) {
-    return [];
-  }
-
-  const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-
-  if (!Array.isArray(parsed)) {
-    // Coercing to [] would "import" nothing and rename the file to .bak — silent data loss.
-    throw new Error(`Legacy data file ${path} does not contain a JSON array`);
-  }
-
-  return parsed;
-}
-
-/**
- * One-time import of the legacy flat-JSON persistence (`users/channels/messages/sessions.json`)
- * into an empty store, renaming each imported file to `<name>.json.bak` afterwards.
- *
- * Users, channels, and messages are validated strictly (a corrupt row aborts the import and rolls
- * back); session records are skipped when malformed, matching the old loader's leniency.
- *
- * @param store - The destination store; must be empty for the import to run
- * @param dataDir - Directory containing the legacy JSON files
- * @returns `true` when an import happened, `false` when the store had data or no files exist
- */
-export function importLegacyJsonData(store: LoamStore, dataDir: string): boolean {
-  if (!store.isEmpty()) {
-    return false;
-  }
-
-  const files = ["users", "channels", "messages", "sessions"] as const;
-  const presentFiles = files.filter((file) => existsSync(join(dataDir, `${file}.json`)));
-
-  if (!presentFiles.length) {
-    return false;
-  }
-
-  store.transaction(() => {
-    for (const user of readLegacyJsonArray(dataDir, "users")) {
-      store.upsertUser(UserSchema.parse(user));
-    }
-
-    for (const channel of readLegacyJsonArray(dataDir, "channels")) {
-      store.upsertChannel(ChannelSchema.parse(channel));
-    }
-
-    for (const message of readLegacyJsonArray(dataDir, "messages")) {
-      store.insertMessage(MessageSchema.parse(message));
-    }
-
-    for (const session of readLegacyJsonArray(dataDir, "sessions")) {
-      if (isSessionRecord(session)) {
-        store.putSession(session.token, session.userId);
-      }
-    }
-  });
-
-  for (const file of presentFiles) {
-    const path = join(dataDir, `${file}.json`);
-    renameSync(path, `${path}.bak`);
-  }
-
-  return true;
 }

@@ -28,7 +28,7 @@ law-enforcement avoidance as the purpose.
 primitive; the server has a `sealed` `Message` arm, per-user mesh identities (`mesh_identities` DAL
 table; minted only for local users — a v0.4 database gets a one-time `synced_users` backfill (unreachable,
 footprint-free humans) — a row an older build minted for a synced user is deleted at boot and
-its forged `identityKey` stripped), and bounded relay (TTL/hop/cap, no acks). The outer message id isn't covered by the seal, so
+its forged `identityKey` stripped), and bounded relay (TTL/hop/cap, no acks; mail is sealed with a hop budget drawn from the top three values (never below 2) and a stated send time up to min(ttl/5, 1 h, retention/5) early, and a relay stores and re-advertises carried mail under its own intake time, so first-hop carriers can't read origin off those fields alone; docs/16 §9 says what is still visible). `GET /api/mesh/outbound` hands the radio courier at most 200 blobs per answer, rotated across calls. `openMailbox` refuses a `fromKx` that isn't a canonical 32-byte key, which keeps the frozen v1 inner-signature encoding unambiguous (docs/16 item 10; a new inner field needs a new label). The outer message id isn't covered by the seal, so
 replay protection keys on a **hash of ciphertext + toTag + TTL** (`sealed.<sha256>`, stored beside the
 id tombstones on delivery) as well as the id; relays dedupe carried mail by the same key, only the
 canonical base64url spelling is accepted, and peer-supplied ids in the `sealed.` namespace are refused.
@@ -68,7 +68,7 @@ pnpm workspace (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). Node pinned to `
 |------|------|
 | `apps/server` | Fastify backend: REST + WebSocket, SQLite persistence behind a DAL (`src/db.ts`), optional Ollama LLM. `src/app.ts` is the composition root (`buildApp()`, testable via `inject`) plus the domain core; the transport layer, realtime, kill switch, store lifecycle, sync, mesh, LLM and per-domain routes are sibling modules over one `AppContext` (see "Server architecture"). `src/server.ts` is the thin entry point (env, listen, SIGINT). |
 | `apps/client` | Preact + Vite PWA. Main app: `src/app.tsx` (~2.2k lines: `LoamApp` state, boot, WebSocket, routing). Screens in `src/views/`, components in `src/components/`, libs in `src/lib/`, styles in `src/styles/` (see `apps/client/DESIGN.md`). |
-| `apps/app` | Expo SDK 57 / RN 0.86 — the **Android host** (embedded Node server + hotspot + WebView, see `docs/04-android-host-app.md`). The Step-2 join address is **discovered, never assumed**: Android gives a LocalOnlyHotspot a random address per start (`192.168.49.1` is Wi-Fi Direct's, not a hotspot's), so the Kotlin module enumerates interfaces (`hotspotAddressCandidates`, with upstream / pre-existing hints) and `src/lib/hotspot-address.ts` scores them; no confident pick → Step 2 shows the manual "Gateway" route, not a guess (docs/04 "The Step-2 address"). The share overlay has a persisted **host mode** (`HostMode = 'hotspot' \| 'wifi'`, SecureStore `loam.hostMode`, default hotspot): Wi-Fi mode starts no hotspot, never asks for location, and advertises the phone's Wi-Fi station address via the pure `pickWifiAddress` (`src/lib/host-mode.ts`; native `wifiStationInfo()`, whose `wired` flag lets a laptop with no Wi-Fi host on its wired network), see docs/04 "Hosting modes". **Large screens** (docs/04 "Large screens", docs/30): `orientation: "default"` (no lock), `android:resizeableActivity="true"` and an optional touchscreen (`OPTIONAL_FEATURES`) so it runs on tablets, foldables and Android laptops, with every native screen a scrolling column centred at `MaxContentWidth`. Has `scripts/bundle-server.mjs` (esbuild → `nodejs-assets/nodejs-project/loam-server.js`, gitignored; run `fetch:native` first — it fails without both SQLite prebuilds unless `LOAM_ALLOW_MISSING_NATIVE=1`) and the host UI (`HostPanel`, `QRCode`). Both android-arm64 SQLite prebuilds (plain `better-sqlite3` and `multiple-ciphers`) are **vendored** under `native-prebuilds/`, sha256-pinned — nothing is downloaded from upstream releases. **Setup screens** (`src/components/setup-wizard.tsx`, logic in `src/lib/setup.ts` + `new-network.ts`, docs/04 "Setup screens") run every launch before the runtime starts: language, kind of network (Private and short-lived / Community / Choose every setting myself = a security profile + identity/presence flags + DB encryption mode), name, Hotspot or Wi-Fi; later launches offer one-tap Continue or a hold-to-confirm new network. A new network rides every `loam-db-key-response` as `newNetwork {id, config}` until main.js acknowledges it; main.js (`new-network.js`) marks the folder `.loam-setup-pending`, empties it (keeping that marker and the mode hint), durably writes `config.json` and records the id (a repeat is a no-op), staying locked if that fails, and on every boot while the marker names an unapplied operation; setup also writes the chosen mode into the launcher's mode hint first, so a failed key handoff on a fresh install locks instead of booting plaintext. The host app has its own i18n (`src/lib/i18n`, all 15 locales, parity-tested). **Update news** (`modules/loam-updates`, `src/lib/app-updates.ts`, `components/update-notice.tsx`), on the opening setup screen only (never on a running network): the AAB is built with `-PloamDistribution=play` and asks the Play Store app (Google's `app-update` library, linked only in that build); the GitHub APK (`github`, the default) has a tap-only "Check for updates" against GitHub's latest-release API. Neither downloads anything. Has a vitest harness (`src/**/*.test.ts`, in `pnpm test`); also validate types with `pnpm --filter app typecheck` (a CI step). **GOTCHA: never put `*.test.*` files under `src/app/`** — that dir is the Expo Router root, whose `require.context` eagerly bundles EVERY file in it into the release APK, so a test's `vitest` import pulls `vite` into the bundle and breaks `assembleRelease` (debug is unaffected, so it hides until an APK build). Keep tests in `src/lib/` or `src/__tests__/`. |
+| `apps/app` | Expo SDK 57 / RN 0.86 — the **Android host** (embedded Node server + hotspot + WebView, see `docs/04-android-host-app.md`). The Step-2 join address is **discovered, never assumed**: Android gives a LocalOnlyHotspot a random address per start (`192.168.49.1` is Wi-Fi Direct's, not a hotspot's), so the Kotlin module enumerates interfaces (`hotspotAddressCandidates`, with upstream / pre-existing hints) and `src/lib/hotspot-address.ts` scores them; no confident pick → Step 2 shows the manual "Gateway" route, not a guess (docs/04 "The Step-2 address"). The share overlay has a persisted **host mode** (`HostMode = 'hotspot' \| 'wifi'`, SecureStore `loam.hostMode`, default hotspot): Wi-Fi mode starts no hotspot, never asks for location, and advertises the phone's Wi-Fi station address via the pure `pickWifiAddress` (`src/lib/host-mode.ts`; native `wifiStationInfo()`, whose `wired` flag lets a laptop with no Wi-Fi host on its wired network), see docs/04 "Hosting modes". **Large screens** (docs/04 "Large screens", docs/30): `orientation: "default"` (no lock), `android:resizeableActivity="true"` and an optional touchscreen (`OPTIONAL_FEATURES`) so it runs on tablets, foldables and Android laptops, with every native screen a scrolling column centred at `MaxContentWidth`. Has `scripts/bundle-server.mjs` (esbuild → `nodejs-assets/nodejs-project/loam-server.js`, gitignored; run `fetch:native` first — it fails without both SQLite prebuilds unless `LOAM_ALLOW_MISSING_NATIVE=1`) and the host UI (`HostPanel`, `QRCode`). Both android-arm64 SQLite prebuilds (plain `better-sqlite3` and `multiple-ciphers`) and their JS wrappers (`native-prebuilds/npm/`) are **vendored** under `native-prebuilds/`, sha256-pinned; nothing is downloaded from upstream releases or the registry. **Permissions:** on API 33+ the hotspot asks only for `NEARBY_WIFI_DEVICES`; fine + coarse location are requested only on API 31-32 and capped `maxSdkVersion="32"` in the manifest (`capLocationPermissions` in the plugin), so Wi-Fi mode can't show the network name on 13+. **Errors in the host's language:** the Kotlin modules reject with `ERR_HOTSPOT_*` codes (`src/lib/hotspot-errors.ts`) and main.js sends an `errorCode` beside each error (`src/lib/host-errors.ts`); `src/__tests__/native-strings.test.ts` fails on English literals in native screens. **Right-to-left:** in ar/fa/ur/prs/ps `t()` prefixes U+200F and isolates each filled-in value (U+2068/U+2069), and `ThemedText` aligns unaligned text right (`rtlTextAlign`). There is no web build (the Expo template's web target and unused template dependencies are gone). **Setup screens** (`src/components/setup-wizard.tsx`, logic in `src/lib/setup.ts` + `new-network.ts`, docs/04 "Setup screens") run every launch before the runtime starts: language, kind of network (Private and short-lived / Community / Choose every setting myself = a security profile + identity/presence flags + DB encryption mode), name, Hotspot or Wi-Fi; later launches offer one-tap Continue or a hold-to-confirm new network. A new network rides every `loam-db-key-response` as `newNetwork {id, config}` until main.js acknowledges it; main.js (`new-network.js`) marks the folder `.loam-setup-pending`, empties it (keeping that marker and the mode hint), durably writes `config.json` and records the id (a repeat is a no-op), staying locked if that fails, and on every boot while the marker names an unapplied operation; setup also writes the chosen mode into the launcher's mode hint first, so a failed key handoff on a fresh install locks instead of booting plaintext. The host app has its own i18n (`src/lib/i18n`, all 15 locales, parity-tested). **Update news** (`modules/loam-updates`, `src/lib/app-updates.ts`, `components/update-notice.tsx`), on the opening setup screen only (never on a running network): the AAB is built with `-PloamDistribution=play` and asks the Play Store app (Google's `app-update` library, linked only in that build); the GitHub APK (`github`, the default) has a tap-only "Check for updates" against GitHub's latest-release API. Neither downloads anything. Has a vitest harness (`src/**/*.test.ts`, in `pnpm test`); also validate types with `pnpm --filter app typecheck` (a CI step). **GOTCHA: never put `*.test.*` files under `src/app/`** — that dir is the Expo Router root, whose `require.context` eagerly bundles EVERY file in it into the release APK, so a test's `vitest` import pulls `vite` into the bundle and breaks `assembleRelease` (debug is unaffected, so it hides until an APK build). Keep tests in `src/lib/` or `src/__tests__/`. |
 | `packages/schema` | **The client↔server contract.** Zod schemas + inferred TS types for users, channels, messages, config, stream events. |
 | `packages/display-name` | Deterministic anonymous name from an id (`adjective.material.creature`), FNV-1a + mix32 hashed. |
 | `packages/avatar` | Deterministic SVG avatar from an id. Three modes: `face` (SVG template), `initial`, `pattern`. OKLCH colour derivation with WCAG contrast fixups. Has a standalone `demo/`. |
@@ -86,22 +86,29 @@ pnpm test             # pnpm -r --if-present test: runs vitest in the 6 packages
 ```
 
 There is **no lint script**. Type-checking happens as part of `build` (`tsc`), except `apps/app`,
-which has a dedicated `typecheck` script (`pnpm --filter app typecheck`). A `.stylelintrc.json`
-exists but is not wired to any script. CI (`.github/workflows/ci.yml`) runs `node
+which has a dedicated `typecheck` script (`pnpm --filter app typecheck`), and the server's test files, which
+`pnpm --filter @loam/server typecheck:test` checks (`tsconfig.test.json`; a CI step). A root `.editorconfig`
+records the formatting. CI (`.github/workflows/ci.yml`) runs `node
 scripts/check-versions.mjs` (every workspace `package.json`, `cli/package.json` and `app.json`
-`expo.version` must agree), `pnpm build`, `pnpm test`, the apps/app typecheck, then `pnpm smoke:cli` (packs + installs `loamnet` and drives the installed `loam`: port fallback, taken `--port`, `--encrypt` + reopen) on push/PR to
-`master`. `build-apk.yml` (tag builds) pins every action to a commit SHA, runs `check-versions
+`expo.version` must agree), `pnpm build`, `pnpm test`, the apps/app and server-test typechecks, `pnpm audit --prod
+--audit-level=high` (two build-time advisories with no fix are listed in `pnpm-workspace.yaml` `auditConfig.ignoreGhsas`),
+then `pnpm smoke:cli` (packs + installs `loamnet` and drives the installed `loam`: port fallback, taken `--port`, `--encrypt` + reopen) on push/PR to
+`master` (a newer push to a PR cancels the older run). `build-apk.yml` (tag builds) pins every action to a commit SHA, runs `check-versions
 --release-tag vX.Y.Z[-rc.N|-beta.N]` (the tag's X.Y.Z == version, `versionCode` > every earlier release
 tag's; a suffixed tag is published as a GitHub pre-release; tests in `scripts/check-versions.test.mjs`, run
 by the root `pnpm test` via `node --test` along with `cli/test/`), build + test +
-typecheck, then signs; a separate least-privilege release job attaches the APK. Tag builds also run `pnpm --filter
+typecheck, then signs; an `attest` job records build provenance for the APK and AAB
+(`actions/attest-build-provenance`), and a separate least-privilege release job attaches the APK with
+`loam-host.apk.sha256` beside it. Tag builds also run `pnpm --filter
 app aab` and upload the Play bundle as the `loam-host-aab` workflow artifact (never attached to the
-Release). Dependabot (`.github/dependabot.yml`) bumps npm deps and the SHA-pinned `github-actions` weekly.
+Release). Dependabot (`.github/dependabot.yml`) bumps npm deps and the SHA-pinned `github-actions` weekly (1-day cooldown, matching
+`minimumReleaseAge: 1440` in `pnpm-workspace.yaml`, so pnpm won't install a release under a day old).
 
 **Tests**: `packages/*` (schema, display-name, avatar, qr, crypto, tui), `apps/server` (`src/db.test.ts` for the
-DAL/importer, `src/app.test.ts` for routes via `buildApp()` + `server.inject()` — admin bootstrap
-matrix, config API, flag enforcement, kill switch, retention, private channels, search, WebSocket
-privacy filtering via a real listener — plus focused suites: `realtime`, `llm`, `mesh-bridge`,
+DAL, route suites by subject driving `buildApp()` + `server.inject()` (`admin`, `sessions`, `channels`,
+`messages`, `moderation`, `attachments`, `kill-switch`, `db-encryption`, `realtime-privacy`, `transport`,
+`sync`, `mesh`, `assistant`… over a shared harness in `src/test-support/app-harness.ts`, whose header maps
+the files; `test-support/` is excluded from the build) plus focused suites: `realtime`, `llm`, `mesh-bridge`,
 `sync-transport`, `tombstone`, `net`, `embedded`), and `apps/client` (Vitest + jsdom: `src/lib/*.test.ts`
 — markdown sanitizer/XSS, IndexedDB round-trips + kill-switch purge via `fake-indexeddb`, route/WS-event
 parsers, transport, WS liveness — and a `.test.tsx` suite beside most components in `src/components/`).
@@ -188,8 +195,8 @@ module (2026-09-04 split of the former 9.4k-line monolith):
 Conventions for the modules: bodies reach shared state only through `ctx.<name>` (or `rt.<name>`), never a
 captured copy — the mutable members are accessors, so `ctx.data = …` lands on the live binding. A new
 helper that routes need goes into `AppContext` (with its signature) and the `base` literal in `buildApp`;
-the completeness check fails to compile if a member is declared but never provided. `app.test.ts` still
-drives everything through `buildApp()` + `inject`, so the split is invisible to tests.
+the completeness check fails to compile if a member is declared but never provided. The route test suites
+still drive everything through `buildApp()` + `inject`, so the split is invisible to tests.
 
 - **Storage**: reads are served from in-memory arrays (`data.users/channels/messages`) + a
   `sessions` Map; every mutation **writes through synchronously** to SQLite (`.loam/loam.db`, WAL
@@ -207,9 +214,8 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   the same fatal code when a keyed open fails and the driver won't load (no recovery chain; the embedded
   runtime stays alive to report it). A failed keyed open on a node with no prior database removes what
   the open created and rethrows, and the plaintext probe only runs on a file with the plaintext header —
-  so a failed keyed open never leaves a plaintext file behind. On first
-  boot with legacy data, `importLegacyJsonData()` migrates the old `*.json` files into the DB and
-  renames them `*.json.bak`. A stored user/channel/message row that no longer validates (e.g. an id an
+  so a failed keyed open never leaves a plaintext file behind. (The pre-0.2 flat-JSON
+  importer is gone: no released version wrote those files.) A stored user/channel/message row that no longer validates (e.g. an id an
   older release wrote past `ID_MAX_LENGTH`) is never fatal: a safe in-memory repair is applied when one
   exists (unusable avatar id dropped, invalid private-roster entries dropped, over-long `meta.model`
   truncated); otherwise the row is **quarantined**: not loaded, left on disk, its id in
@@ -240,7 +246,7 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   token becomes admin, and only the host's own WebView receives it, injected as
   `window.__loamHostDeviceToken` (never in a URL: anyone can craft one), so no LAN session can take
   `firstUser` during the boot window), or
-  `none`. A successful claim persists `{isAdmin, pending:false}`, so on an approval-policy node the
+  `none`. A successful claim persists `{isAdmin, pending:false}` (the reply is the `rolesVisibleUser` projection), so on an approval-policy node the
   claimer is an active admin. **`loamnet` mints a host token too** (`cli/bin/loam.js`), so it is always
   `hostDevice`: admin comes from the terminal UI's one-time claim codes (`admin-links.ts`: single-use,
   10 min, in memory, cleared by the kill switch; the claim route accepts one under `hostDevice`; the client
@@ -265,11 +271,13 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   an admin PATCH that changes `llm.onDevice` is then written through to `config.json` (durably, other keys
   kept; a failed write refuses the save with a 500) so it survives a restart.
 - **Rate limiting**: our own fixed-window limiter (`src/rate-limit.ts`, which replaced `@fastify/rate-limit`)
-  runs globally (300/min/IP; IPv6 keyed by /64, IPv4-mapped folded to IPv4) with per-route caps on uploads,
+  runs globally (300/min/IP; IPv6 keyed by /64 via `rateLimitKey`, IPv4-mapped folded to IPv4) with per-route caps on uploads,
   sync, mesh, search, claim and panic via `config.rateLimit`; those per-route configs set `allowList: () => false` so tunnel
   re-dispatches (exempt from the global limiter) still count. Claim/panic add their own semantic attempt
-  limiters on top. It sends no `x-ratelimit-*` headers (they fingerprinted the panic route); a default
-  refusal is a 429 with `retry-after`.
+  limiters on top. Claim and panic (route limiter `perAddress: true` and the attempt limiters) and the WS
+  pre-auth cap count each address on its own (`addressKey`), with a coarser per-/64 bound, so one IPv6 LAN
+  device can't lock the rest out. It sends no `x-ratelimit-*` headers (they fingerprinted the panic route); a
+  default refusal is a 429 with `retry-after` and `code: "rate_limited"`.
 - **Logging**: tunnel re-dispatches are never request-logged (`loamLogController`, keyed on the
   internal token — the inner URL is the path the tunnel hides), the `req` serializer strips query
   strings from every logged URL, a pino `logMethod` hook (`redactLogText`) drops the URL from Fastify's own
@@ -289,7 +297,8 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   wipe depends on encryption: **encrypted** (`LOAM_DB_KEY` set) → close store, delete DB files, and
   (ephemeral mode) rotate to a fresh key — a cryptographic wipe that makes flash remnants
   unreadable; the store is reopened so `app.store` is a **getter**, not a snapshot. **Unencrypted** →
-  `store.wipeAll()` (logical DELETE, **not** secure erasure on flash — docs/02). Every branch also sweeps
+  `store.wipeAll()` + `VACUUM` + checkpoint (plaintext stores run `PRAGMA secure_delete`, so the file keeps
+  no deleted text, but it is **not** secure erasure on flash — docs/02). Every branch also sweeps
   `.loam-recovery-*` snapshots (a start-fresh's moved-aside DB + media): fail-closed in the encrypted
   branches, best-effort (warns on a survivor) in the plaintext one. A client that was offline during the
   wipe purges its cache on reconnect, because its server-confirmed identity changed (`lib/identity.ts`).
@@ -327,7 +336,8 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
 - **Attachments**: messages may carry ≤4 attachments (`attachments` on posts/replies/DMs;
   attachment-only messages are valid) — images (256KB, served inline) or allowlisted non-image files
   (1 MiB, stored as `.bin`, served octet-stream + `Content-Disposition: attachment`). `POST /api/attachments` mirrors the avatar pipeline (base64, magic-byte vs
-  MIME, 256KB images / 1 MiB other files, rate-limited); ids are uploader-bound and consumed on first use; files served
+  MIME, 256KB images / 1 MiB other files, rate-limited); ids are uploader-bound and consumed on first use, and the message stores the server's own record of the upload
+  (`PendingUpload`), never the client's copy; files served
   from `GET /api/attachments/:fileName` (unguessable ids), deleted with their message / kill switch. The
   orphan sweep re-checks live messages/owners right before each delete and gives owner-less files an
   mtime grace window, so it can't race an in-flight upload.
@@ -414,8 +424,18 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   envelope with a monotonic per-connection sequence, so a frame can't be replayed onto another
   connection. The client routes all fetches/WS through `apps/client/src/lib/transport.ts`; `off` is a
   pure passthrough. **Anti-replay:** each sealed REST request carries a per-session
-  monotonic sequence inside its `{ s, b }` envelope; the server enforces a DTLS-style sliding window
-  (`TRANSPORT_REPLAY_WINDOW`), 409 on replay/out-of-window. **Path-hiding tunnel (`required` mode, and
+  monotonic sequence inside its `{ s, r, b }` envelope (a GET/HEAD carries it sealed in `x-loam-seq`); the
+  server enforces a DTLS-style sliding window (`TRANSPORT_REPLAY_WINDOW`), 409 on replay/out-of-window.
+  **Response binding** (docs/08): for a request with `r: 1` the reply is sealed under `METHOD url#seq#status`
+  (a bodyless 204 comes back as a sealed empty 200); a refusal sent before the sequence is authenticated
+  carries `encStatus` under `METHOD url!status`, which the client accepts only for status >= 400. Under a
+  live session the client refuses any unsealed reply on every path (`UnsealedResponseError`) except the
+  pre-session 401/421/503, which reach the caller as status + code only. Older clients (no `r`) and sync
+  pulls get the previous `METHOD url` sealing. The transport session map evicts, at its cap, the oldest
+  session of the largest group (an identity token's bound sessions, or an anonymous source), one with no
+  live socket first. One identity token binds at most 16 sessions: past that a bind drops the token's
+  idle sessions, and is refused (429) rather than close a live one, since a browser's tabs share the token
+  and closing a live tab would make it reconnect and close the next, forever. **Path-hiding tunnel (`required` mode, and
   every bound session):** the client tunnels every request through an opaque `POST /api/transport/tunnel`
   (sealed `{ m, p, body }`), re-dispatched server-side via `server.inject` with an unforgeable per-boot
   internal token (global-limiter-exempt) plus the caller's identity — `x-loam-user` for a bound session
@@ -531,7 +551,8 @@ drives everything through `buildApp()` + `inject`, so the split is invisible to 
   reports its end/error or the 5-minute timeout, since the launcher bridge has no cancel), and a placeholder left streaming by a crash is finalized at boot.
 
 **Feature-flag note**: the messaging flags (`enableReplies`, `enableDMs`, `enableReactions`,
-`enablePublicChannels`, `enableMarkdown`) are real config values enforced in `createMessage()`.
+`enablePublicChannels`, `enableMarkdown`) are real config values enforced in `createMessage()`
+(`enablePublicChannels` gates public channels only, `channelOpenUnderFlags`).
 `enableUserChannels` gates user channel creation (`POST /api/channels`); `enablePrivateChannels`
 (default **on**) gates the *creation* of private channels — existing private channels keep working
 if it is later switched off. **`security.profile` is authoritative**: a named profile (`open`/`standard`/`hardened`)
@@ -631,7 +652,9 @@ kill switch. See `docs/09-security-profiles.md`.
   tarball + reproducible build recipe) and materialised by `fetch-native-modules.mjs` alongside the plain
   driver — also vendored (`native-prebuilds/better-sqlite3/`: the original digidem 12.10.0 binary, since
   upstream re-uploaded non-reproducible assets on 2026-08-17 and the pinned download stopped matching) —
-  so `security.dbEncryption` modes key the DB on-device, failing closed if the driver won't load.
+  so `security.dbEncryption` modes key the DB on-device, failing closed if the driver won't load. The JS
+  wrappers and their two runtime dependencies are vendored too, as sha256-pinned `npm pack` tarballs in
+  `native-prebuilds/npm/`, so `fetch:native` never touches the npm registry.
   On-device runtime verification (actual `PRAGMA key`/rekey/wipe on a physical arm64 phone) is the
   remaining device-test item (docs/01, docs/04).
 - LoRa / alternate transports: the node-to-node sync protocol (docs/11) is the transport-agnostic
@@ -645,9 +668,12 @@ kill switch. See `docs/09-security-profiles.md`.
   budget (`maxNewIdentitiesPerWindow`, default 60 / 10 min; `AppOptions`), throwing a `429` past it —
   a client that keeps its session cookie never touches it, and on a LAN each device has its own IP. **Ghost
   identities are reaped**: `reapUnusedIdentities()` (on the 30 s reaper tick) deletes a human user who never
-  agreed to the rules, holds no role or moderation state, is not `pending` (a greeter's queue entry), has no
+  agreed to the rules, holds no role or moderation state, has no
   open or escalated report filed, authored or received no message, owns or belongs to no channel, is on no
-  socket, and is older than `unusedIdentityMaxAgeMs` (24 h; `AppOptions`), dropping its sessions/tokens, mesh
+  socket and holds no live bound transport session, and is older than `unusedIdentityMaxAgeMs` (24 h;
+  `AppOptions`), measured from admission for someone let in from the queue (`users.admitted_at`, a
+  server-only column). A `pending` identity (a greeter's queue entry, which can't agree to the rules yet) is
+  reaped only after `pendingIdentityMaxAgeMs` (7 days); a block does not count as use. It drops its sessions/tokens, mesh
   keypair and (via `store.deleteUser`) its block-list rows, join requests and mesh address book in one
   transaction; nothing is broadcast (clients drop it on the next `reconcileRoster`). A no-op when
   `requireRulesAcceptance` is off.

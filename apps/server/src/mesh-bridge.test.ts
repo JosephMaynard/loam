@@ -10,9 +10,9 @@ import { buildApp, type AppOptions, type LoamApp } from "./app.js";
 
 /**
  * The opportunistic-mesh transport bridge (`GET /api/mesh/outbound` + `POST /api/mesh/inbound`, docs/16
- * §5 / docs/17). Moved out of app.test.ts when the bridge started requiring the launcher's per-boot host
- * token on EVERY host (review 2026-09-25 #12): the only real caller is the Android launcher's courier,
- * which always sends `x-loam-host-token`, so these tests boot every node with a host token and drive the
+ * §5 / docs/17). The bridge requires the launcher's per-boot host token on EVERY host: the only real
+ * caller is the Android launcher's courier, which always sends `x-loam-host-token`, so these tests boot
+ * every node with a host token and drive the
  * bridge the way the courier does (see `asCourier`). The authorization rules themselves are pinned by the
  * "bridge authorization" block at the end.
  */
@@ -36,15 +36,15 @@ const BRIDGE_PATHS = new Set(["/api/mesh/outbound", "/api/mesh/inbound", "/api/h
  * sets `x-loam-host-token` itself (so authorization tests still control it explicitly). */
 function asCourier(app: LoamApp): LoamApp {
   const inject = app.server.inject.bind(app.server);
-  const patched = ((options: Parameters<typeof inject>[0]) => {
+  const patched = ((options: unknown) => {
     if (options && typeof options === "object" && BRIDGE_PATHS.has(String((options as { url?: unknown }).url))) {
       const opts = options as { headers?: Record<string, string> };
       if (!opts.headers || !("x-loam-host-token" in opts.headers)) {
         opts.headers = { ...opts.headers, "x-loam-host-token": HOST_TOKEN };
       }
     }
-    return inject(options);
-  }) as typeof app.server.inject;
+    return (inject as (opts: unknown) => unknown)(options);
+  }) as unknown as typeof app.server.inject;
   app.server.inject = patched;
   return app;
 }
@@ -142,6 +142,22 @@ async function inbound(app: LoamApp, messages: unknown[]): Promise<number> {
   return changed;
 }
 
+/** Sealed mail for a stranger on no test node, offered at hop budget 3, expiring `lifetimeMs` from now. */
+function strangerBlob(id: string, lifetimeMs = 3_600_000): Record<string, unknown> {
+  const stranger = createMeshIdentity();
+  const sender = createMeshIdentity();
+  const now = Date.now();
+  const ttlExpiresAt = now + lifetimeMs;
+  const toTag = mailboxTag(stranger.mailboxToken, currentEpoch(now, 24 * 3_600_000));
+  const sealed = sealMailbox({
+    recipientKxPublic: stranger.kxPublic,
+    sender: { signPublic: sender.signPublic, signSecret: sender.signSecret, kxPublic: sender.kxPublic },
+    plaintext: id,
+    aad: `${toTag}|${ttlExpiresAt}`,
+  });
+  return { id, type: "sealed", authorId: "mesh.sealed", createdAt: now, toTag, sealed, ttlExpiresAt, hopLimit: 3 };
+}
+
 describe("opportunistic mesh: transport bridge", () => {
   describe("transport bridge (GET /api/mesh/outbound + POST /api/mesh/inbound)", () => {
     it("404s both endpoints when mesh is disabled", async () => {
@@ -220,8 +236,8 @@ describe("opportunistic mesh: transport bridge", () => {
       expect(await inbound(nodeB, messages)).toBe(0); // not ours, not relaying: dropped
       expect(nodeB.store.isSealedOfferSeen(messages[0]!.id, Date.now())).toBe(true);
 
-      // Handed the same blob again once relaying is on (after a restart), it stays dropped (review 2026-09-25
-      // #2): carrying it now would make "carried" vs "refused" depend on whether the first copy was delivered.
+      // Handed the same blob again once relaying is on (after a restart), it stays dropped:
+      // carrying it now would make "carried" vs "refused" depend on whether the first copy was delivered.
       writeFileSync(join(nodeB.dataDir, "config.json"), JSON.stringify({ mesh: MESH }));
       const relayB = await reopenApp(nodeB.app, nodeB.dataDir);
       expect(await inbound(relayB, messages)).toBe(0);
@@ -328,7 +344,7 @@ describe("opportunistic mesh: transport bridge", () => {
       const nodeC = await makeApp({ mesh: MESH });
       const alice = await adminOf(nodeA);
       const bob = await adminOf(nodeB);
-      const carol = await adminOf(nodeC);
+      await adminOf(nodeC);
 
       const bobCard = await meshCard(nodeB, bob.cookie);
       expect((await addContact(nodeA, alice.cookie, bobCard)).statusCode).toBe(200);
@@ -363,11 +379,42 @@ describe("opportunistic mesh: transport bridge", () => {
       expect(await dmBodies(nodeB, bob.cookie, contact!.id)).toContain("meet at the docks");
     });
 
+    it("hands a queue longer than one answer to the courier in turn, never more than 200 at once", async () => {
+      // A relay carrying 250 blobs. The courier replaces its list with every answer, so an endpoint that always
+      // answered with the same first 200 would never let the radio carry the other 50.
+      const relay = await makeApp({ mesh: MESH });
+      const blobs = Array.from({ length: 250 }, (_, index) =>
+        strangerBlob(`seal_queue_${String(index).padStart(3, "0")}`, 3_600_000 + index * 1_000),
+      );
+      for (let start = 0; start < blobs.length; start += 64) {
+        expect(await inbound(relay, blobs.slice(start, start + 64))).toBe(Math.min(64, blobs.length - start));
+      }
+      const outbound = async (): Promise<string[]> => {
+        const response = await relay.server.inject({ method: "GET", url: "/api/mesh/outbound" });
+        expect(response.statusCode).toBe(200);
+        const ids = (response.json() as { messages: { id: string }[] }).messages.map((message) => message.id);
+        expect(ids.length).toBeLessThanOrEqual(200);
+        expect(new Set(ids).size).toBe(ids.length);
+        return ids;
+      };
+      const ids = blobs.map((blob) => blob.id as string);
+
+      // Nothing handed out yet: the 200 that expire soonest.
+      const first = await outbound();
+      expect(first).toEqual(ids.slice(0, 200));
+      // Next, the 50 never handed out, then the soonest-expiring of the rest.
+      const second = await outbound();
+      expect(second).toEqual([...ids.slice(200), ...ids.slice(0, 150)]);
+      expect(new Set([...first, ...second]).size).toBe(250);
+      // Then the ones handed out longest ago.
+      expect((await outbound()).slice(0, 50)).toEqual(ids.slice(150, 200));
+    }, 30_000); // sealing and taking in 250 blobs is slow under a fully parallel test run
+
     it("stays reachable over loopback when transport encryption is REQUIRED (courier must not wedge)", async () => {
       // The in-process courier polls these endpoints over plain 127.0.0.1 with no transport session. In
       // `required` mode the general content gate would 401 an unsealed direct hit; the mesh bridge is
       // exempted (loopback-only, blobs already sealed at the mesh crypto layer) so turning transport
-      // encryption up can't silently stop the radio from moving mail (Fable review).
+      // encryption up can't silently stop the radio from moving mail.
       const app = await makeApp({ mesh: MESH, security: { profile: "custom", transportEncryption: "required" } });
       const out = await app.server.inject({ method: "GET", url: "/api/mesh/outbound" });
       expect(out.statusCode).toBe(200);
@@ -395,7 +442,7 @@ describe("opportunistic mesh: transport bridge", () => {
     });
   });
 
-  describe("the radio bridge reveals and risks nothing about delivery (verifier round, 2026-09-25)", () => {
+  describe("the radio bridge reveals and risks nothing about delivery", () => {
     /** One blob sealed on `sender` for the owner of `card` (added as a contact first). */
     async function sealedFor(sender: LoamApp, senderCookie: string, card: MeshIdentityCard): Promise<Record<string, unknown>> {
       expect((await addContact(sender, senderCookie, card)).statusCode).toBe(200);
@@ -415,21 +462,6 @@ describe("opportunistic mesh: transport bridge", () => {
         messages: (Record<string, unknown> & { id: string })[];
       };
       return messages.find((message) => !before.has(message.id))!;
-    }
-
-    function strangerBlob(id: string): Record<string, unknown> {
-      const stranger = createMeshIdentity();
-      const sender = createMeshIdentity();
-      const now = Date.now();
-      const ttlExpiresAt = now + 3_600_000;
-      const toTag = mailboxTag(stranger.mailboxToken, currentEpoch(now, 24 * 3_600_000));
-      const sealed = sealMailbox({
-        recipientKxPublic: stranger.kxPublic,
-        sender: { signPublic: sender.signPublic, signSecret: sender.signSecret, kxPublic: sender.kxPublic },
-        plaintext: id,
-        aad: `${toTag}|${ttlExpiresAt}`,
-      });
-      return { id, type: "sealed", authorId: "mesh.sealed", createdAt: now, toTag, sealed, ttlExpiresAt, hopLimit: 3 };
     }
 
     it("answers a delivered, a carried and a dropped blob identically", async () => {
@@ -482,7 +514,7 @@ describe("opportunistic mesh: transport bridge", () => {
     });
   });
 
-  describe("bridge authorization (review 2026-09-25 #12)", () => {
+  describe("bridge authorization", () => {
     it("404s on a host with NO launcher token even from loopback (desktop/Pi: a same-host proxy makes every LAN client loopback)", async () => {
       const app = await makeApp({ mesh: MESH }, { hostToken: undefined });
       for (const headers of [{}, { "x-loam-host-token": "" }, { "x-loam-host-token": HOST_TOKEN }]) {

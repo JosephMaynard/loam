@@ -1,17 +1,17 @@
 'use strict';
 
-// Pure decision for how ONE boot attempt should configure the embedded server's DB-encryption env
-// (Sol Fable-round-3 P1) — split out of main.js's `resolveDbEncryptionAndBoot` so the "every attempt is a
+// Pure decision for how ONE boot attempt should configure the embedded server's DB-encryption env —
+// split out of main.js's `resolveDbEncryptionAndBoot` so the "every attempt is a
 // FRESH boot configuration" contract is unit-testable (see apps/app/src/lib/boot-config.test.ts). main.js
 // pulls in `rn-bridge` + boot side effects at import time, so it can't be `require`d from Vitest — same
 // pattern as db-key-gate.js / start-fresh-marker.js / config-write.js.
 //
-// THE BUG THIS FIXES: `resolveDbEncryptionAndBoot` mutated `process.env` incrementally per attempt and never
-// cleared `LOAM_DB_KEY` / `LOAM_DB_KEY_MIGRATE_FROM`. In the SAME Node process, an encrypted attempt could
-// install `LOAM_DB_KEY`, then a retry resolve to `off` (or a plaintext-permitted locked-error recovery) — and
-// inherit that stale key. `db.ts` gives `encryptionKey` precedence over the plaintext driver, so the
-// supposedly-"off" retry would still open through SQLCipher: posture reports "off" while an encrypted backend is used, and an "off" mode hint may be written before a
-// later cold start tries to open that encrypted DB as plaintext.
+// WHY: boot attempts can repeat in the SAME Node process (unlock retry, start-fresh). If an encrypted attempt
+// left `LOAM_DB_KEY` / `LOAM_DB_KEY_MIGRATE_FROM` installed and a retry then resolved to `off` (or a
+// plaintext-permitted locked-error recovery), the retry would inherit that stale key. `db.ts` gives
+// `encryptionKey` precedence over the plaintext driver, so the supposedly-"off" retry would still open
+// through SQLCipher: posture reports "off" while an encrypted backend is used, and an "off" mode hint may be
+// written before a later cold start tries to open that encrypted DB as plaintext.
 //
 // THE CONTRACT: this returns ONLY the env vars to SET for the selected branch. The caller deletes ALL of
 // `ENV_KEYS` first, then applies `env`, so no value from a prior attempt can leak in. Every proceeding
@@ -64,7 +64,7 @@ function computeDbBootEnv(result, ctx) {
 
   if (mode === DB_KEY_LOCKED_ERROR) {
     if (mayBootPlaintextOnLockedError(ctx.hint, ctx.dbExists)) {
-      // No secret to protect — boot plaintext (availability over a transient lock, RF-c). The hint is left
+      // No secret to protect — boot plaintext (availability over a transient lock). The hint is left
       // untouched: a FAILED resolution isn't authoritative enough to write one.
       return {
         outcome: 'proceed',
@@ -100,7 +100,7 @@ function computeDbBootEnv(result, ctx) {
 
   if (mode !== 'ephemeral' && !key) {
     // persistent/passphrase with no usable key — never fall back to plaintext; stay LOCKED. Record the real
-    // secret-based selection (RF-c) so a later transient failure LOCKS rather than plaintext-boots.
+    // secret-based selection so a later transient failure LOCKS rather than plaintext-boots.
     return {
       outcome: 'locked',
       env: { LOAM_DB_ENCRYPTION_MODE: mode },
@@ -119,12 +119,12 @@ function computeDbBootEnv(result, ctx) {
   }
 
   if (!ctx.probeEncryptedDriver()) {
-    // The SQLCipher native module failed to load. FAIL CLOSED (pre-release review 2026-09-25): this used to
-    // boot plaintext under the operator's encrypted selection with only a dismissible notice — and wrote an
-    // 'off' hint, erasing the encrypted choice from the locked-error gate; left an ephemeral node's plaintext
-    // DB to survive restarts; and let "start fresh" on an unreadable encrypted DB create a plaintext one.
-    // Now EVERY encrypted selection locks with a dedicated recovery code. Plaintext happens only after the
-    // operator explicitly switches the mode to Off (a new `off` resolution on the unlock retry).
+    // The SQLCipher native module failed to load. FAIL CLOSED: booting plaintext under the operator's
+    // encrypted selection would be a silent downgrade (and an 'off' hint would erase the encrypted choice
+    // from the locked-error gate, an ephemeral node's plaintext DB would survive restarts, and "start fresh"
+    // on an unreadable encrypted DB would create a plaintext one). So EVERY encrypted selection locks with a
+    // dedicated recovery code. Plaintext happens only after the operator explicitly switches the mode to Off
+    // (a new `off` resolution on the unlock retry).
     //
     // The hint records the REAL encrypted selection (never 'off' from this branch), so a later transient
     // key-request failure also locks. Ephemeral: whatever DB an earlier launch left is unreadable by
@@ -163,8 +163,8 @@ function computeDbBootEnv(result, ctx) {
   }
 
   // persistent/passphrase WITH a key. Leave the driver unset (openStore's encryptionKey path wins). The
-  // legacy key (pre-round-4 derivation) is offered only when RN hasn't recorded a confirmed migration yet;
-  // the request id is the immutable per-boot correlation for the migration ack (P1-B).
+  // legacy key (the older passphrase key derivation) is offered only when RN hasn't recorded a confirmed
+  // migration yet; the request id is the immutable per-boot correlation for the migration ack.
   var env = { LOAM_DB_ENCRYPTION_MODE: mode, LOAM_DB_KEY: key };
   if (legacyKey) {
     env.LOAM_DB_KEY_MIGRATE_FROM = legacyKey;

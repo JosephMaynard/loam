@@ -3,7 +3,7 @@ import { describe, expect, it, beforeEach } from 'vitest';
 
 import { CATALOGS } from './catalogs';
 import { en } from './en';
-import { APP_LOCALES, LOCALE_NAMES, parseAppLocale, setAppLocale, t } from './index';
+import { APP_LOCALES, LOCALE_NAMES, RLM, isRtlLocale, parseAppLocale, rtlTextAlign, setAppLocale, t } from './index';
 
 const EN_KEYS = Object.keys(en).sort();
 
@@ -49,6 +49,53 @@ describe('t()', () => {
     expect(t('reset.failed', { error: 'disk full' })).toBe("Couldn't erase: disk full");
     setAppLocale('fr');
     expect(t('reset.failed', { error: 'disque plein' })).toBe("Impossible d'effacer : disque plein");
+  });
+
+  it('starts every right-to-left string with an RLM and isolates the values it fills in', () => {
+    for (const locale of ['ar', 'fa', 'ur', 'prs', 'ps'] as const) {
+      setAppLocale(locale);
+      expect(isRtlLocale(locale)).toBe(true);
+      // Strings that begin with "LOAM" or a placeholder are the ones Android laid out left to right.
+      expect(t('host.title').startsWith(RLM), `${locale} host.title`).toBe(true);
+      const filled = t('model.deleted', { name: 'Gemma 3 1B' });
+      expect(filled.startsWith(RLM), `${locale} model.deleted`).toBe(true);
+      expect(filled).toContain('⁨Gemma 3 1B⁩');
+      // A nested t() and a number stay inside their own isolates; the outer string still leads with the RLM.
+      const nested = t('reset.failed', { error: t('hostError.status', { status: 503 }) });
+      expect(nested.startsWith(RLM)).toBe(true);
+      expect(nested).toContain('⁨503⁩');
+      expect(nested.match(/⁨/g)?.length).toBe(nested.match(/⁩/g)?.length);
+    }
+  });
+
+  it('leaves left-to-right languages and English fallbacks untouched', () => {
+    for (const locale of ['en', 'fr', 'my', 'bn'] as const) {
+      setAppLocale(locale);
+      expect(isRtlLocale(locale)).toBe(false);
+      expect(t('model.deleted', { name: 'X' })).not.toMatch(/[‏⁨⁩]/);
+    }
+    // Every RTL catalog is complete (see above), so the only fallback is a key the catalog lacks: simulate one.
+    setAppLocale('ar');
+    const registered = (CATALOGS.ar as Record<string, string>)['host.title'];
+    try {
+      delete (CATALOGS.ar as Record<string, string>)['host.title'];
+      expect(t('host.title')).toBe(en['host.title']);
+    } finally {
+      (CATALOGS.ar as Record<string, string>)['host.title'] = registered!;
+    }
+  });
+
+  it('aligns unaligned native text right in right-to-left languages, keeping an explicit centre', () => {
+    for (const locale of ['ar', 'fa', 'ur', 'prs', 'ps'] as const) {
+      expect(rtlTextAlign(locale, undefined)).toBe('right');
+      expect(rtlTextAlign(locale, 'auto')).toBe('right');
+      expect(rtlTextAlign(locale, 'left')).toBe('right');
+      expect(rtlTextAlign(locale, 'center')).toBeUndefined();
+      expect(rtlTextAlign(locale, 'right')).toBeUndefined();
+    }
+    for (const locale of ['en', 'fr', 'my'] as const) {
+      expect(rtlTextAlign(locale, undefined)).toBeUndefined();
+    }
   });
 
   it('parses stored values, defaulting to English', () => {

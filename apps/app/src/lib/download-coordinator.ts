@@ -1,16 +1,12 @@
-// Process-global download coordinator for the on-device model manager (Sol P2). EXTRACTED out of
-// `model-manager.tsx` so the single-active-download serialization is a MODULE-LEVEL singleton, not a
-// per-component-instance `useRef`.
+// Process-global download coordinator for the on-device model manager: the single-active-download
+// serialization is a MODULE-LEVEL singleton, not per-component-instance state.
 //
-// The bug this fixes: the old re-entry guard (`downloadInFlightRef`) and the in-flight controller map
-// (`activeDownloads`) were `useRef` values owned by ONE `ModelManagerOverlay` instance. The overlay is
-// rendered only inside the `status === 'ready'` branch of `app/index.tsx`, so a host
-// `ready → error → ready` transition UNMOUNTS the whole overlay while a download (download → hash →
-// persist → cleanup) may still be running, then MOUNTS a fresh overlay whose `downloadInFlightRef` is
-// `false` and whose `activeDownloads` is empty. That new instance could start a SECOND concurrent
-// download — two large files written at once, two independent storage probes, and a clean-first orphan
-// check racing the older transaction's not-yet-created orphan. The module-level orphan `Set` in
-// `model-download.ts` prevented URI *overwrite* but did NOT make the transaction process-global.
+// Why module-level: the overlay is rendered only inside the `status === 'ready'` branch of
+// `app/index.tsx`, so a host `ready → error → ready` transition UNMOUNTS the whole overlay while a
+// download (download → hash → persist → cleanup) may still be running, then MOUNTS a fresh overlay.
+// Instance-owned guards would let that new instance start a SECOND concurrent download — two large files
+// written at once, two independent storage probes, and a clean-first orphan check racing the older
+// transaction's not-yet-created orphan.
 //
 // This coordinator OWNS the one active transaction and its `AbortController` for the transaction's ENTIRE
 // lifetime — released ONLY when the transaction's own `finally` settles, never merely because a component
@@ -28,11 +24,11 @@ import { clearRetainedOrphans } from './model-download';
  * tap — can never both acquire it. */
 let activeController: AbortController | null = null;
 
-/** The OWNER token of the active transaction (Sol Fable-round-5 P2), set SYNCHRONOUSLY alongside
- * `activeController`. Ownership is established at mutex-acquisition time (before the `clearRetainedOrphans`
- * await), so a component that unmounts DURING orphan cleanup can still abort the transaction it started via
- * {@link abortDownloadOwnedBy} — closing the window where the old code (which set ownership only once the
- * download body began) let a headless multi-GB download proceed with no owner left to cancel it. */
+/** The OWNER token of the active transaction, set SYNCHRONOUSLY alongside `activeController`. Ownership is
+ * established at mutex-acquisition time (before the `clearRetainedOrphans` await), so a component that
+ * unmounts DURING orphan cleanup can still abort the transaction it started via
+ * {@link abortDownloadOwnedBy}; otherwise a headless multi-GB download could proceed with no owner left to
+ * cancel it. */
 let activeOwner: object | null = null;
 
 /** Subscribers notified whenever `isDownloadActive()` flips, so a freshly-mounted overlay can render the
@@ -42,9 +38,11 @@ const activeListeners = new Set<() => void>();
 /**
  * The outcome of a {@link runDownload} call. A discriminated union rather than the raw `T | 'busy'`
  * sentinel so a body whose own return type is a string can never be confused with the refusal signal,
- * and so the two non-completion reasons the caller must message differently stay distinct:
+ * and so the non-completion reasons the caller must handle differently stay distinct:
  *   - `'completed'`      — this call acquired the mutex and `run` ran to completion; `value` is its result.
  *   - `'busy'`           — REFUSED: another transaction was already active, so `run` was NEVER invoked.
+ *   - `'aborted'`        — this call acquired the mutex, but its owner aborted it during the orphan
+ *                          cleanup, so `run` was NOT invoked.
  *   - `'orphan-blocked'` — this call acquired the mutex, but a retained orphan from a prior failed
  *                          download+cleanup still couldn't be removed, so `run` was NOT invoked (starting a
  *                          new download would let orphans accumulate — see `clearRetainedOrphans`).
@@ -124,8 +122,8 @@ export async function runDownload<T>(
     if (!cleared.ok) {
       return { status: 'orphan-blocked', error: cleared.error };
     }
-    // The owner may have unmounted DURING `clearRetainedOrphans` and aborted this transaction (Sol
-    // Fable-round-5 P2). If so, do NOT start the (multi-GB) download body — there would be no mounted owner
+    // The owner may have unmounted DURING `clearRetainedOrphans` and aborted this transaction.
+    // If so, do NOT start the (multi-GB) download body — there would be no mounted owner
     // left to cancel it, and the host is in an error state. The mutex is still released by the `finally`.
     if (controller.signal.aborted) {
       return { status: 'aborted' };
@@ -151,7 +149,7 @@ export function abortActiveDownload(): void {
 }
 
 /**
- * Abort the active transaction ONLY IF it is owned by `owner` (Sol Fable-round-5 P2) — for a component
+ * Abort the active transaction ONLY IF it is owned by `owner` — for a component
  * unmounting, so it cancels the download IT started but can NEVER abort a different overlay's transaction.
  * Like {@link abortActiveDownload} it does not release the mutex; the aborted `run` settles and its `finally`
  * clears it. A no-op if no transaction is active or a different owner holds it.

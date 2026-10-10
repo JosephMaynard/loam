@@ -1,5 +1,5 @@
 // Channels: listing, history, members, join requests, ownership transfer, create/update/delete, and the
-// admin channel view. Extracted verbatim from app.ts (2026-09-04 split) over the shared AppContext.
+// admin channel view, registered over the shared AppContext.
 
 import { ChannelCreateRequestSchema, ChannelMemberAddRequestSchema, ChannelSchema, ChannelTransferRequestSchema, ChannelUpdateRequestSchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
@@ -26,7 +26,7 @@ export function registerChannelRoutes(ctx: AppContext): void {
 
     // Archived channels ARE returned (to their normal audience): archive means read-only-but-
     // available — the mutation paths refuse writes, the client renders them read-only. Removing a
-    // channel outright is `DELETE /api/channels/:id`. (Owner decision, 2026-08-15.)
+    // channel outright is `DELETE /api/channels/:id`. (A deliberate product decision.)
     return ctx.data.channels.filter((channel) => ctx.canAccessChannel(channel, currentUser.id));
   });
 
@@ -107,7 +107,7 @@ export function registerChannelRoutes(ctx: AppContext): void {
     }
 
     // A moderator timeout is a write block: creating channels, rewriting channel metadata, and
-    // growing rosters are all publishing/coordination surfaces (Sol round 2, P1). Access-REDUCING
+    // growing rosters are all publishing/coordination surfaces. Access-REDUCING
     // actions (leave, remove) stay available; admins are never timeout-able in practice.
     const channelTimeoutError = ctx.timeoutError(currentUser);
 
@@ -116,7 +116,7 @@ export function registerChannelRoutes(ctx: AppContext): void {
     }
 
     // Membership growth is a mutation too: inviting someone into an archived private channel would
-    // grant a NEW reader its whole history while the channel is supposedly frozen (review finding).
+    // grant a NEW reader its whole history while the channel is supposedly frozen.
     // Removal/leave stays allowed — shrinking access is always safe.
     if (channel.archived) {
       return reply.code(403).send(errorBody("Channel is archived"));
@@ -198,7 +198,7 @@ export function registerChannelRoutes(ctx: AppContext): void {
     },
   );
 
-  // Request to join a private channel that opted into join requests (P10). The requester must already know
+  // Request to join a private channel that opted into join requests. The requester must already know
   // the channel id (shared out-of-band). A channel that doesn't exist, isn't private, or hasn't opted in
   // 404s identically, so this never reveals a channel's existence — no discoverability change.
   ctx.server.post<{ Params: { channelId: string } }>(
@@ -212,7 +212,7 @@ export function registerChannelRoutes(ctx: AppContext): void {
         return reply.code(403).send(errorBody(accessError));
       }
 
-      // DELIBERATE (Sol round 4): a moderator timeout does NOT block join requests. A request
+      // DELIBERATE: a moderator timeout does NOT block join requests. A request
       // carries no free-form text, is idempotent, and grants nothing without the owner's explicit
       // approval — it's asking for access, not publishing. Blocking it would extend a write-block
       // into a participation penalty. Pinned by a regression test.
@@ -281,7 +281,7 @@ export function registerChannelRoutes(ctx: AppContext): void {
       }
 
       // A moderator timeout is a write block: creating channels, rewriting channel metadata, and
-      // growing rosters are all publishing/coordination surfaces (Sol round 2, P1). Access-REDUCING
+      // growing rosters are all publishing/coordination surfaces. Access-REDUCING
       // actions (leave, remove) stay available; admins are never timeout-able in practice.
       const channelTimeoutError = ctx.timeoutError(currentUser);
 
@@ -371,7 +371,7 @@ export function registerChannelRoutes(ctx: AppContext): void {
     }
 
     // A moderator timeout is a write block: creating channels, rewriting channel metadata, and
-    // growing rosters are all publishing/coordination surfaces (Sol round 2, P1). Access-REDUCING
+    // growing rosters are all publishing/coordination surfaces. Access-REDUCING
     // actions (leave, remove) stay available; admins are never timeout-able in practice.
     const channelTimeoutError = ctx.timeoutError(currentUser);
 
@@ -451,7 +451,7 @@ export function registerChannelRoutes(ctx: AppContext): void {
     }
 
     // A moderator timeout is a write block: creating channels, rewriting channel metadata, and
-    // growing rosters are all publishing/coordination surfaces (Sol round 2, P1). Access-REDUCING
+    // growing rosters are all publishing/coordination surfaces. Access-REDUCING
     // actions (leave, remove) stay available; admins are never timeout-able in practice.
     const channelTimeoutError = ctx.timeoutError(currentUser);
 
@@ -494,8 +494,8 @@ export function registerChannelRoutes(ctx: AppContext): void {
 
     const channel = ctx.ensureChannel(request.params.channelId);
 
-    // 404-parity (review 2026-09-04): a private channel an outsider can't see answers exactly like a
-    // missing one. Channel ids are name slugs, so a 403 here confirmed a guessed private channel existed.
+    // 404-parity: a private channel an outsider can't see answers exactly like a missing one. Channel
+    // ids are name slugs, so a 403 here would confirm that a guessed private channel exists.
     if (!channel || (!currentUser.isAdmin && !ctx.canAccessChannel(channel, currentUser.id))) {
       return reply.code(404).send(errorBody("Channel does not exist"));
     }
@@ -505,7 +505,7 @@ export function registerChannelRoutes(ctx: AppContext): void {
     }
 
     // A moderator timeout is a write block: creating channels, rewriting channel metadata, and
-    // growing rosters are all publishing/coordination surfaces (Sol round 2, P1). Access-REDUCING
+    // growing rosters are all publishing/coordination surfaces. Access-REDUCING
     // actions (leave, remove) stay available; admins are never timeout-able in practice.
     const channelTimeoutError = ctx.timeoutError(currentUser);
 
@@ -539,7 +539,7 @@ export function registerChannelRoutes(ctx: AppContext): void {
   });
 
   // Permanently delete a channel (owner or admin). Archive means read-only-but-available; DELETE
-  // means gone and not coming back (owner decision, 2026-08-15): the channel, every message in it
+  // means gone and not coming back (a deliberate product decision): the channel, every message in it
   // (and reactions on those messages), and their attachment files are removed; every id — including
   // the channel's own — is tombstoned so a sync peer that still holds the content can never hand it
   // back; the audience gets a targeted `channelRemoved` (clients purge caches and navigate away).
@@ -563,7 +563,7 @@ export function registerChannelRoutes(ctx: AppContext): void {
     }
 
     // A moderator timeout is a write block: creating channels, rewriting channel metadata, and
-    // growing rosters are all publishing/coordination surfaces (Sol round 2, P1). Access-REDUCING
+    // growing rosters are all publishing/coordination surfaces. Access-REDUCING
     // actions (leave, remove) stay available; admins are never timeout-able in practice.
     const channelTimeoutError = ctx.timeoutError(currentUser);
 
@@ -580,7 +580,7 @@ export function registerChannelRoutes(ctx: AppContext): void {
       return reply.code(409).send(errorBody("A message in this channel is still being written"));
     }
 
-    // Mirror the message-delete policy at channel scale (review finding): a NON-ADMIN owner may not
+    // Mirror the message-delete policy at channel scale: a NON-ADMIN owner may not
     // cascade away other people's words — otherwise "you can only delete your own messages" is
     // defeated by deleting (or being transferred) the whole channel. Admins moderate; owners of a
     // channel that only holds their own content (or none) may still remove it themselves.
@@ -600,8 +600,8 @@ export function registerChannelRoutes(ctx: AppContext): void {
 
     // Audience computed BEFORE removal: private → roster + owner + the ACTING admin (a non-member
     // admin who managed this channel has it in their own client state via the admin panel's
-    // upserts — without the event their sidebar/IndexedDB keeps a dead channel until reload,
-    // Sol round 2 P2); public → every user who can currently receive events (banned/pending
+    // upserts — without the event their sidebar/IndexedDB keeps a dead channel until reload);
+    // public → every user who can currently receive events (banned/pending
     // sockets are excluded — the one other `sendEventToUsers` call site is naturally member-scoped).
     const audience =
       channel.visibility === "private"
@@ -618,10 +618,10 @@ export function registerChannelRoutes(ctx: AppContext): void {
       // tombstoned channel, so a peer that still lists it can't resurrect it here (docs/11).
       ctx.store.addTombstone(channel.id);
       // Pending join requests die with the channel — left behind, a recreated same-slug channel
-      // would inherit strangers' stale requests as one-click members (review finding).
+      // would inherit strangers' stale requests as one-click members.
       ctx.store.removeJoinRequestsForChannel(channel.id);
       // And forget the synced-origin mark, or a restart re-hydrates it and a later same-slug LOCAL
-      // channel would falsely count as peer-owned for the C1 metadata merge (review finding).
+      // channel would falsely count as peer-owned for the synced-channel metadata merge.
       ctx.store.unmarkChannelSynced(channel.id);
     });
     ctx.tombstones.add(channel.id);

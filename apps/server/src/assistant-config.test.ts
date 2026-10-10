@@ -1,18 +1,19 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { Channel, Message, User } from "@loam/schema";
+import type { User } from "@loam/schema";
 
 import { buildApp, type LoamApp } from "./app.js";
 import type { AppOptions, OnDeviceChatHook } from "./types.js";
 
 /**
- * Second-round findings from the 2026-09-25 pre-release review. Each security test was mutation-checked:
- * with its fix reverted, it fails.
+ * The assistant's launcher-owned config and on-device replies: an admin edit of `llm.onDevice` survives a
+ * restart, a repaired legacy bot id leaves no dead assistant on the roster, and a moderator abort holds the
+ * assistant slot until the phone's model stops. Each security test was mutation-checked: with its fix
+ * reverted, it fails.
  */
 
 type InjectResponse = Awaited<ReturnType<LoamApp["server"]["inject"]>>;
@@ -56,112 +57,6 @@ async function newSession(app: LoamApp): Promise<{ cookie: string; userId: strin
 function codeOf(response: InjectResponse): string | undefined {
   return (response.json() as { code?: string }).code;
 }
-
-/** Count the rows of a table straight from the SQLite file (the app must be closed). */
-function rawRowCount(dataDir: string, table: string, id: string): number {
-  const db = new DatabaseSync(join(dataDir, "loam.db"));
-  try {
-    const row = db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE id = ?`).get(id) as { n: number };
-    return row.n;
-  } finally {
-    db.close();
-  }
-}
-
-describe("rows an older release wrote past today's bounds don't stop an upgraded node from booting", () => {
-  it("quarantines an over-long-id row (left on disk), truncates an over-long meta.model and config model", async () => {
-    const dataDir = tempDataDir();
-    const first = await boot(dataDir);
-    const admin = await newSession(first);
-    const posted = await first.server.inject({
-      method: "POST",
-      url: "/api/messages",
-      headers: { cookie: admin.cookie },
-      payload: { type: "channelPost", channelId: "general", body: "kept" },
-    });
-    expect(posted.statusCode).toBe(201);
-    const kept = (posted.json() as { message: Message }).message;
-
-    const longId = `x${"a".repeat(199)}`;
-    const longModel = "m".repeat(200);
-    const template = first.store.loadChannels()[0] as Channel;
-    first.store.upsertChannel({ ...template, id: longId, name: "legacy" });
-    const author = first.store.loadUsers().find((user) => user.id === admin.userId) as User;
-    first.store.upsertUser({ ...author, id: `user.${"b".repeat(200)}` });
-    first.store.insertMessage({ ...kept, id: longId, body: "legacy long id" });
-    first.store.updateMessage({ ...kept, meta: { ...kept.meta, source: "llm", model: longModel } });
-    await first.close();
-
-    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ llm: { ollama: { model: longModel } } }));
-
-    const app = await boot(dataDir);
-    expect(app.store.loadChannels().some((channel) => channel.id === longId)).toBe(false);
-    expect(app.store.loadMessages().some((message) => message.id === longId)).toBe(false);
-    expect(app.store.loadUsers().some((user) => user.id.length > 128)).toBe(false);
-    // Not loaded, and held: nothing may claim these ids while the rows are on disk (upgrade-quarantine.test.ts).
-    expect(app.store.quarantine().channels.has(longId)).toBe(true);
-    expect(app.store.quarantine().messages.has(longId)).toBe(true);
-    expect(app.store.quarantine().users.has(`user.${"b".repeat(200)}`)).toBe(true);
-
-    // The over-long model label is repaired, not the whole message dropped.
-    const history = (
-      await app.server.inject({ method: "GET", url: "/api/messages/general", headers: { cookie: admin.cookie } })
-    ).json() as Message[];
-    const repaired = history.find((message) => message.id === kept.id);
-    expect(repaired?.meta?.model).toBe(longModel.slice(0, 120));
-
-    const config = (
-      await app.server.inject({ method: "GET", url: "/api/admin/config", headers: { cookie: admin.cookie } })
-    ).json() as { llm: { ollama: { model: string } } };
-    expect(config.llm.ollama.model).toBe(longModel.slice(0, 120));
-
-    // Quarantined rows are left on disk, not deleted.
-    await app.close();
-    expect(rawRowCount(dataDir, "channels", longId)).toBe(1);
-    expect(rawRowCount(dataDir, "messages", longId)).toBe(1);
-  });
-});
-
-describe("sync import honours a local moderator removal for new replies and reactions", () => {
-  it("refuses a peer's new reply or reaction under a post this node's moderator removed", async () => {
-    const sync = { enabled: true, peers: [], intervalMs: 3_600_000 };
-    const source = await boot(tempDataDir({ sync }));
-    const sourceAdmin = await newSession(source);
-    const postMessage = (payload: Record<string, unknown>) =>
-      source.server.inject({ method: "POST", url: "/api/messages", headers: { cookie: sourceAdmin.cookie }, payload });
-    const created = await postMessage({ type: "channelPost", channelId: "general", body: "contested" });
-    const postId = (created.json() as { message: { id: string } }).message.id;
-    const sourceUrl = await source.server.listen({ port: 0, host: "127.0.0.1" });
-
-    const puller = await boot(tempDataDir({ sync: { ...sync, peers: [{ url: sourceUrl }] } }));
-    const pullerAdmin = await newSession(puller);
-    const runSync = () =>
-      puller.server.inject({ method: "POST", url: "/api/admin/sync/run", headers: { cookie: pullerAdmin.cookie } });
-    await runSync();
-    expect(puller.store.loadMessages().some((message) => message.id === postId)).toBe(true);
-
-    const removed = await puller.server.inject({
-      method: "POST",
-      url: `/api/moderation/messages/${postId}/remove`,
-      headers: { cookie: pullerAdmin.cookie },
-      payload: {},
-    });
-    expect(removed.statusCode).toBe(200);
-
-    // The source never saw the removal, so it accepts a reply and a reaction under the post.
-    const reply = await postMessage({ type: "channelReply", channelId: "general", parentMessageId: postId, body: "pile-on" });
-    expect(reply.statusCode).toBe(201);
-    const reaction = await postMessage({ type: "reaction", targetMessageId: postId, reaction: "👍" });
-    expect(reaction.statusCode).toBe(201);
-    const replyId = (reply.json() as { message: { id: string } }).message.id;
-    const reactionId = (reaction.json() as { message: { id: string } }).message.id;
-
-    expect((await runSync()).statusCode).toBe(200);
-    const ids = puller.store.loadMessages().map((message) => message.id);
-    expect(ids).not.toContain(replyId);
-    expect(ids).not.toContain(reactionId);
-  });
-});
 
 describe("an admin edit of llm.onDevice survives a restart when config.json owns the block", () => {
   /** The effective `llm.onDevice` block, as the admin config API reports it. */

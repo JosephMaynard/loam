@@ -106,6 +106,7 @@ export const sw: Translation = {
   "people.pendingLoadError": "Imeshindwa kupakia maombi yanayosubiri.",
   "people.pendingLoading": "Inapakia maombi yanayosubiri…",
   "people.pendingEmpty": "Hakuna anayesubiri kujiunga.",
+  "people.pendingSince": "Aliomba kujiunga {when}",
   "people.approve": "Idhinisha",
   "people.deny": "Kataa",
 
@@ -239,7 +240,7 @@ export const sw: Translation = {
   "admin.meshHeading": "Mesh ya fursa",
   "admin.meshEnable": "Wezesha uwasilishaji wa mesh ya fursa",
   "admin.meshNote":
-    "Uwasilishaji wa sanduku la barua lililofungwa unaoruhusu ujumbe kuruka kutoka nodi hadi nodi kuelekea kwa mpokeaji asiye mtandaoni. Imezimwa kwa chaguo-msingi.",
+    "Uwasilishaji wa sanduku la barua lililofungwa unaoruhusu ujumbe kuruka kutoka nodi hadi nodi kuelekea kwa mpokeaji asiye mtandaoni. Imezimwa kwa chaguomsingi.",
   "admin.meshRelay": "Sambaza barua zilizofungwa za watu wengine",
   "admin.meshLifetimeLabel": "Muda wa ujumbe (masaa)",
   "admin.meshLifetimeNote":
@@ -368,7 +369,7 @@ export const sw: Translation = {
   "nodeLink.again": "Msimbo mpya",
   "admin.peerLinking": "inaunganisha…",
   "admin.peerLinkRefused": "Msimbo wake wa kuunganisha ulikataliwa (umeisha muda au umeshatumika). Omba mpya kutoka mtandao huo.",
-  "admin.peerKeyChanged": "Ufunguo wa mwenzi huyu umebadilika tangu nodi hii ianze. Vituo vyake vya umma bado vinavutwa, lakini tokeni ya usawazishaji inazuiliwa hadi nodi hii ianze upya au ufunguo ubandikwe.",
+  "admin.peerKeyChanged": "Ufunguo wa mwenza huyu umebadilika tangu nodi hii ianze. Vituo vyake vya umma bado vinavutwa, lakini tokeni ya usawazishaji inazuiliwa hadi nodi hii ianze upya au ufunguo ubandikwe.",
 
   "unreadBadge.label": "{n} ambazo hazijasomwa",
 
@@ -497,6 +498,7 @@ export const sw: Translation = {
   "error.thread_has_replies": "Uzi huu una majibu kutoka kwa watu wengine. Msimamizi pekee anaweza kuufuta",
   "error.too_many_attempts": "Majaribio mengi mno",
   "error.too_many_claim_attempts": "Majaribio mengi mno ya kupata; jaribu tena baadaye",
+  "error.rate_limited": "Maombi mengi mno; subiri kidogo kisha ujaribu tena",
   "error.message_create_failed": "Imeshindwa kuunda ujumbe",
   "error.websocket_unauthenticated": "WebSocket isiyothibitishwa",
   "error.unknown_attachment": "Kiambatisho kisichojulikana",
@@ -647,12 +649,12 @@ export const sw: Translation = {
   "error.reroll_not_allowed": "Jina jipya linapatikana tu kabla hujajiunga kwa mara ya kwanza",
   "error.host_not_allowed": "Anwani hii haihudumiwi na nodi hii ya LOAM",
   "error.channel_delete_admin_required": "Kituo hiki kina ujumbe wa watu wengine: msimamizi pekee anaweza kukifuta",
-  "error.location_disabled": "Kushiriki mahali kumezimwa kwenye mtandao huu",
-  "error.timed_out": "Msimamizi amekusimamisha kwa muda, kwa hivyo huwezi kutuma sasa",
+  "error.location_disabled": "Kushiriki mahali kumezimwa kwenye nodi hii ya LOAM",
+  "error.timed_out": "Msimamizi amekusimamisha kwa muda, kwa hivyo huwezi kuchapisha sasa hivi",
   "error.node_resetting": "Mtandao huu unawekwa upya. Jaribu tena baada ya muda mfupi.",
   "error.node_reset": "Mtandao huu umewekwa upya. Pakia upya ili kujiunga tena.",
-  "error.wipe_incomplete": "Uwekaji upya wa dharura haukuweza kukamilika, kwa hivyo mtandao umefungwa. Uanzishe upya ili kujaribu tena.",
-  "error.wipe_unrecorded": "Uwekaji upya wa dharura haukuweza kurekodiwa na haukukamilika. Uanzishe upya mtandao kisha uendeshe tena uwekaji upya wa dharura.",
+  "error.wipe_incomplete": "Uwekaji upya wa dharura haukuweza kukamilika, kwa hivyo mtandao umefungwa. Anzisha mtandao upya ili kujaribu tena.",
+  "error.wipe_unrecorded": "Uwekaji upya wa dharura haukuweza kurekodiwa na haukukamilika. Uanzishe upya mtandao kisha uendeshe tena Uwekaji upya wa dharura.",
   "error.mesh_identity_missing": "Bado huna utambulisho wa mesh kwenye mtandao huu",
   "error.mesh_card_invalid": "Kadi hiyo ya utambulisho wa mesh si halali",
   "error.encrypted_session_required": "Mtandao huu unakubali miunganisho iliyosimbwa tu. Changanua msimbo wake wa QR ili kuunganisha.",

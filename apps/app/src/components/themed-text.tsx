@@ -1,7 +1,9 @@
+import { useSyncExternalStore } from 'react';
 import { Platform, StyleSheet, Text, type TextProps } from 'react-native';
 
 import { Fonts, type ThemeColor } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { getAppLocale, rtlTextAlign, subscribeAppLocale } from '@/lib/i18n';
 
 export type ThemedTextProps = TextProps & {
   type?: 'default' | 'title' | 'small' | 'smallBold' | 'subtitle' | 'link' | 'linkPrimary' | 'code';
@@ -10,6 +12,10 @@ export type ThemedTextProps = TextProps & {
 
 export function ThemedText({ style, type = 'default', themeColor, ...rest }: ThemedTextProps) {
   const theme = useTheme();
+  // In a right-to-left language, text with no alignment of its own is aligned right: t() already makes the
+  // paragraph right to left (src/lib/i18n), but Android aligns `auto` text left regardless.
+  const locale = useSyncExternalStore(subscribeAppLocale, getAppLocale);
+  const align = rtlTextAlign(locale, StyleSheet.flatten(style)?.textAlign);
 
   return (
     <Text
@@ -24,6 +30,7 @@ export function ThemedText({ style, type = 'default', themeColor, ...rest }: The
         type === 'linkPrimary' && styles.linkPrimary,
         type === 'code' && styles.code,
         style,
+        align ? { textAlign: align, writingDirection: 'rtl' } : null,
       ]}
       {...rest}
     />

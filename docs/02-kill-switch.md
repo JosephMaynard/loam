@@ -4,7 +4,9 @@
 > panicToken? }` in the shared config schema; `POST /api/admin/kill-switch` (admin + enabled +
 > `{ "confirm": "wipe" }` when confirmation is on) and unauthenticated `POST /api/panic` (404
 > unless a token ≥16 chars is configured; rate-limited; the token is stored **scrypt-hashed**, so
-> a seized node's config does not reveal it). The wipe empties all tables via the DAL's `wipeAll()`,
+> a seized node's config does not reveal it). The wipe empties all tables via the DAL's `wipeAll()`
+> (on a plaintext store, which runs with `secure_delete` on, the deleted rows are zeroed in the file;
+> see "What the plaintext wipe does now" below),
 > deletes `avatars/` and `attachments/`, invalidates every session, broadcasts a `wipe` event, closes all sockets, and
 > re-seeds defaults — config survives so the switch can fire again. Clients purge IndexedDB,
 > localStorage, service worker + caches, and show a neutral "Disconnected" screen. Admin UI has a
@@ -19,7 +21,7 @@
 > plaintext logical wipe. Reboot in `ephemeral` mode also
 > loses the key permanently. Known limitation: Node strings can't be reliably zeroed in RAM, so a
 > device seized *while running* remains the weak case (documented honestly). **Second known
-> limitation (Sol 2026-08-15): uploaded media — avatar and attachment files — live OUTSIDE the
+> limitation (external review, 15 August 2026): uploaded media, avatar and attachment files, live OUTSIDE the
 > encrypted DB as plaintext files, so the cryptographic wipe does not apply to them; the kill switch
 > deletes the files, which on flash is best-effort removal, not secure erasure.** Media-at-rest
 > encryption is tracked in `docs/29` (Track 2). Remaining (future): duress/decoy passphrase; RAM
@@ -42,6 +44,18 @@
 > `wipeAll()`: the store commits under `synchronous = NORMAL`, so without it a power cut after the journal is
 > cleared could roll the deletion back with nothing left to finish it. A checkpoint that comes back busy or
 > partial counts as a failed wipe, so the node stays locked with its journal on disk.
+>
+> **Durable writes on Windows.** The wipe journal and `config.json` are written to a staging file, flushed,
+> renamed into place, and then the directory is flushed. Windows needs two changes to that recipe: the
+> staging file is flushed through a handle opened for writing (FlushFileBuffers refuses a read-only one),
+> and the directory flush is skipped, because Node has no way to flush a directory there. That makes the
+> rename best-effort on Windows: Node renames without write-through, so the call can return before the
+> change is on disk, and NTFS journaling only keeps the file system consistent after a crash; it doesn't
+> promise the rename survived. After a power cut the old file or the new one is there (never a torn one),
+> so a journal written just before the cut may be missing and the next boot would not finish that wipe.
+> Before this, every durable write on a Windows `loamnet` host reported failure, so an Emergency Reset would
+> have locked the node. The fix is covered by tests that emulate the Windows rules, but it has not yet been
+> run on a real Windows machine (docs/25, O3).
 >
 > **Which branch a keyed node takes.** `persistent`/`passphrase` nodes take the journaled fixed-key wipe
 > (delete, prove gone, journal, hand off or recreate); `ephemeral` nodes rotate their RAM key. A real key
@@ -113,6 +127,20 @@ SQLite leaves data in the main DB file, `-wal`, and `-journal`, and deleted rows
 recoverable by forensic tools on flash storage. A `DELETE FROM` is **not** secure erasure. The robust
 answer is **encryption at rest** (SQLCipher/libsql) where the wipe throws away the key. If encryption is
 out of scope, note the limitation in user-facing docs rather than overpromising.
+
+**What the plaintext wipe does now.** A plaintext store (`node:sqlite`, or plain `better-sqlite3` on the
+Android host) opens with `PRAGMA secure_delete = ON`, so SQLite overwrites deleted rows with zeros instead
+of leaving them in free pages and freed cell space. That only covers deletes made with it on: a node
+upgraded from a build without it still has the rows it deleted before (expired messages, removed
+channels) in free pages. So after `wipeAll()` the wipe runs `VACUUM`, which rebuilds the file from the
+live rows alone (cheap, since the tables are empty by then), then checkpoints the write-ahead log into
+`loam.db` and truncates it, so a copy of the database file taken after the reset no longer holds the
+deleted text, whenever it was deleted (tests check the file bytes, including after an older build's
+deletes). A wipe interrupted and finished at boot deletes the database files instead. That is still **not** secure erasure on flash: the zeros
+are written to new blocks, and the flash translation layer may keep the old ones until it reuses them, so
+someone who reads the raw chip can still find older copies, as with the WAL frames written before the
+reset. Encryption at rest is still the answer for that. The cost is small: the pragma only adds zeroing to
+deletes and rewrites, and the server test suite ran in about the same time with it (34.3 s against 33.9 s).
 
 ## UX decisions (confirm with owner — see [decisions.md](decisions.md))
 - **Speed vs. accident-prevention**: a raid wants one tap; normal ops want a confirm. Recommendation:

@@ -1,4 +1,4 @@
-// Message id minting + channel-membership predicate. Extracted from app.ts (2026-09-04 split).
+// Message id minting + channel-membership predicate.
 import { randomUUID } from "node:crypto";
 
 import type { Message } from "@loam/schema";

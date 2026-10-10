@@ -33,7 +33,7 @@ import {
   wipeServerCredentials,
   SERVER_URL_KEY,
   TransportNeedsQrError,
-  UnsealedTunnelResponseError,
+  UnsealedResponseError,
   wsUrl,
 } from "./transport";
 
@@ -279,11 +279,11 @@ describe("transport", () => {
         const aad = `${init.method} ${url}`;
         const opened = openTransport(sessionKeyOnServer!, wireBody.enc, aad);
         expect(opened).not.toBeNull();
-        // The sealed plaintext is the `{ s, b }` anti-replay envelope: sequence 1 (first request on a
-        // fresh session) carrying the body under `b`.
-        expect(JSON.parse(opened!)).toEqual({ s: 1, b: { text: "hello" } });
+        // The sealed plaintext is the `{ s, r, b }` anti-replay envelope: sequence 1 (first request on a
+        // fresh session), asking for a sequence-bound response, carrying the body under `b`.
+        expect(JSON.parse(opened!)).toEqual({ s: 1, r: 1, b: { text: "hello" } });
 
-        const sealedResponse = sealTransport(sessionKeyOnServer!, JSON.stringify({ id: "msg_1" }), aad);
+        const sealedResponse = sealTransport(sessionKeyOnServer!, JSON.stringify({ id: "msg_1" }), `${aad}#1#200`);
         return new Response(JSON.stringify({ enc: sealedResponse }), {
           status: 200,
           headers: { "x-loam-enc": "1" },
@@ -324,9 +324,10 @@ describe("transport", () => {
       vi.stubGlobal("fetch", fetchMock);
 
       await ensureSession("optional", host.publicKey);
-      await encryptedFetch("POST", "/api/messages", { n: 1 });
-      await encryptedFetch("POST", "/api/messages", { n: 2 });
-      await encryptedFetch("DELETE", "/api/messages/x");
+      // The fake node answers unsealed, which the client refuses; only the requests matter here.
+      await encryptedFetch("POST", "/api/messages", { n: 1 }).catch(() => undefined);
+      await encryptedFetch("POST", "/api/messages", { n: 2 }).catch(() => undefined);
+      await encryptedFetch("DELETE", "/api/messages/x").catch(() => undefined);
 
       expect(seqs).toEqual([1, 2, 3]);
     });
@@ -364,7 +365,8 @@ describe("transport", () => {
         // real response the same way the server would.
         const session = getSession();
         expect(session).toBeDefined();
-        const sealed = sealTransport(session!.key, JSON.stringify({ ok: true }), `GET ${url}`);
+        // Bound to the sequence this retry carried (the latest one on the fresh session).
+        const sealed = sealTransport(session!.key, JSON.stringify({ ok: true }), `GET ${url}#${session!.seq}#200`);
         return new Response(JSON.stringify({ enc: sealed }), { status: 200, headers: { "x-loam-enc": "1" } });
       });
       vi.stubGlobal("fetch", fetchMock);
@@ -546,7 +548,7 @@ describe("transport", () => {
       vi.stubGlobal("fetch", fetchMock);
 
       await ensureSession("optional", host.publicKey);
-      await encryptedFetch("POST", "/api/admin/sync/run", undefined);
+      await encryptedFetch("POST", "/api/admin/sync/run", undefined).catch(() => undefined);
 
       // A plaintext-injected mutation body is rejected server-side unless it's `{ enc }` — a bodyless
       // mutation must still carry a (empty) envelope, never a bare absent body, to pass that gate.
@@ -556,13 +558,14 @@ describe("transport", () => {
 
       const session = getSession();
       const opened = openTransport(session!.key, wire.enc, "POST /api/admin/sync/run");
-      // A bodyless mutation still seals the `{ s }` anti-replay envelope (sequence only, no `b`).
-      expect(JSON.parse(opened!)).toEqual({ s: 1 });
+      // A bodyless mutation still seals the `{ s, r }` anti-replay envelope (no `b`).
+      expect(JSON.parse(opened!)).toEqual({ s: 1, r: 1 });
     });
 
-    it("keeps a bodyless GET a pure passthrough under a live session (no envelope needed)", async () => {
+    it("sends a bodyless GET with no body, its sealed envelope in the x-loam-seq header", async () => {
       const host = createTransportIdentity();
       let capturedBody: unknown;
+      let capturedSeq: string | undefined;
 
       const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
         if (url === "/api/transport/handshake") {
@@ -571,14 +574,158 @@ describe("transport", () => {
         }
 
         capturedBody = init.body;
+        capturedSeq = (init.headers as Record<string, string>)["x-loam-seq"];
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       });
       vi.stubGlobal("fetch", fetchMock);
 
       await ensureSession("optional", host.publicKey);
-      await encryptedFetch("GET", "/api/channels");
+      await encryptedFetch("GET", "/api/channels").catch(() => undefined);
 
       expect(capturedBody).toBeUndefined();
+      const opened = openTransport(getSession()!.key, capturedSeq!, "GET /api/channels");
+      expect(JSON.parse(opened!)).toEqual({ s: 1, r: 1 });
+    });
+
+    it("refuses a sealed response bound to another sequence: a replayed old answer never passes as a new one", async () => {
+      const host = createTransportIdentity();
+      let captured: string | undefined;
+
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+          return new Response(JSON.stringify(json), { status });
+        }
+        const key = getSession()!.key;
+        // The first answer is genuine (bound to sequence 1); an on-path attacker keeps it and replays it as
+        // the answer to the second request on the same route.
+        captured ??= sealTransport(key, JSON.stringify({ messages: ["old"] }), `GET ${url}#1#200`);
+        return new Response(JSON.stringify({ enc: captured }), { status: 200, headers: { "x-loam-enc": "1" } });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await ensureSession("optional", host.publicKey);
+      expect(await (await encryptedFetch("GET", "/api/messages/general")).json()).toEqual({ messages: ["old"] });
+      // Sequence 2 gets sequence 1's answer: it doesn't open, and neither does the retry on a fresh session.
+      await expect(encryptedFetch("GET", "/api/messages/general")).rejects.toThrow("Transport session expired");
+      // A refusal sealed before the server read the sequence (`encStatus`, under `!status`) is only taken
+      // with an error status, so it can't stand in for a success either.
+      const early = sealTransport(getSession()!.key, JSON.stringify({ messages: ["old"] }), "POST /api/messages/general!200");
+      fetchMock.mockImplementation(async () => new Response(JSON.stringify({ enc: "x", encStatus: early }), { status: 200, headers: { "x-loam-enc": "1" } }));
+      await expect(encryptedFetch("POST", "/api/messages/general", { body: "y" })).rejects.toThrow("Transport session expired");
+      const refusal = sealTransport(getSession()!.key, JSON.stringify({ error: "Too many requests" }), "POST /api/messages/general!429");
+      fetchMock.mockImplementation(async () => new Response(JSON.stringify({ enc: "x", encStatus: refusal }), { status: 429, headers: { "x-loam-enc": "1" } }));
+      const limited = await encryptedFetch("POST", "/api/messages/general", { body: "z" });
+      expect(limited.status).toBe(429);
+    });
+
+    it("authenticates the status: a sealed answer relabelled with another status never opens", async () => {
+      const host = createTransportIdentity();
+      let respond: (key: string, url: string, init: RequestInit) => Response = () => new Response(null, { status: 500 });
+      const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+          return new Response(JSON.stringify(json), { status });
+        }
+        return respond(getSession()!.key, url, init);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await ensureSession("optional", host.publicKey);
+
+      // A genuine 200, bound to its sequence and status, relabelled as a 404 by an on-path attacker.
+      respond = (key, url, init) => {
+        const enc = sealTransport(key, JSON.stringify({ id: "msg_1" }), `${init.method} ${url}#${getSession()!.seq}#200`);
+        return new Response(JSON.stringify({ enc }), { status: 404, headers: { "x-loam-enc": "1" } });
+      };
+      await expect(encryptedFetch("POST", "/api/messages", { body: "x" })).rejects.toThrow("Transport session expired");
+
+      // A 200 answered under the bare aad (the server saw no sequence, because the attacker stripped the
+      // GET's x-loam-seq header), relabelled as an error: the bare `enc` is never opened, and `encStatus`
+      // names the status it was really sent with.
+      respond = (key, url, init) => {
+        const body = JSON.stringify({ messages: ["secret"] });
+        const enc = sealTransport(key, body, `${init.method} ${url}`);
+        const encStatus = sealTransport(key, body, `${init.method} ${url}!200`);
+        return new Response(JSON.stringify({ enc, encStatus }), { status: 500, headers: { "x-loam-enc": "1" } });
+      };
+      await expect(encryptedFetch("POST", "/api/messages", { body: "y" })).rejects.toThrow("Transport session expired");
+    });
+  });
+
+  describe("an optional-mode session never accepts an unsealed reply as content", () => {
+    /** A fake node that handshakes as `host` and answers every content request with `reply`. */
+    function optionalNode(host: ReturnType<typeof createTransportIdentity>, reply: (url: string, init: RequestInit) => Response) {
+      return vi.fn(async (url: string, init: RequestInit) => {
+        if (url === "/api/transport/handshake") {
+          const { status, json } = handshakeResponseBody(host.secretKey, host.publicKey, init.body as string);
+          return new Response(JSON.stringify(json), { status });
+        }
+        return reply(url, init);
+      });
+    }
+
+    it("refuses a forged plaintext 200 (a stripped seal) instead of returning it", async () => {
+      const host = createTransportIdentity();
+      const forgedCard = { meshId: "mesh.attacker", signPublicKey: "attacker", kxPublicKey: "attacker" };
+      vi.stubGlobal(
+        "fetch",
+        optionalNode(host, () => new Response(JSON.stringify(forgedCard), { status: 200, headers: { "content-type": "application/json" } })),
+      );
+
+      await ensureSession("optional", host.publicKey);
+      const failure = await encryptedFetch("GET", "/api/mesh/identity").catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(UnsealedResponseError);
+      expect((failure as UnsealedResponseError).status).toBe(200);
+      // A mutation's forged plaintext error is refused the same way: its text never reaches the screen.
+      await expect(
+        encryptedFetch("POST", "/api/messages", { body: "hi" }).then(() => "accepted"),
+      ).rejects.toBeInstanceOf(UnsealedResponseError);
+    });
+
+    it("passes the pre-session refusals (401, 421, 503) through as content-free responses carrying only the stable code", async () => {
+      const host = createTransportIdentity();
+      let status = 421;
+      vi.stubGlobal(
+        "fetch",
+        optionalNode(host, () => new Response(JSON.stringify({ error: "Attacker text", code: "attacker" }), { status })),
+      );
+
+      await ensureSession("optional", host.publicKey);
+      for (const [refused, code] of [[421, "host_not_allowed"], [503, "node_resetting"], [401, "session_invalid"]] as const) {
+        status = refused;
+        const response = await encryptedFetch("POST", "/api/messages", { body: "hi" });
+        expect(response.status).toBe(refused);
+        const body = (await response.json()) as { error: string; code: string };
+        expect(body.code).toBe(code);
+        expect(body.error).not.toContain("Attacker");
+      }
+    });
+
+    it("accepts the sealed empty 200 a node sends for a bodyless answer", async () => {
+      const host = createTransportIdentity();
+      vi.stubGlobal(
+        "fetch",
+        optionalNode(host, (url, init) => {
+          const sealed = sealTransport(getSession()!.key, "", `${init.method} ${url}#${getSession()!.seq}#200`);
+          return new Response(JSON.stringify({ enc: sealed }), { status: 200, headers: { "x-loam-enc": "1" } });
+        }),
+      );
+
+      await ensureSession("optional", host.publicKey);
+      const response = await encryptedFetch("POST", "/api/typing", { channelId: "general" });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("");
+    });
+
+    it("leaves images and file downloads on the direct URL: they never pass through the sealed fetch", async () => {
+      const host = createTransportIdentity();
+      const node = optionalNode(host, () => new Response(new Uint8Array([0x89, 0x50]), { status: 200 }));
+      vi.stubGlobal("fetch", node);
+
+      await ensureSession("optional", host.publicKey);
+      expect(await encryptedImageUrl("/api/avatars/avt_0123456789abcdef.webp")).toBe("/api/avatars/avt_0123456789abcdef.webp");
+      expect(await encryptedImageUrl("/api/attachments/att_0123456789abcdef.bin")).toBe("/api/attachments/att_0123456789abcdef.bin");
+      expect(node.mock.calls.filter(([url]) => url !== "/api/transport/handshake")).toHaveLength(0);
     });
   });
 
@@ -1436,7 +1583,7 @@ describe("review fixes 2026-09-04 (client transport)", () => {
             return new Response(null, { status: 401 }); // an unsealed (forgeable) 401 on a GET
           }
           const session = getSession();
-          const sealed = sealTransport(session!.key, JSON.stringify({ ok: true }), `GET ${url}`);
+          const sealed = sealTransport(session!.key, JSON.stringify({ ok: true }), `GET ${url}#${session!.seq}#200`);
           return new Response(JSON.stringify({ enc: sealed }), { status: 200, headers: { "x-loam-enc": "1" } });
         }),
       );

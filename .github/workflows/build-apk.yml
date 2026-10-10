@@ -21,8 +21,12 @@ name: Build APK
 # Hardening (pre-release review 2026-09-25):
 #   - Every action is pinned to a full commit SHA (the version is in the trailing comment).
 #   - The build job has read-only repo access and checks out without persisting the token; only the small
-#     `release` job gets `contents: write`, and it runs no repo code — it downloads the built artifact and
-#     attaches it.
+#     `release` job gets `contents: write`, and it runs no repo code: it downloads the built artifact and
+#     attaches it with its SHA-256 checksum (`loam-host.apk.sha256`).
+#   - On a tag, the `attest` job (the only one with `id-token: write` + `attestations: write`) records signed
+#     build provenance for the APK and the AAB. Check a download with
+#     `gh attestation verify loam-host.apk --repo MagicZebraLtd/loam`, or the checksum with
+#     `sha256sum -c loam-host.apk.sha256`.
 #   - The keystore secrets are exposed ONLY to the one step that writes the keystore, never job-wide.
 #   - Tag builds FAIL without the keystore secret (a debug-signed release can't update installs), when the
 #     tag's X.Y.Z doesn't match the manifest versions, or when versionCode isn't above that of every earlier
@@ -176,24 +180,58 @@ jobs:
           path: apps/app/loam-host.aab
           if-no-files-found: error
 
-  release:
-    name: Attach APK to the Release
+  attest:
+    name: Attest build provenance
     needs: build-apk
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write # create/update the Release and upload the APK asset — this job only
+      contents: read
+      id-token: write # mint the OIDC token Sigstore signs the attestation with
+      attestations: write # store the attestation on this repository
     steps:
       - name: Download APK artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: loam-host-apk
 
-      - name: Attach APK to the Release
+      - name: Download AAB artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: loam-host-aab
+
+      - name: Attest the APK and the AAB
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            loam-host.apk
+            loam-host.aab
+
+  release:
+    name: Attach APK to the Release
+    needs: [build-apk, attest]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create/update the Release and upload the APK asset (this job only)
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: loam-host-apk
+
+      - name: Write the APK checksum
+        # `sha256sum -c loam-host.apk.sha256` beside a downloaded APK checks it.
+        run: sha256sum loam-host.apk > loam-host.apk.sha256 && cat loam-host.apk.sha256
+
+      - name: Attach APK and checksum to the Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          files: loam-host.apk
+          files: |
+            loam-host.apk
+            loam-host.apk.sha256
           fail_on_unmatched_files: true
           # vX.Y.Z-rc.N / -beta.N (check-versions rejects any other suffix) → a GitHub pre-release, so it
           # never becomes "Latest" or the default download.

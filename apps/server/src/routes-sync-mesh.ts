@@ -1,6 +1,6 @@
 // Node-to-node sync endpoints (token-authed public data) and the opportunistic-mesh endpoints (identity
-// cards, contacts, sealed send/broadcast, the loopback transport bridge, admin sync). Extracted verbatim
-// from app.ts (2026-09-04 split) over the shared AppContext.
+// cards, contacts, sealed send/broadcast, the loopback transport bridge, admin sync), registered over the
+// shared AppContext.
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { MeshBroadcastRequestSchema, type MeshContact, MeshIdentityCardSchema, MeshInboundRequestSchema, type MeshInboundResponse, MeshSendRequestSchema, type SealedMessage, SyncAttachmentRequestSchema, type SyncLinkCodeResponse, SyncLinkRequestSchema, type SyncLinkResponse, SyncMessagesRequestSchema } from "@loam/schema";
@@ -12,6 +12,9 @@ import { peerUrlFor } from "./sync-links.js";
 import { attachmentFileName, parseAttachmentFileName } from "./media.js";
 import { localInterfaceAddresses, remoteClientAddresses } from "./net.js";
 import type { FastifyReply, FastifyRequest } from "fastify";
+
+/** Most sealed blobs one `GET /api/mesh/outbound` answer hands the radio courier. */
+const MESH_OUTBOUND_BATCH = 200;
 
 /** Register the node-to-node sync endpoints and the opportunistic-mesh endpoints (cards, contacts, send, bridge, admin sync). */
 export function registerSyncMeshRoutes(ctx: AppContext): void {
@@ -106,7 +109,7 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
       try {
         const bytes = await readFile(join(ctx.attachmentsDir, attachmentFileName(attachment)));
         // A `.bin` (non-image) file name carries no MIME, so report the one recorded on the owning message
-        // — an undefined `mimeType` used to drop out of the JSON and fail the puller's schema check.
+        // — an undefined `mimeType` would drop out of the JSON and fail the puller's schema check.
         const entry =
           owningMessage.type !== "reaction" && owningMessage.type !== "sealed"
             ? owningMessage.attachments?.find((candidate) => candidate.id === attachment.id)
@@ -400,11 +403,13 @@ export function registerSyncMeshRoutes(ctx: AppContext): void {
         return reply.code(404).send(errorBody("Not found"));
       }
 
-      // Exactly what the sync digest would advertise as `sealed`, but as full records ready to hand to
-      // the radio. Bounded so one transfer window can't try to push the whole store at once.
-      const messages = ctx.data.messages
-        .filter((message): message is SealedMessage => message.type === "sealed" && ctx.sync.isSyncableMessage(message))
-        .slice(0, 200);
+      // What the sync digest would advertise as `sealed`, but as full records ready to hand to the radio.
+      // Bounded so one transfer window can't try to push the whole store at once, and rotated so that a
+      // queue longer than the bound reaches the radio in turn across the courier's polls (nextOutboundBatch).
+      const held = ctx.data.messages.filter(
+        (message): message is SealedMessage => message.type === "sealed" && ctx.sync.isSyncableMessage(message),
+      );
+      const messages = ctx.mesh.nextOutboundBatch(held, MESH_OUTBOUND_BATCH);
       return { messages };
     },
   );

@@ -16,9 +16,13 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Coded exception surfaced to JS as `ERR_HOTSPOT` (inferred from the class name). */
-private class HotspotException(message: String, cause: Throwable? = null) :
-  CodedException(message, cause)
+/**
+ * Coded exception surfaced to JS with an explicit `ERR_HOTSPOT_*` code. The JS side maps the code to the
+ * host catalog (src/lib/hotspot-errors.ts) so the operator reads it in their language; the English message
+ * is for logcat only.
+ */
+private class HotspotException(code: String, message: String, cause: Throwable? = null) :
+  CodedException(code, message, cause)
 
 /**
  * Drives Android's `WifiManager.LocalOnlyHotspot` for the LOAM host (docs/04): starts a local-only
@@ -27,8 +31,8 @@ private class HotspotException(message: String, cause: Throwable? = null) :
  * active reservation is held here and reused across `startHotspot` calls.
  *
  * Requires `ACCESS_FINE_LOCATION` below API 33 (LocalOnlyHotspot is location-gated there; the JS side
- * requests it together with `ACCESS_COARSE_LOCATION`, as Android 12+ demands) and `NEARBY_WIFI_DEVICES`
- * from API 33, plus `CHANGE_WIFI_STATE` / `ACCESS_WIFI_STATE`. Runtime permission is requested from JS
+ * requests it together with `ACCESS_COARSE_LOCATION`, as Android 12 demands) and only `NEARBY_WIFI_DEVICES`
+ * from API 33 (the manifest caps location at API 32), plus `CHANGE_WIFI_STATE` / `ACCESS_WIFI_STATE`. Runtime permission is requested from JS
  * before `startHotspot` (src/lib/hotspot-permissions.ts); a missing grant surfaces here as a
  * `SecurityException`.
  */
@@ -56,8 +60,8 @@ class LoamHotspotModule : Module() {
     Name("LoamHotspot")
 
     // Fired when the SYSTEM tears the local-only hotspot down (the user enabled tethering — Android allows
-    // one or the other — Wi-Fi was toggled, an OEM power policy). Without it JS kept reporting "running"
-    // and showing a dead SSID/QR until the app was killed (review 2026-09-04).
+    // one or the other — Wi-Fi was toggled, an OEM power policy). Without it JS would keep reporting
+    // "running" and showing a dead SSID/QR until the app was killed.
     Events("onHotspotStopped")
 
     AsyncFunction("startHotspot") { promise: Promise ->
@@ -204,7 +208,7 @@ class LoamHotspotModule : Module() {
       if (creds != null) {
         promise.resolve(creds)
       } else {
-        promise.reject(HotspotException("The hotspot is running but its credentials are unavailable."))
+        promise.reject(HotspotException("ERR_HOTSPOT_NO_CREDENTIALS", "The hotspot is running but its credentials are unavailable."))
       }
       return
     }
@@ -212,18 +216,18 @@ class LoamHotspotModule : Module() {
     // Serialize concurrent starts: only the caller that flips this from false→true proceeds; a
     // second overlapping call is rejected instead of also invoking startLocalOnlyHotspot.
     if (!starting.compareAndSet(false, true)) {
-      return promise.reject(HotspotException("A hotspot start is already in progress."))
+      return promise.reject(HotspotException("ERR_HOTSPOT_BUSY", "A hotspot start is already in progress."))
     }
 
     val context: Context = appContext.reactContext ?: run {
       starting.set(false)
-      return promise.reject(HotspotException("The Android context is unavailable."))
+      return promise.reject(HotspotException("ERR_HOTSPOT_UNAVAILABLE", "The Android context is unavailable."))
     }
 
     val wifiManager =
       context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: run {
         starting.set(false)
-        return promise.reject(HotspotException("WifiManager is unavailable on this device."))
+        return promise.reject(HotspotException("ERR_HOTSPOT_UNAVAILABLE", "WifiManager is unavailable on this device."))
       }
 
     // The callback fires asynchronously on the main thread after this method returns; guard so the
@@ -248,7 +252,7 @@ class LoamHotspotModule : Module() {
         if (creds != null) {
           promise.resolve(creds)
         } else {
-          promise.reject(HotspotException("The hotspot started but reported no SSID/password."))
+          promise.reject(HotspotException("ERR_HOTSPOT_NO_CREDENTIALS", "The hotspot started but reported no SSID/password."))
         }
       }
 
@@ -257,7 +261,7 @@ class LoamHotspotModule : Module() {
         if (!settled.compareAndSet(false, true)) {
           return
         }
-        promise.reject(HotspotException("Couldn't start the hotspot on this device (${reasonToMessage(reason)})."))
+        promise.reject(HotspotException(reasonToCode(reason), "Couldn't start the hotspot on this device (${reasonToMessage(reason)})."))
       }
 
       override fun onStopped() {
@@ -286,12 +290,12 @@ class LoamHotspotModule : Module() {
     } catch (e: SecurityException) {
       starting.set(false)
       if (settled.compareAndSet(false, true)) {
-        promise.reject(HotspotException("Location permission is required to start the hotspot.", e))
+        promise.reject(HotspotException("ERR_HOTSPOT_PERMISSION", "The hotspot permission (location, or nearby Wi-Fi devices on API 33+) is missing.", e))
       }
     } catch (e: Throwable) {
       starting.set(false)
       if (settled.compareAndSet(false, true)) {
-        promise.reject(HotspotException("Couldn't start the hotspot: ${e.message ?: e.javaClass.simpleName}", e))
+        promise.reject(HotspotException("ERR_HOTSPOT_FAILED", "Couldn't start the hotspot: ${e.message ?: e.javaClass.simpleName}", e))
       }
     }
   }
@@ -539,6 +543,14 @@ class LoamHotspotModule : Module() {
   /** WifiManager hands IPv4 addresses as little-endian ints (first octet in the low byte). */
   private fun littleEndianIpv4(raw: Int): String =
     "${raw and 0xff}.${(raw shr 8) and 0xff}.${(raw shr 16) and 0xff}.${(raw ushr 24) and 0xff}"
+
+  /** The JS-facing code for a LocalOnlyHotspotCallback failure reason (mapped in src/lib/hotspot-errors.ts). */
+  private fun reasonToCode(reason: Int): String = when (reason) {
+    WifiManager.LocalOnlyHotspotCallback.ERROR_NO_CHANNEL -> "ERR_HOTSPOT_NO_CHANNEL"
+    WifiManager.LocalOnlyHotspotCallback.ERROR_INCOMPATIBLE_MODE -> "ERR_HOTSPOT_INCOMPATIBLE_MODE"
+    WifiManager.LocalOnlyHotspotCallback.ERROR_TETHERING_DISALLOWED -> "ERR_HOTSPOT_TETHERING_DISALLOWED"
+    else -> "ERR_HOTSPOT_FAILED"
+  }
 
   private fun reasonToMessage(reason: Int): String = when (reason) {
     WifiManager.LocalOnlyHotspotCallback.ERROR_NO_CHANNEL -> "no available channel"

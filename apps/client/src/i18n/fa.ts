@@ -106,6 +106,7 @@ export const fa: Translation = {
   "people.pendingLoadError": "بارگیری درخواست‌های در انتظار ممکن نشد.",
   "people.pendingLoading": "در حال بارگیری درخواست‌های در انتظار…",
   "people.pendingEmpty": "کسی منتظر پیوستن نیست.",
+  "people.pendingSince": "درخواست پیوستن: {when}",
   "people.approve": "تأیید",
   "people.deny": "رد",
 
@@ -368,7 +369,7 @@ export const fa: Translation = {
   "nodeLink.again": "کد تازه",
   "admin.peerLinking": "در حال پیوند…",
   "admin.peerLinkRefused": "کد پیوند آن رد شد (منقضی یا استفاده‌شده). از آن شبکه کد تازه بخواهید.",
-  "admin.peerKeyChanged": "کلید این همتا از زمان شروع این گره تغییر کرده است. کانال‌های عمومی آن همچنان دریافت می‌شوند، اما توکن همگام‌سازی تا راه‌اندازی مجدد این گره یا ثابت شدن کلید ارسال نمی‌شود.",
+  "admin.peerKeyChanged": "کلید این همتا از زمان شروع این گره تغییر کرده است. کانال‌های عمومی آن همچنان دریافت می‌شوند، اما توکن همگام‌سازی تا راه‌اندازی مجدد این گره یا تثبیت کلید ارسال نمی‌شود.",
 
   "unreadBadge.label": "{n} نخوانده",
 
@@ -497,6 +498,7 @@ export const fa: Translation = {
   "error.thread_has_replies": "این رشته پاسخ‌هایی از افراد دیگر دارد. تنها یک مدیر می‌تواند آن را حذف کند",
   "error.too_many_attempts": "تلاش‌های بیش از حد",
   "error.too_many_claim_attempts": "تلاش‌های دریافت بیش از حد؛ بعداً دوباره تلاش کنید",
+  "error.rate_limited": "درخواست‌های بیش از حد؛ کمی صبر کنید و دوباره تلاش کنید",
   "error.message_create_failed": "ساخت پیام ممکن نشد",
   "error.websocket_unauthenticated": "WebSocket احراز هویت‌نشده",
   "error.unknown_attachment": "پیوست ناشناخته",
@@ -647,7 +649,7 @@ export const fa: Translation = {
   "error.reroll_not_allowed": "نام جدید فقط پیش از نخستین پیوستن شما در دسترس است",
   "error.host_not_allowed": "این نشانی توسط این گره LOAM ارائه نمی‌شود",
   "error.channel_delete_admin_required": "این کانال پیام‌هایی از دیگران دارد: فقط مدیر می‌تواند آن را حذف کند",
-  "error.location_disabled": "اشتراک‌گذاری موقعیت در این شبکه غیرفعال است",
+  "error.location_disabled": "اشتراک‌گذاری موقعیت روی این گرهِ LOAM غیرفعال است",
   "error.timed_out": "یک ناظر شما را موقتاً محدود کرده است، پس فعلاً نمی‌توانید پیام بفرستید",
   "error.node_resetting": "این شبکه در حال بازنشانی است. کمی بعد دوباره تلاش کنید.",
   "error.node_reset": "این شبکه بازنشانی شد. برای پیوستن دوباره، صفحه را بارگذاری مجدد کنید.",

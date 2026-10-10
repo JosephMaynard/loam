@@ -1,6 +1,6 @@
 // Node-to-node sync (docs/11): the digest, the per-peer transport decision, defensive imports of peer
-// users/messages/attachments, the missing-attachment retry, and the sync loop. Extracted verbatim from
-// app.ts (2026-09-04 split) behind the shared `Runtime` view plus the mesh layer it hands sealed mail to.
+// users/messages/attachments, the missing-attachment retry, and the sync loop, behind the shared `Runtime`
+// view plus the mesh layer it hands sealed mail to.
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { verifyKxBinding } from "@loam/crypto";
@@ -59,7 +59,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   let syncRunning = false;
   let lastSyncLoopAt = 0;
 
-  // SF3: single-flight guard for `retryMissingAttachments` — each work item's fetch can consume the
+  // Single-flight guard for `retryMissingAttachments` — each work item's fetch can consume the
   // full 10s peer timeout, so without this an overlapping 30s reaper tick (a handful of unreachable
   // records outlasting the tick) would stack unbounded concurrent passes/requests.
   let retryMissingAttachmentsRunning = false;
@@ -101,7 +101,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   /** What this node advertises to pulling peers (see SyncDigestSchema). */
   function buildSyncDigest(): SyncDigest {
     return {
-      // Public channels INCLUDING archived ones (C1) — a peer that imported this channel must see the
+      // Public channels INCLUDING archived ones — a peer that imported this channel must see the
       // archived flag to converge. Archived is public metadata (no members leak); their messages are still
       // withheld by `isSyncableMessage` below, so this carries channel metadata only. Strip the LOCAL-only
       // `pinned`/`messageTtlMs` (a peer's retention/pin policy is its own business; import ignores them too).
@@ -173,9 +173,9 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   // of 90KB sealed blobs) is split and re-requested (see `syncWithPeer`), so the cap bounds memory without
   // ever wedging a round.
   const maxPeerJsonBytes = 8 * 1024 * 1024;
-  // The same ceiling measured on the wire for a SEALED response (review 2026-09-25 #2): `{"enc":"<base64url of
+  // The same ceiling measured on the wire for a SEALED response: `{"enc":"<base64url of
   // nonce ‖ ciphertext ‖ tag>"}` inflates the plaintext by 4/3 plus a few bytes, so capping the raw body at
-  // `maxPeerJsonBytes` silently shrank the real budget to ~6 MB on every encrypted peer.
+  // `maxPeerJsonBytes` would silently shrink the real budget to ~6 MB on every encrypted peer.
   const maxSealedPeerJsonBytes = Math.ceil((maxPeerJsonBytes * 4) / 3) + 64 * 1024;
 
   // Ids per `/api/sync/messages` request. Sealed blobs (≤ 90KB each) get their own, smaller batches so one
@@ -188,11 +188,11 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   const peerBatchSizes = new Map<string, { public: number; sealed: number }>();
   // Per-round fetch budgets. Bounded so a peer advertising a huge backlog can't make one round unbounded;
   // what doesn't fit is picked up next round. The sealed budget (`mesh.maxSealedPullPerRound`) is spent in a
-  // tag-INDEPENDENT order (soonest expiry first), so what we fetch never depends on which mail is ours (#4).
+  // tag-INDEPENDENT order (soonest expiry first), so what we fetch never depends on which mail is ours.
   const MAX_PUBLIC_IDS_PER_ROUND = 4_000;
   const DEFAULT_SEALED_IDS_PER_ROUND = 80;
-  // Bisection limits (review 2026-09-25 follow-up): a peer answering EVERY batch with junk used to cost
-  // 2n − 1 requests per n-id batch (~8 000 a round), each reading up to the 8 MiB cap. A round may spend at
+  // Bisection limits: unbounded, a peer answering EVERY batch with junk would cost 2n − 1 requests per
+  // n-id batch (~8 000 a round), each reading up to the 8 MiB cap. A round may spend at
   // most `2 × batches + SPLIT_SLACK` extra requests and `MAX_WASTED_BYTES_PER_ROUND` bytes on unusable
   // responses; past either, the peer is treated as failing for this round (`lastError`). One bad record in a
   // full batch costs ~2·log2(200) ≈ 16 extra requests, so honest peers stay far inside the request limit.
@@ -205,7 +205,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   const MAX_WASTED_BYTES_PER_ROUND = 4 * maxPeerJsonBytes;
   // Plaintext cap on one sealed `/api/sync/attachment` answer. The schema caps `data` at the base64 of a
   // 1 MiB file (1 398 104 chars), so 2 MiB holds every honest answer; without its own cap an attachment
-  // fetch read up to the 8 MiB message cap and sat outside the round's byte budget.
+  // fetch would read up to the 8 MiB message cap, outside the round's byte budget.
   const maxPeerAttachmentJsonBytes = 2 * 1024 * 1024;
   // Channel imports per round and in total. A digest may list any number of public channels and each new
   // one is a synchronous write plus a frame to every client, so a round takes at most this many NEW
@@ -219,7 +219,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   // never expire under retention.
   const MAX_PEER_CLOCK_SKEW_MS = 5 * 60_000;
 
-  // Per-peer memory of PUBLIC offers this node fetched and REFUSED (review 2026-09-25 #6), keyed by id +
+  // Per-peer memory of PUBLIC offers this node fetched and REFUSED, keyed by id +
   // version, so a refused NEW message (a reply to a deleted post, a post into an archived channel, an over-cap
   // body…) isn't re-downloaded every round forever — the digest keeps advertising it and "not held locally"
   // alone would always want it. Entries expire (a refusal can stop applying — a channel un-archived), the map
@@ -270,7 +270,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
 
   // Peers that completed a transport handshake this boot. A later plaintext fallback for one of them is a
   // downgrade (an attacker blocking `/api/bootstrap` or forging `off`), refused rather than silently taken
-  // (review 2026-09-25 #13). RAM-only; cleared by the kill switch.
+  // RAM-only; cleared by the kill switch.
   const peersSeenEncrypted = new Set<string>();
 
   // The transport key each UNPINNED peer answered its first handshake with this boot, and the peers that
@@ -388,7 +388,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
 
   /** The shared sync-token header for a PLAINTEXT pull — only ever sent when this node itself runs transport
    * `off` (Developer Mode), where the operator has deliberately put everything on the wire in the clear.
-   * Otherwise a plaintext pull goes WITHOUT the token (review 2026-09-25 #13): an unreadable/blocked
+   * Otherwise a plaintext pull goes WITHOUT the token: an unreadable/blocked
    * `/api/bootstrap` or a forged `off` advertisement must not be able to make this node read its
    * node-membership bearer secret onto the wire. (On an encrypted session the token rides INSIDE the sealed
    * envelope instead — see `sealedFetchPeerText`.) A token-guarded peer then 404s the tokenless pull, which
@@ -412,8 +412,8 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
     return session;
   }
 
-  /** Fall back to talking to `peerUrl` in the clear — unless that would be a downgrade this node refuses
-   * (review 2026-09-25 #13): never when this node REQUIRES transport encryption (its whole posture is "no
+  /** Fall back to talking to `peerUrl` in the clear — unless that would be a downgrade this node refuses:
+   * never when this node REQUIRES transport encryption (its whole posture is "no
    * plaintext"), and never for a peer that already negotiated encryption with us this boot (a sudden
    * plaintext verdict for it is what an attacker blocking `/api/bootstrap` or forging `off` looks like).
    * The throw lands in the peer's sync status as `lastError`. */
@@ -432,7 +432,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
    * sequence. Crucially it mutates the SPECIFIC object passed in — not one rediscovered via the mutable
    * cache map, which a concurrent config PATCH / kill switch could have cleared, leaving a re-handshake to
    * cache a fresh object while the in-flight request advanced a detached one → the sequence-split 409
-   * (docs/08 / Sol round-2 #3). */
+   * (docs/08). */
   async function rehandshakePeerInto(
     session: PeerTransportSession,
     peerUrl: string,
@@ -640,7 +640,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
     return response.text;
   }
 
-  /** Ids a peer may never name — as a user record OR a message author (review 2026-09-25 #3/#8): a `mesh.*`
+  /** Ids a peer may never name — as a user record OR a message author: a `mesh.*`
    *  id is a self-certifying mesh sender's display record (pre-naming one would let a peer choose what a
    *  real sender's mail later renders as), and the whole `llm.*` namespace is reserved for assistant bots —
    *  not just the configured bot id, since a later config change could point `botId` at a record a peer
@@ -661,7 +661,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   }
 
   /**
-   * Import the author record of a message this node has just ACCEPTED (review 2026-09-25 #3): only the
+   * Import the author record of a message this node has just ACCEPTED: only the
    * authors of accepted messages, never every user in a peer's payload — a peer could otherwise push tens of
    * thousands of arbitrary user records per batch. Authority and moderation state are stripped — a peer's
    * admin or moderator is a stranger here, and a peer must never be able to ban/shadow-ban someone on this
@@ -718,10 +718,10 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   }
 
   /**
-   * Fetch a peer's attachment bytes over the channel that peer actually supports (Sol round-2 #4):
+   * Fetch a peer's attachment bytes over the channel that peer actually supports:
    *  - an ENCRYPTED peer (`optional`/`required`) serves them sealed as base64 JSON from
    *    `/api/sync/attachment` — the tunnel-only binary `/api/attachments/:fileName` would 401 without a
-   *    session, which is why a plain-fetch copy silently dropped every attachment on a required peer;
+   *    session, so a plain fetch would drop every attachment on a required peer;
    *  - a PLAINTEXT (`off`-mode) peer uses the **legacy public binary GET** `/api/attachments/:fileName`,
    *    preserving back-compat with older / off-mode peers that predate the sync-attachment route (whose
    *    attachments would otherwise disappear permanently). An older *encrypted* peer without the new route
@@ -798,13 +798,13 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
         const bytes = await fetchPeerAttachmentBytes(peerUrl, attachment, meter);
 
         // The fetch awaited: a kill switch meanwhile wiped the store, so a work item recorded now would land
-        // a pre-wipe message id in the fresh post-wipe DB (review 2026-09-25 #9).
+        // a pre-wipe message id in the fresh post-wipe DB.
         if (rt.wipeGeneration !== generation) {
           return written;
         }
 
         if (!isAcceptableAttachmentBytes(bytes, attachment.mimeType)) {
-          // Fetched something, but it isn't usable — record it as missing too (docs/15 A6) rather
+          // Fetched something, but it isn't usable — record it as missing too rather
           // than silently dropping it: a peer mid-write or serving a truncated/corrupt copy today can
           // look fine on a later retry. The bytes were spent for nothing, like an unparsable batch.
           if (meter) {
@@ -829,11 +829,10 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
         // Best-effort at import time: the fetch genuinely failed (peer unreachable, attachment gone, or a
         // transient error). The message still imports — the text is the payload that matters off-grid —
         // but a plain digest pull never re-offers an already-known message id, so without a work item the
-        // image would stay absent forever (docs/15 A6). `retryMissingAttachments` is the independent pass
-        // that re-fetches just this file from this peer, without re-importing the message. The
-        // required-mode 401 that dropped EVERY attachment is the case this path originally fixed.
+        // image would stay absent forever. `retryMissingAttachments` is the independent pass
+        // that re-fetches just this file from this peer, without re-importing the message.
         // ...unless a kill switch landed while the fetch was in flight: then the store is the fresh post-wipe
-        // one and this pre-wipe work item must not reach it (review 2026-09-25 #9).
+        // one and this pre-wipe work item must not reach it.
         if (rt.wipeGeneration !== generation) {
           return written;
         }
@@ -844,51 +843,48 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   }
 
   /**
-   * Independent retry pass for attachments that failed to copy during a sync import (docs/15 A6).
+   * Independent retry pass for attachments that failed to copy during a sync import.
    * `importPeerAttachments` is best-effort and, on failure, leaves the message imported but
    * image-less; a later digest round sees the message id as already-known and never re-offers it, so
    * without this the image stays missing forever. This re-fetches just the missing file(s) from the
    * peer that had them (reusing `fetchPeerAttachmentBytes`, the same peer-fetch path the initial
    * import used) — it never re-imports or otherwise touches the message. Runs on the reaper timer, but
-   * (F1) only actually contacts a peer once per record's backoff interval, and (F2) never contacts a
-   * peer sync is currently off, or one the operator has since removed from `sync.peers` — dropping
-   * that record instead. Gives up (drops the work item) past `missingAttachmentMaxAgeMs` so a
-   * permanently-gone file can't grow the work-item table forever. (SF3) Single-flight: a tick that
-   * lands while a pass is still in flight no-ops rather than starting a second concurrent pass, and no
-   * new pass starts while a kill-switch wipe is in progress.
+   * only actually contacts a peer once per record's backoff interval, and never contacts a peer while
+   * sync is off (it doesn't touch the table at all then), nor one the operator has since removed from
+   * `sync.peers` — dropping that record instead. Gives up (drops the work item) past
+   * `missingAttachmentMaxAgeMs` so a permanently-gone file can't grow the work-item table forever.
+   * Single-flight: a tick that lands while a pass is still in flight no-ops rather than starting a second
+   * concurrent pass, and no new pass starts while a kill-switch wipe is in progress.
    *
-   * (P2-2, docs/15 A6/F1, Sol round 3) The per-pass cap (`missingAttachmentMaxRecordsPerPass`) is
-   * applied by `store.loadDueMissingAttachments` at the SQL level — `WHERE next_attempt_at <= now
+   * The per-pass cap (`missingAttachmentMaxRecordsPerPass`) is applied by
+   * `store.loadDueMissingAttachments` at the SQL level — `WHERE next_attempt_at <= now
    * ORDER BY next_attempt_at ASC LIMIT`, so it selects from the records actually ELIGIBLE for a retry
-   * right now, fairly ordered by how overdue they are. The old code loaded EVERY record in creation
-   * (rowid) order and sliced the first `missingAttachmentMaxRecordsPerPass` BEFORE checking each one's
-   * own backoff — so if the oldest 25 records all happened to still be in backoff (e.g. a peer flapped
-   * and bumped them all around the same time), records 26+ were never even looked at, no matter how
-   * overdue they were: permanent starvation for anything added after the first
-   * `missingAttachmentMaxRecordsPerPass` records went into backoff together.
+   * right now, fairly ordered by how overdue they are. Capping before the backoff check instead (the
+   * first N records in creation order) would starve every later record whenever those N were all in
+   * backoff together, e.g. after a peer flapped and bumped them at once.
    */
   async function retryMissingAttachments(): Promise<void> {
-    // SF3: single-flight guard — an overlapping reaper tick (or a manual /api/admin/sync/run-triggered
+    // Single-flight guard — an overlapping reaper tick (or a manual /api/admin/sync/run-triggered
     // call landing mid-pass) must no-op, not stack a second concurrent pass of peer fetches.
     if (retryMissingAttachmentsRunning) {
       return;
     }
 
-    // SF3: never START a new pass while a kill-switch wipe is in flight — `wipeGeneration` alone only
+    // Never START a new pass while a kill-switch wipe is in flight — `wipeGeneration` alone only
     // catches a pass that was ALREADY RUNNING when the wipe began (see the comment on `wipeInProgress`).
     if (rt.wipeInProgress) {
       return;
     }
 
-    // F2a: no live sync means no peer to fetch from at all — don't touch the table (and don't wake a
+    // No live sync means no peer to fetch from at all — don't touch the table (and don't wake a
     // node that has sync switched off just to no-op every record in it).
     if (!rt.appConfig.sync.enabled) {
       return;
     }
 
     const now = Date.now();
-    // P2-2: only the DUE records, fairly ordered and already capped at the DB level — see the doc
-    // comment above for why this replaced a full-table load + slice.
+    // Only the DUE records, fairly ordered and already capped at the DB level — see the doc
+    // comment above for why the cap is applied after the due filter.
     const records = rt.store.loadDueMissingAttachments(now, missingAttachmentMaxRecordsPerPass);
 
     if (!records.length) {
@@ -908,7 +904,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
           return;
         }
 
-        // F2b: the peer was removed from sync.peers since this work item was recorded — never contact a
+        // The peer was removed from sync.peers since this work item was recorded — never contact a
         // peer the operator explicitly dropped. (The PATCH /api/admin/config handler also prunes these
         // eagerly on removal; this is the belt-and-suspenders check for the config.json / boot-time path.)
         if (!activePeerUrls.has(record.peerUrl)) {
@@ -943,7 +939,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
         }
 
         // The SQL WHERE clause already guaranteed this record is due (next_attempt_at <= now) — no
-        // per-record backoff check needed here any more (P2-2).
+        // per-record backoff check is needed here.
 
         try {
           const bytes = await fetchPeerAttachmentBytes(record.peerUrl, { id: record.attachmentId, mimeType: record.mimeType });
@@ -952,7 +948,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
             return;
           }
 
-          // The fetch awaited: a moderator removal or delete meanwhile must win (review 2026-09-25 #3).
+          // The fetch awaited: a moderator removal or delete meanwhile must win.
           if (!messageReferencesAttachment(record.messageId, record.attachmentId)) {
             rt.store.clearMissingAttachment(record.messageId, record.attachmentId);
             continue;
@@ -982,7 +978,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
 
           rt.store.clearMissingAttachment(record.messageId, record.attachmentId);
         } catch {
-          // F6: match the wipeGeneration re-check every other write site in this function has — a kill
+          // Match the wipeGeneration re-check every other write site in this function has — a kill
           // switch that lands while `fetchPeerAttachmentBytes` was in flight must not re-persist a bumped
           // attempt count onto the store it just wiped.
           if (rt.wipeGeneration !== generation) {
@@ -1135,7 +1131,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   /**
    * Every check a public-arm peer message (post / reply / reaction) must pass to land here, against the node's
    * CURRENT state. Synchronous on purpose: `importPeerMessages` runs it before the attachment work and again
-   * right before committing, after every await (review 2026-09-25 #3) — a moderator removal, a delete, an
+   * right before committing, after every await — a moderator removal, a delete, an
    * archive, a policy change or a parent removal that lands while attachments are in flight must win, and a
    * moderator removal is an in-place edit that a reference-equality check alone can't see.
    *
@@ -1189,13 +1185,13 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
     }
 
     // A public message may not claim a reserved author (a `mesh.*` sender record or an `llm.*` bot) or a
-    // non-human one — it would render as that identity here (review 2026-09-25 #8).
+    // non-human one — it would render as that identity here.
     if (!isAcceptablePeerAuthor(message.authorId, usersById)) {
       return "refuse";
     }
 
     // Node-wide feature flags govern what content may EXIST on this node, not just what local users may
-    // create (review 2026-09-04): a node that has switched channel posting, replies, or reactions off
+    // create: a node that has switched channel posting, replies, or reactions off
     // must not acquire that content from a peer either — `createMessage` refuses the same three.
     if (
       ((message.type === "channelPost" || message.type === "channelReply") && !rt.appConfig.features.enablePublicChannels) ||
@@ -1241,7 +1237,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
       }
 
       // ...and its channel must still accept new content here — `createMessage` refuses a reaction in an
-      // archived channel, so an import must too (round-2 review): a peer that hasn't archived the channel
+      // archived channel, so an import must too: a peer that hasn't archived the channel
       // must not keep landing reactions into one this node has.
       if (target.type === "channelPost" || target.type === "channelReply") {
         const targetChannel = rt.ensureChannel(target.channelId);
@@ -1268,11 +1264,11 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
 
     // The channel's posting policy (owner-only / admins-only / replies off) applies to imports too —
     // otherwise a peer could land posts in a read-only announcements channel under any ordinary author
-    // id, bypassing the lockdown (review 2026-09-04) — including a PEER-ORIGIN channel, whose policy
+    // id, bypassing the lockdown — including a PEER-ORIGIN channel, whose policy
     // the peer's metadata merge or a local admin may have tightened since. The one rule that can't be
     // evaluated for a peer-origin channel is `owner`: imports strip `ownerUserId` (a peer must never
     // name a local authority), so for those the origin's owner check is trusted and only the
-    // evaluable rules (archived, replies off) apply here (round-2 review).
+    // evaluable rules (archived, replies off) apply here.
     const isReply = message.type === "channelReply";
     const ownerRuleUnavailable = rt.syncedChannelIds.has(channel.id) && channel.allowPosting === "owner";
     if (ownerRuleUnavailable) {
@@ -1321,7 +1317,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
   }
 
   /**
-   * Undo what a DISCARDED import left behind (review 2026-09-25 #3): delete each attachment file it wrote that
+   * Undo what a DISCARDED import left behind: delete each attachment file it wrote that
    * no live message (and no pending upload) references, and drop the retry work it queued for attachments the
    * record now holding its id doesn't reference — so refused content, a moderator-removed attachment above
    * all, is neither kept on disk nor fetched back later by `retryMissingAttachments`.
@@ -1536,7 +1532,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
           }
 
           // Never seen it: import it and RECORD it as synced-origin (so its later metadata edits can
-          // re-sync — C1). Skip a fresh channel that arrives already-archived: no messages sync for an
+          // re-sync). Skip a fresh channel that arrives already-archived: no messages sync for an
           // archived channel, so we'd only materialise an empty dead channel.
           if (channel.archived) {
             continue;
@@ -1578,7 +1574,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
           continue;
         }
 
-        // C1 provenance gate: only re-sync metadata for a channel THIS node imported from a peer. A
+        // Provenance gate: only re-sync metadata for a channel THIS node imported from a peer. A
         // locally-created channel — including the fixed-id default `general`/`announcements` every node
         // ships — is never in `syncedChannelIds`, so a same-slug collision on a peer can never clobber it.
         // (A private local channel colliding with a peer's public id is also excluded — never public here.)
@@ -1628,7 +1624,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
         if (publicWanted.length >= MAX_PUBLIC_IDS_PER_ROUND) {
           break;
         }
-        // Skipped exactly like on the sealed list (review 2026-09-25 #2): an id in the seen-offer record, and
+        // Skipped exactly like on the sealed list: an id in the seen-offer record, and
         // any id in the replay-key namespace. A sealed offer this node delivered is tombstoned while one it
         // dropped is only in the seen record, so a peer re-listing sealed ids (or their `sealed.<hash>` replay
         // keys, which anyone holding the blob can compute) among PUBLIC messages would otherwise get back a
@@ -1655,23 +1651,23 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
       }
 
       // Sealed mailbox mail on offer. Which blobs we pull must NOT depend on which of them are addressed to
-      // a local identity (review 2026-09-25 #4): pulling only "ours" whenever this node isn't relaying (relay
-      // off — the default — or at `maxCarried`, or a hop-1 blob) told the serving peer exactly which node the
-      // recipient of a tag lives on, while docs/16 promises carriers learn the path, never the endpoints. So
-      // pull every offer acceptance could take at all (`sealedOfferAdmissible` — the same outer-field checks
-      // `acceptSealedFromPeer` applies, #1), soonest-expiring first, within a per-round budget; the import
+      // a local identity: pulling only "ours" whenever this node isn't relaying (relay off — the default —
+      // or at `maxCarried`, or a hop-1 blob) would tell the serving peer exactly which node the recipient of
+      // a tag lives on, while docs/16 promises carriers learn the path, never the endpoints. So pull every
+      // offer acceptance could take at all (`sealedOfferAdmissible` — the same outer-field checks
+      // `acceptSealedFromPeer` applies), soonest-expiring first, within a per-round budget; the import
       // delivers what's ours, carries what it can, and drops the rest. The cost is that a non-relaying node
       // downloads each blob its peer carries once, like a relay would.
       //
-      // "Once" must hold for every outcome alike (review 2026-09-25 follow-up). Every sealed id this node has
+      // "Once" must hold for every outcome alike. Every sealed id this node has
       // fetched or received is in the durable, node-wide seen-offer record and is never fetched again, on
       // either digest list — delivered, carried or dropped. The record is keyed by id alone and outlives
       // every tombstone the offer can leave (`mesh.rememberSealedOffer`), so neither a re-advertised TTL nor
-      // time passing can make a dropped id fetchable while a delivered one is still tombstoned (#2). (Delivered
-      // ids used to be skipped for good via their tombstone while dropped ones sat in a RAM cache that a
-      // restart, any admin config save or a relay toggle cleared; the next round then re-fetched exactly the
-      // foreign blobs, and a peer diffing the two fetch sets learned which blobs were delivered here.) A node
-      // that later starts relaying therefore doesn't go back for blobs it dropped earlier; other carriers can.
+      // time passing can make a dropped id fetchable while a delivered one is still tombstoned. (If dropped
+      // ids were forgotten sooner than delivered ones — say on a restart, an admin config save or a relay
+      // toggle — the next round would re-fetch exactly the foreign blobs, and a peer diffing the two fetch
+      // sets would learn which blobs were delivered here.) A node that later starts relaying therefore
+      // doesn't go back for blobs it dropped earlier; other carriers can.
       //
       // Skipped entirely when there is nothing to do with a blob: relaying is off and no local user holds a
       // mesh identity (nothing to deliver, nothing to carry). That decision doesn't look at tags either.
@@ -1746,7 +1742,7 @@ export function createSyncEngine(rt: Runtime, mesh: MeshLayer, link?: SyncLinkHo
       /** Fetch + import one batch (a sealed batch is only fetched here: it goes to `sealedFetched`, imported
        *  after the round's last request). A batch whose CONTENT is unusable (over the size cap, not JSON, fails the
        *  schema) is split in half and retried, down to single ids, so one oversized or malformed message
-       *  can't sink the rest (#2) — and a single unusable id is ALWAYS remembered as refused, before any budget
+       *  can't sink the rest — and a single unusable id is ALWAYS remembered as refused, before any budget
        *  is consulted (see the note on MAX_WASTED_BYTES_PER_ROUND). A too-large answer also shrinks this peer's
        *  later batches of that kind. Splitting stops, and the peer counts as failing for the round, once the
        *  round's split or wasted-byte budget is spent; the byte budget also ends the round after a batch whose

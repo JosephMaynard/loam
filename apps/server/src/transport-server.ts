@@ -1,6 +1,6 @@
 // The transport-encryption session layer (docs/08, docs/20): the host identity, live sessions + replay
 // windows, the internal tunnel token, the global request hooks, and the handshake/resume/logout/tunnel
-// routes. Extracted verbatim from app.ts (2026-09-04 split) over the shared AppContext.
+// routes, registered over the shared AppContext.
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
 
@@ -9,7 +9,7 @@ import { TransportHandshakeRequestSchema } from "@loam/schema";
 import type { AppContext } from "./app-context.js";
 import { IdentityLimitError, errorBody } from "./errors.js";
 import { hashIdentityToken, makeIdentityToken } from "./identity.js";
-import { registerRateLimit } from "./rate-limit.js";
+import { rateLimitKey, registerRateLimit } from "./rate-limit.js";
 import { type FastifyRequest, LogController } from "fastify";
 
 // Live transport sessions: sessionId → derived key + expiry + anti-replay window. In-memory only;
@@ -28,11 +28,16 @@ export interface TransportSession {
   // `/api/session/resume` promotes it to `bound` and records the user it authenticates + the hash of
   // the identity token that bound it. A `bound` session is what makes the secure rules apply (content
   // only via the tunnel, no cookie, WS key-confirmation) — independent of the node's global mode.
-  // `resumeResult` caches the sealed resume payload so a fresh-sequence retry is idempotent.
+  // `resumeResult` caches the sealed resume payload so a fresh-sequence retry is idempotent; the resume
+  // handler is the only place that binds a session and sets it in the same synchronous step, so it is
+  // present exactly when `authMode` is "bound".
   authMode: "anonymous" | "bound";
   userId?: string;
   identityTokenHash?: string;
   resumeResult?: { s?: number; m: string; p: string; currentUser: unknown; token: string };
+  /** The handshake's source, keyed like the HTTP limiter (`rateLimitKey`): groups anonymous sessions for
+   *  eviction at the session cap. */
+  sourceKey?: string;
 }
 
 // Every live app's per-boot internal tunnel token (normally one per process; tests build many). The request
@@ -48,7 +53,7 @@ function isInternalDispatchForLogging(request: { headers?: Record<string, unknow
 }
 
 /**
- * The server's request-log controller: never log a tunnel re-dispatch (review 2026-09-25 #10). Its URL is the
+ * The server's request-log controller: never log a tunnel re-dispatch. Its URL is the
  * real path + query the tunnel exists to hide (`/api/search?q=…`), and server logs outlive an Emergency
  * Reset. The OUTER `POST /api/transport/tunnel` is still logged, which is all the wire shows too.
  */
@@ -186,7 +191,7 @@ export function originMatchesHost(
 
 /**
  * Scrub request URLs from a free-text log message. A few of Fastify's own lines interpolate the raw URL into
- * the message, bypassing both the `req` serializer and the LogController (review 2026-09-25 follow-up): the
+ * the message, bypassing both the `req` serializer and the LogController: the
  * double-send warnings name it — for a request re-dispatched inside the tunnel, that's the hidden inner path
  * — so their URL is dropped outright; any other URL-shaped token keeps its path but loses its query string.
  */
@@ -320,7 +325,7 @@ export function createTransportServer(ctx: AppContext) {
    */
   function acceptTransportSeq(session: TransportSession, seq: number): boolean {
     // isSafeInteger, not isInteger: a value past 2^53 loses precision, so a key-holding client could
-    // otherwise submit an enormous sequence and poison its own replay window (docs/20 review #8). The
+    // otherwise submit an enormous sequence and poison its own replay window. The
     // client re-handshakes long before its counter approaches this, resetting the window.
     if (!Number.isSafeInteger(seq) || seq < 1) {
       return false;
@@ -361,7 +366,7 @@ export function createTransportServer(ctx: AppContext) {
     }
     const candidate = value as Partial<TransportIdentity>;
     // Both fields must be well-formed base64url AND form a consistent keypair — the public key is
-    // exactly the one derived from the secret (docs/20 #7). A truncated/mismatched persisted record that
+    // exactly the one derived from the secret. A truncated/mismatched persisted record that
     // merely passes the charset check would otherwise slip through and only surface later inside the
     // crypto at handshake time; caught here it's regenerated. `verifyTransportKeypair` also enforces the
     // 32-byte secret length and re-derives the (32-byte) public, so no separate length check is needed.
@@ -443,11 +448,11 @@ export function createTransportServer(ctx: AppContext) {
    * ONLY through the internal tunnel dispatch (docs/20) — so a direct hit is refused (401) and a
    * captured session id / cookie is inert. Matched on the RESOLVED route pattern (`routeOptions.url`),
    * NOT the raw request URL — Fastify percent-decodes the path before routing, so string-matching the
-   * raw URL let `/%61pi/users` (→ `/api/users`) slip past enforcement. The only DIRECTLY reachable
+   * raw URL would let `/%61pi/users` (→ `/api/users`) slip past enforcement. The only DIRECTLY reachable
    * `/api/` routes in required mode are the public bootstrap, health, the handshake, the sealed resume,
    * the sealed logout, the DIRECT cookie-clear (`/api/session/end` — unauthenticated + side-effect-only,
    * it mints nothing and only clears the caller's own presented cookie, so a device wipe can revoke a
-   * legacy cookie that a bound session's `credentials:"omit"` requests never send, docs/20 #3), and the
+   * legacy cookie that a bound session's `credentials:"omit"` requests never send, docs/20), and the
    * tunnel endpoint itself; everything else — including `/api/config`, which now returns `currentUser`
    * only for a bound session over the tunnel — is content. (Internal tunnel dispatches never reach this —
    * they return at the top of `onRequest`; the static shell + `/ws` are handled separately.) */
@@ -501,9 +506,9 @@ export function createTransportServer(ctx: AppContext) {
   const MESH_LOOPBACK_BRIDGE_ROUTES = new Set(["/api/mesh/outbound", "/api/mesh/inbound", "/api/host/clients", "/api/host/invite", "/api/host/link-code"]);
 
   /**
-   * Per-route semantic rate-limit config that ALSO counts internal tunnel re-dispatches (Sol P2-6).
+   * Per-route semantic rate-limit config that ALSO counts internal tunnel re-dispatches.
    * Route configs inherit the global registration's `allowList`, which exempts tunnel dispatches —
-   * correct for the blanket limiter (see above), but on the expensive routes it silently lifted the
+   * correct for the blanket limiter (see above), but on the expensive routes it would silently lift the
    * tighter caps for any client using the encrypted tunnel (e.g. ~200 MB/min of upload attempts
    * inside the 300/min tunnel budget). Overriding the allowList here counts every arrival path; the
    * tunnel forwards the real caller's address (`remoteAddress: request.ip`), so the per-IP key is
@@ -538,10 +543,10 @@ export function createTransportServer(ctx: AppContext) {
    * Who may drive the mesh transport bridge: ONLY a loopback caller presenting the launcher's per-boot
    * `hostToken`. The Android launcher's courier (`nodejs-project-template/main.js`) is the bridge's one real
    * caller and always sends it as `x-loam-host-token`. Loopback alone is never enough: on Android every
-   * installed app (and `adb forward`) reaches 127.0.0.1 (review 2026-09-04), and on a desktop/Pi a
-   * same-host reverse proxy or the Vite dev proxy makes EVERY LAN client arrive from loopback (review
-   * 2026-09-25 #12). So a host with no `hostToken` (desktop/Pi — there is no radio courier there) has no
-   * bridge at all: the routes 404 exactly as if mesh were off.
+   * installed app (and `adb forward`) reaches 127.0.0.1, and on a desktop/Pi a same-host reverse proxy
+   * or the Vite dev proxy makes EVERY LAN client arrive from loopback. So a host with no `hostToken` (the
+   * plain `server.ts` entry) has no bridge at all: the routes 404 exactly as if mesh were off. `loamnet`
+   * mints a token but never hands it out, and neither desktop entry has a radio courier.
    */
   function meshBridgeCallerAuthorized(request: FastifyRequest): boolean {
     return requestFromLoopback(request) && !!ctx.options.hostToken && ctx.presentsHostToken(request);
@@ -607,6 +612,29 @@ export function createTransportServer(ctx: AppContext) {
 
 /** Add the global transport hooks (decrypt/encrypt/enforce, security headers) and the global rate limiter. */
 export async function registerTransportHooks(ctx: AppContext): Promise<void> {
+  // Direct sealed requests whose authenticated envelope asked for a sequence-bound response (`r: 1`, docs/08
+  // "Response binding"): onSend seals their response under `${METHOD} ${url}#${s}` rather than the bare
+  // route aad, so a captured response can't be replayed as the answer to a later request on the same route.
+  // WeakSet → GC'd with the request.
+  const responseBoundRequests = new WeakSet<FastifyRequest>();
+
+  /**
+   * Run a sealed `{ s, r? }` envelope through the session's replay window and record it on the request:
+   * its sequence for the handlers and response binding, and whether it asked for a bound response.
+   * False when the sequence is missing, replayed or out of the window.
+   */
+  function acceptEnvelopeSequence(request: FastifyRequest, envelope: { s?: unknown; r?: unknown }): boolean {
+    const activeSession = ctx.transportRequestSessions.get(request);
+    if (!activeSession || typeof envelope.s !== "number" || !ctx.acceptTransportSeq(activeSession, envelope.s)) {
+      return false;
+    }
+    ctx.transportRequestSeq.set(request, envelope.s);
+    if (envelope.r === 1) {
+      responseBoundRequests.add(request);
+    }
+    return true;
+  }
+
   // Security headers on every response. A strict CSP is defense-in-depth behind the already-hardened
   // markdown sanitizer: the client is fully self-contained (its own JS/CSS, images from this origin,
   // ws:// to this host), so it needs no external origins. `nosniff` stops content-type confusion on
@@ -620,9 +648,9 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
   // session — content goes through the path-hiding tunnel (`/api/transport/tunnel`), images included,
   // so only "a tunnel request happened" + ciphertext size/timing remain. All inert when the mode is `off`.
   ctx.server.addHook("onRequest", async (request, reply) => {
-    // RF1: once a persistent/passphrase kill switch has handed off to the launcher for a restart, this
-    // process must not serve anything from its (deliberately) stale in-memory mirrors while it waits to
-    // be torn down. Checked before EVERYTHING else, including the internal tunnel bypass — the only
+    // The kill switch's 503 gate: while a wipe is in flight, after it has handed off to the launcher for
+    // a restart, or after it failed closed, this process must not serve anything from its in-memory
+    // mirrors or surviving sessions. Checked before EVERYTHING else, including the internal tunnel bypass — the only
     // route that stays reachable is the liveness probe, so the Android launcher's readiness poll still
     // works. See `executeKillSwitchBody`.
     if (ctx.awaitingWipeRestart && request.routeOptions?.url !== "/api/health") {
@@ -709,21 +737,19 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
       // monotonic sequence for replay protection, `b` the actual request body (omitted for a bodyless
       // mutation). `s` lives INSIDE the AEAD, so it's authenticated — an attacker can't renumber a
       // replay to dodge the window without breaking the tag.
-      let envelope: { s?: unknown; b?: unknown; tok?: unknown };
+      let envelope: { s?: unknown; r?: unknown; b?: unknown; tok?: unknown };
       try {
-        envelope = JSON.parse(opened) as { s?: unknown; b?: unknown; tok?: unknown };
+        envelope = JSON.parse(opened) as { s?: unknown; r?: unknown; b?: unknown; tok?: unknown };
       } catch {
         return reply.code(400).send(errorBody("Malformed encrypted request"));
       }
-      const activeSession = ctx.transportRequestSessions.get(request);
-      if (!activeSession || typeof envelope.s !== "number" || !ctx.acceptTransportSeq(activeSession, envelope.s)) {
+      if (!acceptEnvelopeSequence(request, envelope)) {
         // Replayed, reordered beyond the window, or a missing/garbage sequence — refuse before the
         // handler runs. 409 (not 401) so a legitimate client doesn't mistake it for an expired session
         // and silently re-handshake+retry: a real client never reuses a sequence, so this fires only on
         // a captured-and-replayed request (docs/08).
         return reply.code(409).send(errorBody("Replayed or out-of-order encrypted request"));
       }
-      ctx.transportRequestSeq.set(request, envelope.s);
       // A sealed node-to-node sync request carries the `sync.token` INSIDE the envelope (docs/08) — stash it
       // (authenticated by the AEAD) for `syncPeerAuthorized`, which prefers it over any wire header.
       if (typeof envelope.tok === "string") {
@@ -732,7 +758,27 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
       request.body = envelope.b;
       return;
     }
-    // A GET/HEAD may legitimately carry no body at all (response-only sealing) — nothing to enforce.
+    // A GET/HEAD carries no body, so its `{ s, r }` envelope (if any) rides the `x-loam-seq` header, sealed
+    // under the same request aad: that gives it a sequence to bind its response to. Without the header (an
+    // older client) it is answered under the bare route aad as before; nothing to enforce.
+    const sealedSeq = request.headers["x-loam-seq"];
+    if ((request.method === "GET" || request.method === "HEAD") && typeof sealedSeq === "string") {
+      const openedSeq = openTransport(key, sealedSeq, `${request.method} ${request.url}`);
+      let envelope: { s?: unknown; r?: unknown } | undefined;
+      try {
+        envelope = openedSeq === null ? undefined : (JSON.parse(openedSeq) as { s?: unknown; r?: unknown });
+      } catch {
+        envelope = undefined;
+      }
+      if (!envelope || typeof envelope !== "object") {
+        return reply.code(400).send(errorBody("Malformed encrypted request"));
+      }
+      if (!acceptEnvelopeSequence(request, envelope)) {
+        return reply.code(409).send(errorBody("Replayed or out-of-order encrypted request"));
+      }
+      return;
+    }
+    // A GET/HEAD may otherwise carry no body at all (response-only sealing) — nothing to enforce.
     // But a mutation (POST/PATCH/DELETE/PUT) presented under a resolved transport session MUST arrive
     // as a sealed envelope: without this, a request that carries a live/known session id (visible on
     // the wire in the `x-loam-enc` header) alongside a plain, attacker-supplied JSON body would just
@@ -747,27 +793,57 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
 
   ctx.server.addHook("onSend", async (request, reply, payload) => {
     const key = ctx.transportRequestKeys.get(request);
-    // Only seal string payloads (JSON) — binary bodies (images, static files) pass through, and can't
-    // be app-decrypted by a browser <img> anyway (a documented Layer-1 limitation).
-    if (!key || typeof payload !== "string") {
+    if (!key) {
       return payload;
     }
-    // Bind a node-to-node sync RESPONSE to the request's authenticated sequence (docs/08 / Sol round-2 #1):
-    // sealing under `${method} ${url}#${seq}` means a captured response can't be replayed or cross-fed to a
-    // different request on the same route (the puller opens with the exact seq it sent). Scoped to the
-    // direct-sealed sync routes — the browser's own direct/tunnel paths are unchanged. (`transportRequestSeq`
-    // is always set for a sync request, since every sealed sync request now carries a `{ s }` envelope.)
-    const seq = ctx.transportRequestSeq.get(request);
-    const routeUrl = request.routeOptions?.url;
-    const responseAad =
-      seq !== undefined && routeUrl !== undefined && ctx.DIRECT_SEALED_SYNC_ROUTES.has(routeUrl)
-        ? `${request.method} ${request.url}#${seq}`
-        : `${request.method} ${request.url}`;
-    const sealed = sealTransport(key, payload, responseAad);
+    // A bodyless answer (a 204) to a client that asked for a bound response is sealed as an empty 200: that
+    // client refuses any unsealed reply but the few pre-session refusals, so a bare 204 would read as a
+    // forgery. Older clients still get the 204.
+    if (payload === undefined && responseBoundRequests.has(request) && reply.statusCode === 204) {
+      reply.code(200);
+      payload = "";
+    }
+    // Only seal string payloads (JSON) — binary bodies (images, static files) pass through, and can't
+    // be app-decrypted by a browser <img> anyway (a documented Layer-1 limitation).
+    if (typeof payload !== "string") {
+      return payload;
+    }
     reply.header("content-type", "application/json; charset=utf-8");
     reply.header("x-loam-enc", "1");
-    return JSON.stringify({ enc: sealed });
+    return JSON.stringify(sealResponse(request, key, payload, reply.statusCode));
   });
+
+  /**
+   * Seal a direct response (docs/08, "Response binding"). The aad says which request it answers, so a
+   * captured response can't be replayed or cross-fed to another request on the same route, and (for a
+   * client that asked) which status it carries, so the outer status, which is outside the AEAD, can't be
+   * relabelled:
+   *
+   * - a request whose envelope asked (`r: 1`, the browser client in `optional` mode): `METHOD url#seq#status`;
+   * - a direct-sealed sync request (every one carries a `{ s }` envelope; peers since 0.6.0 open this):
+   *   `METHOD url#seq`;
+   * - any other request with an authenticated sequence (an older client, the tunnel, whose descriptor
+   *   carries its own binding, resume/logout with their own `{ s, m, p }`): the bare `METHOD url`;
+   * - a request with no authenticated sequence (refused before it was read: a 429, a 400 or 409 for a bad
+   *   envelope; or a bare GET from an older client): sealed twice, `enc` under the bare aad for older
+   *   clients and `encStatus` under `METHOD url!status` for current ones, which never open `enc`. Whether
+   *   the client asked isn't known yet at that point, so both go out.
+   */
+  function sealResponse(request: FastifyRequest, key: string, payload: string, status: number): { enc: string; encStatus?: string } {
+    const aad = `${request.method} ${request.url}`;
+    const seq = ctx.transportRequestSeq.get(request);
+    if (seq === undefined) {
+      return { enc: sealTransport(key, payload, aad), encStatus: sealTransport(key, payload, `${aad}!${status}`) };
+    }
+    if (responseBoundRequests.has(request)) {
+      return { enc: sealTransport(key, payload, `${aad}#${seq}#${status}`) };
+    }
+    const routeUrl = request.routeOptions?.url;
+    if (routeUrl !== undefined && ctx.DIRECT_SEALED_SYNC_ROUTES.has(routeUrl)) {
+      return { enc: sealTransport(key, payload, `${aad}#${seq}`) };
+    }
+    return { enc: sealTransport(key, payload, aad) };
+  }
 
   ctx.server.addHook("onSend", async (request, reply) => {
     reply.header("x-content-type-options", "nosniff");
@@ -807,6 +883,96 @@ export async function registerTransportHooks(ctx: AppContext): Promise<void> {
 
 /** Register the handshake, sealed resume, logout, and path-hiding tunnel routes. */
 export function registerTransportRoutes(ctx: AppContext): void {
+  /**
+   * Eviction policy for the transport session map, which is bounded (`TRANSPORT_SESSION_CAP`) because the
+   * handshake is unauthenticated:
+   *
+   * - One identity token binds at most `MAX_SESSIONS_PER_IDENTITY_TOKEN` sessions. Resuming with an existing
+   *   token costs no identity budget, so without this one attacker token could bind every slot. A further
+   *   bind first drops that token's oldest session with no live socket (a tab reloaded or closed since); when
+   *   every one of them is in use it is REFUSED, never made room for by closing a live one: the tabs of one
+   *   browser share a token, and evicting a live tab would make it reconnect and evict the next, forever.
+   * - At the cap, a new handshake evicts the oldest session of the GROUP holding the most sessions: a
+   *   bound session's group is its identity token, an anonymous one's is its source address (keyed like
+   *   the HTTP limiter, so cycling addresses inside an IPv6 /64 doesn't split a flood). A flood from one
+   *   source or one token therefore pays for itself before a person holding one or two sessions is touched,
+   *   and anonymous sessions include every unpinned cookie client, so they get no blanket priority either.
+   *   On a tie the anonymous group goes first, then the group whose oldest session is oldest. Within the
+   *   group, the oldest session with no live socket goes before the oldest overall.
+   */
+  const MAX_SESSIONS_PER_IDENTITY_TOKEN = 16;
+
+  /** Whether a transport session carries an admitted WebSocket (an open tab, not a leftover). */
+  function hasLiveSocket(sid: string): boolean {
+    for (const socketSession of ctx.sockets) {
+      if (socketSession.transportSessionId === sid) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** The eviction group of a session (see the policy above). */
+  function evictionGroup(session: TransportSession): string {
+    return session.authMode === "bound" && session.identityTokenHash !== undefined
+      ? `token:${session.identityTokenHash}`
+      : `source:${session.sourceKey ?? ""}`;
+  }
+
+  /** The session to evict at the cap (see the policy above), or undefined when the map is empty. */
+  function transportSessionToEvict(): string | undefined {
+    const groups = new Map<string, { count: number; oldest: string; oldestIdle?: string; anonymous: boolean }>();
+    const live = new Set<string>();
+    for (const socketSession of ctx.sockets) {
+      if (socketSession.transportSessionId !== undefined) {
+        live.add(socketSession.transportSessionId);
+      }
+    }
+    for (const [id, session] of ctx.transportSessions) {
+      const key = evictionGroup(session);
+      const idle = !live.has(id);
+      const group = groups.get(key);
+      if (group) {
+        group.count += 1;
+        if (idle && group.oldestIdle === undefined) {
+          group.oldestIdle = id;
+        }
+      } else {
+        groups.set(key, { count: 1, oldest: id, oldestIdle: idle ? id : undefined, anonymous: session.authMode !== "bound" });
+      }
+    }
+    // Groups iterate in order of their oldest session (insertion order), so a strict comparison keeps the
+    // oldest among equals.
+    let pick: { count: number; oldest: string; oldestIdle?: string; anonymous: boolean } | undefined;
+    for (const group of groups.values()) {
+      if (!pick || group.count > pick.count || (group.count === pick.count && group.anonymous && !pick.anonymous)) {
+        pick = group;
+      }
+    }
+    return pick ? (pick.oldestIdle ?? pick.oldest) : undefined;
+  }
+
+  /**
+   * Make room for one more session bound by `tokenHash` (see the policy above): drop that token's oldest
+   * sessions with no live socket until it is under the cap. Returns false, having closed nothing live, when
+   * every remaining one is in use.
+   */
+  function makeRoomForIdentityToken(tokenHash: string, binding: TransportSession): boolean {
+    const mine = [...ctx.transportSessions].filter(([, session]) => session !== binding && session.identityTokenHash === tokenHash);
+    let count = mine.length;
+    for (const [id] of mine) {
+      if (count < MAX_SESSIONS_PER_IDENTITY_TOKEN) {
+        break;
+      }
+      if (!hasLiveSocket(id)) {
+        ctx.transportSessions.delete(id);
+        ctx.closeSocketsForTransportSession(id); // a socket still awaiting key confirmation
+        count -= 1;
+      }
+    }
+    return count < MAX_SESSIONS_PER_IDENTITY_TOKEN;
+  }
+
   // Transport handshake (docs/08): client sends its ephemeral X25519 public key; the host derives a
   // session key against its static transport key + a fresh ephemeral and returns its ephemeral public
   // + a session id (used in `x-loam-enc` on subsequent encrypted requests). Unauthenticated (it's
@@ -836,10 +1002,10 @@ export function registerTransportRoutes(ctx: AppContext): void {
       }
 
       // Prune expired sessions on every handshake (cheap — handshakes are already rate-limited per
-      // IP), then enforce a hard cap: if still at/over it, evict the oldest live sessions to make room
-      // rather than letting the map grow without bound. Map iteration order is insertion order, and
-      // every session shares the same TTL, so the earliest-inserted entries are also the
-      // earliest-expiring — evicting from the front is a reasonable least-recently-established policy.
+      // IP), then enforce a hard cap: if still at/over it, evict live sessions to make room rather than
+      // letting the map grow without bound, by the policy above `transportSessionToEvict`. Map iteration
+      // order is insertion order, and every session shares the same TTL, so within a group the
+      // earliest-inserted entry is also the earliest-expiring.
       const now = Date.now();
       for (const [id, existingSession] of ctx.transportSessions) {
         if (existingSession.expiresAt <= now) {
@@ -848,12 +1014,12 @@ export function registerTransportRoutes(ctx: AppContext): void {
         }
       }
       while (ctx.transportSessions.size >= ctx.TRANSPORT_SESSION_CAP) {
-        const oldest = ctx.transportSessions.keys().next().value;
-        if (oldest === undefined) {
+        const victim = transportSessionToEvict();
+        if (victim === undefined) {
           break;
         }
-        ctx.transportSessions.delete(oldest);
-        ctx.closeSocketsForTransportSession(oldest);
+        ctx.transportSessions.delete(victim);
+        ctx.closeSocketsForTransportSession(victim);
       }
 
       const sessionId = randomUUID();
@@ -863,6 +1029,7 @@ export function registerTransportRoutes(ctx: AppContext): void {
         maxSeq: 0,
         seen: new Set(),
         authMode: "anonymous",
+        sourceKey: rateLimitKey(request.ip),
       });
       return {
         sessionId,
@@ -892,10 +1059,9 @@ export function registerTransportRoutes(ctx: AppContext): void {
     // The user is read live, never from the cached result: the identity was bound with whatever the record
     // said then, and an admin claim or a join approval since would otherwise be undone on the client's next
     // boot pass (the host's own WebView looped back into the queue that way).
-    if (activeSession.authMode === "bound") {
-      if (!activeSession.resumeResult) {
-        return reply.code(409).send(errorBody("Session already bound"));
-      }
+    // `resumeResult` is set in the same synchronous step that binds the session (below), and nothing else
+    // binds one, so a cached result is exactly "this session is bound".
+    if (activeSession.resumeResult) {
       const liveUser = ctx.data.users.find((user) => user.id === activeSession.userId);
       return {
         ...activeSession.resumeResult,
@@ -907,7 +1073,7 @@ export function registerTransportRoutes(ctx: AppContext): void {
     const body = request.body as { token?: unknown } | undefined;
     const rawToken = body?.token;
     // A `token` that is present but not a string ({token:123}, {token:{}}, …) is a malformed request — a
-    // hard 400, not a silent mint (which would fragment an incompatible client's identity, docs/20 review).
+    // hard 400, not a silent mint (which would fragment an incompatible client's identity, docs/20).
     if (rawToken !== undefined && typeof rawToken !== "string") {
       return reply.code(400).send(errorBody("Invalid identity token"));
     }
@@ -941,6 +1107,9 @@ export function registerTransportRoutes(ctx: AppContext): void {
       ctx.store.putIdentityToken(tokenHash, userId, Date.now());
     }
 
+    if (!makeRoomForIdentityToken(tokenHash, activeSession)) {
+      return reply.code(429).send(errorBody("Too many open sessions for this identity; close a tab and try again"));
+    }
     const currentUser = ctx.ensureSessionUser(userId);
     // Bind identity to this transport session — `authMode:"bound"` is what activates the secure rules
     // (content only via the tunnel, no cookie, WS key-confirmation) for this session, independent of the

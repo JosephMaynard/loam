@@ -54,6 +54,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   for (const container of mounted) {
     render(null, container);
@@ -164,5 +165,23 @@ describe("PeopleView", () => {
     expect(host.querySelector('[role="alertdialog"]')).toBeNull();
     const fetchMock = vi.mocked(fetch);
     expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "PATCH")).toBe(false);
+  });
+
+  it("shows the greeter how long each newcomer has been waiting", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-10T12:00:00Z"));
+    const newcomer: User = { ...me, id: "user.new", displayName: "Newcomer", pending: true, createdAt: Date.now() - 3 * 3_600_000 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) =>
+        new Response(JSON.stringify(String(input).includes("/api/access/pending") ? [newcomer] : []), { status: 200 }),
+      ),
+    );
+    const host = mount(<PeopleView currentUser={admin} onUsersChanged={() => {}} />);
+    await flush();
+
+    const row = host.querySelector(".pending-row")!;
+    expect(row.textContent).toContain("Newcomer");
+    expect(row.querySelector(".row-meta")?.textContent).toBe("Asked to join 3 hours ago");
   });
 });

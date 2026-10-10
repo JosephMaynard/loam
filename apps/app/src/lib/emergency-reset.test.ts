@@ -69,7 +69,7 @@ describe('requestEmergencyReset', () => {
     const bridge = fakeChannel();
     const pending = requestEmergencyReset(bridge.channel, 1000);
     vi.advanceTimersByTime(1000);
-    await expect(pending).resolves.toEqual({ ok: false, error: 'The host did not answer in time.' });
+    await expect(pending).resolves.toEqual({ ok: false, error: "The host app didn't answer. It may still be starting." });
     vi.useRealTimers();
   });
 

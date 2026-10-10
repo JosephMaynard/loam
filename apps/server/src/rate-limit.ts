@@ -22,6 +22,8 @@ import { isIPv4, isIPv6 } from "node:net";
 
 import type { FastifyInstance, FastifyRequest, onRequestAsyncHookHandler } from "fastify";
 
+import { RATE_LIMITED_CODE } from "./errors.js";
+
 /** Passed to an `errorResponseBuilder` when a request is refused. */
 export interface RateLimitExceeded {
   statusCode: 429;
@@ -38,6 +40,12 @@ export interface RateLimitOptions {
   timeWindow: number | string;
   /** True exempts the request (it isn't counted). */
   allowList?: (request: FastifyRequest) => boolean;
+  /**
+   * Count each address on its own instead of folding IPv6 to its /64. For routes where a shared budget
+   * would let one device on an IPv6 LAN lock everyone else out (claim, panic); their attempt limiters keep a
+   * per-/64 bound, so cycling addresses still buys no unlimited guesses.
+   */
+  perAddress?: boolean;
   /** Builds the error thrown for a refused request (default: a 429 naming the wait). */
   errorResponseBuilder?: (request: FastifyRequest, context: RateLimitExceeded) => Error;
 }
@@ -107,20 +115,47 @@ function ipv6Groups(address: string): number[] | undefined {
  * IPv6 address as its /64 prefix (so one host can't dodge the limit by cycling addresses in its subnet).
  */
 export function rateLimitKey(ip: string): string {
+  return ipv6SubnetKey(ip) ?? addressKey(ip);
+}
+
+/** The groups of an IPv6 address that isn't IPv4-mapped, or undefined for anything else. */
+function nativeIPv6Groups(ip: string): number[] | undefined {
+  if (isIPv4(ip) || !isIPv6(ip.split("%")[0]!)) {
+    return undefined;
+  }
+  const groups = ipv6Groups(ip);
+  if (!groups || (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff)) {
+    return undefined;
+  }
+  return groups;
+}
+
+/**
+ * One peer address as a key: IPv4 as-is, an IPv4-mapped IPv6 address as its IPv4 form, any other IPv6
+ * address in one canonical spelling (zone id dropped). For the strict per-attempt limiters, which a whole
+ * IPv6 LAN (one SLAAC /64) must not share: see {@link ipv6SubnetKey} for their coarser second bound.
+ */
+export function addressKey(ip: string): string {
+  const native = nativeIPv6Groups(ip);
+  if (native) {
+    return native.map((group) => group.toString(16)).join(":");
+  }
   if (isIPv4(ip) || !isIPv6(ip.split("%")[0]!)) {
     return ip.toLowerCase();
   }
   const groups = ipv6Groups(ip);
-  if (!groups) {
-    return ip.toLowerCase();
-  }
-  if (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff) {
-    return [groups[6]! >> 8, groups[6]! & 0xff, groups[7]! >> 8, groups[7]! & 0xff].join(".");
-  }
-  return `${groups
-    .slice(0, 4)
-    .map((group) => group.toString(16))
-    .join(":")}::/64`;
+  return groups ? [groups[6]! >> 8, groups[6]! & 0xff, groups[7]! >> 8, groups[7]! & 0xff].join(".") : ip.toLowerCase();
+}
+
+/** The /64 prefix of an IPv6 address that isn't IPv4-mapped, or undefined (IPv4 has no wider bucket here). */
+export function ipv6SubnetKey(ip: string): string | undefined {
+  const native = nativeIPv6Groups(ip);
+  return native
+    ? `${native
+        .slice(0, 4)
+        .map((group) => group.toString(16))
+        .join(":")}::/64`
+    : undefined;
 }
 
 /** One fixed-window counter table, LRU-bounded (a Map iterates in insertion order; a hit re-inserts). */
@@ -161,16 +196,20 @@ function describeWait(ttlMs: number): string {
   return `${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
+/** The default refusal: a 429 naming the wait, with the stable `rate_limited` code the client translates
+ *  (the message itself is English and server-built, so a client never shows it). */
 function defaultErrorResponse(_request: FastifyRequest, context: RateLimitExceeded): Error {
-  const error = new Error(`Rate limit exceeded, retry in ${describeWait(context.ttl)}`) as Error & { statusCode: number };
+  const error = new Error(`Rate limit exceeded, retry in ${describeWait(context.ttl)}`) as Error & { statusCode: number; code: string };
   error.statusCode = context.statusCode;
+  error.code = RATE_LIMITED_CODE;
   return error;
 }
 
 /** The `onRequest` hook enforcing one limiter. */
 function limiterHook(options: RateLimitOptions, counter: FixedWindowCounter): onRequestAsyncHookHandler {
   const windowMs = parseTimeWindow(options.timeWindow);
-  const { max, allowList, errorResponseBuilder } = options;
+  const { max, allowList, errorResponseBuilder, perAddress } = options;
+  const keyOf = perAddress ? addressKey : rateLimitKey;
   if (!Number.isInteger(max) || max < 0) {
     throw new Error(`Invalid rate-limit max: ${max}`);
   }
@@ -178,7 +217,7 @@ function limiterHook(options: RateLimitOptions, counter: FixedWindowCounter): on
     if (allowList?.(request)) {
       return;
     }
-    const { count, ttl } = counter.hit(rateLimitKey(request.ip), windowMs);
+    const { count, ttl } = counter.hit(keyOf(request.ip), windowMs);
     if (count <= max) {
       return;
     }

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Release-version consistency check (pre-release review 2026-09-25). Run by CI on every push/PR and by
+// Release-version consistency check. Run by CI on every push/PR and by
 // the APK workflow before a tag build. Tests: scripts/check-versions.test.mjs (`node --test`).
 //
 //   node scripts/check-versions.mjs

@@ -12,3 +12,5 @@ packages/*/pnpm-lock.yaml
 
 # npm pack output
 *.tgz
+# ...except the Android host's vendored, sha256-pinned SQLite wrapper packages (fetch-native-modules.mjs).
+!apps/app/native-prebuilds/npm/*.tgz

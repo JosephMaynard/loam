@@ -14,21 +14,21 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const rnBridge = require('rn-bridge');
-// P1-2 (Sol round 5): the pure "may a key be resolved this boot?" decision, split out so it can be
+// The pure "may a key be resolved this boot?" decision, split out so it can be
 // unit-tested directly (this file itself can't be — see db-key-gate.js's doc comment).
 const { mayResolveDbKeyThisBoot } = require('./db-key-gate');
-// Sol P1: the pure three-outcome durable install of the start-fresh marker, split out for the same
+// The pure three-outcome durable install of the start-fresh marker, split out for the same
 // reason (unit-testable with an injected `fs` — see start-fresh-marker.js's doc comment). Distinguishes
 // a durable install from a provably-absent write and from an INDETERMINATE post-rename commit, which a
-// bare `durableWriteFileSync` boolean conflates with "nothing was written".
+// bare boolean "durable write" result conflates with "nothing was written".
 const { installStartFreshMarker } = require('./start-fresh-marker');
-// Sol Fable-round P1-4: the three-outcome durable config.json write (durable / failed / indeterminate),
+// The three-outcome durable config.json write (durable / failed / indeterminate),
 // split out for the same unit-testability reason (injected `fs` — see config-write.js's doc comment).
 const { durableWriteConfig } = require('./config-write');
 const { applyNewNetwork, setupUnfinished } = require('./new-network');
 // The `loam-emergency-reset-result` answer, split out so it is testable (see reset-reply.js).
 const { resetReply } = require('./reset-reply');
-// Sol Fable-round-3 P1: the pure per-attempt boot-env decision (clear-all-then-set-branch), split out so the
+// The pure per-attempt boot-env decision (clear-all-then-set-branch), split out so the
 // "every attempt is a FRESH boot configuration — no stale LOAM_DB_KEY leaks across in-process retries" rule
 // is unit-testable (see boot-config.js's doc comment).
 const { DB_KEY_LOCKED_ERROR, computeDbBootEnv, applyBootEnvTo } = require('./boot-config');
@@ -44,13 +44,13 @@ process.env.LOAM_DATA_DIR = dataDir;
 process.env.LOAM_CLIENT_DIST = path.join(projectDir, 'client');
 // The embedded Node 18 has no node:sqlite — use the plain better-sqlite3 prebuild (docs/01, docs/04).
 process.env.LOAM_DB_DRIVER = 'better-sqlite3';
-// Per-boot HOST TOKEN (review 2026-09-04): proves a caller is THIS host process. The server (a) forces the
+// Per-boot HOST TOKEN: proves a caller is THIS host process. The server (a) forces the
 // `hostDevice` admin bootstrap while it is set — admin is granted only to whoever presents it via
 // `POST /api/admin/claim`, never to "the first session" (the server listens on 0.0.0.0 from boot, but the
 // operator's own WebView only reaches it after the readiness probe + bootstrap fetch + client load, so
 // under `firstUser` any LAN peer polling `/api/config` could take admin on every fresh-DB boot — every boot
-// in ephemeral mode); and (b) requires it on the loopback mesh bridge, since on Android loopback is
-// reachable by every installed app. Minted fresh each boot; handed ONLY to the RN host screen (which
+// in ephemeral mode); and (b) requires it on the loopback mesh bridge and the other launcher-only
+// `/api/host/*` routes, since on Android loopback is reachable by every installed app. Minted fresh each boot; handed ONLY to the RN host screen (which
 // injects it into its own WebView) and attached to this file's own bridge requests. Never logged.
 const hostToken = crypto.randomBytes(32).toString('base64url');
 process.env.LOAM_HOST_TOKEN = hostToken;
@@ -64,41 +64,31 @@ function notify(status, extra) {
   }
 }
 
-// Boot-notice codes (P1-4 / AF2): these all mean the server DEGRADED but kept booting — a DB opened
-// unencrypted after a key mismatch, a fresh DB after an unreadable one, or the encrypted driver being
-// absent — never that boot failed. The readiness probe below (`startReadinessProbe`/`probeServer`) still
-// runs and will post 'ready' once the server actually answers. Reported as status 'notice', NOT 'error': the RN host
-// screen must not treat these as fatal (they used to arrive as 'error' and then get silently clobbered
-// the moment 'ready' followed — see index.tsx's persistent notice state, AF2/P1-4). Any OTHER code
+// Boot-notice codes: these mean the server DEGRADED but kept booting (`db_encryption_recovered_fresh`: a
+// fresh DB after an unreadable one), never that boot failed. The readiness probe below
+// (`startReadinessProbe`/`probeServer`) still runs and will post 'ready' once the server actually answers.
+// Reported as status 'notice', NOT 'error': the RN host screen must not treat these as fatal, and a notice
+// must survive the 'ready' that follows it (see index.tsx's persistent notice state). Any OTHER code
 // (e.g. `boot_failed`/`boot_unhandled_rejection` from embedded-main.ts, where the process exits and
 // 'ready' can never follow) stays a real 'error'.
 //
-// `db_encryption_unreadable` is deliberately NOT in this list (P1-1, Sol round 3): unlike the others,
-// the server did NOT keep booting for it — `openInitialStore` threw and boot failed. It used to still
-// arrive here as a 'notice' (this DB open failure is non-destructive, so it *felt* like a degrade), but
-// then embedded-main.ts's catch immediately followed up with a SECOND report at 'boot_failed', which
-// clobbered the notice into a generic fatal error anyway — so it was never really a notice in practice,
-// just a confusing double-report. It now arrives as a single 'error' with the specific code, the runtime
-// stays alive (embedded-main.ts no longer exits for this one), and index.tsx shows it as a persistent
+// `db_encryption_unreadable` is deliberately NOT in this list: the server did NOT keep booting for it —
+// `openInitialStore` threw and boot failed. It arrives as a single 'error' with the specific code, the
+// runtime stays alive (embedded-main.ts does not exit for this one), and index.tsx shows it as a persistent
 // FATAL state with the "Preserve old database & start fresh" action — see index.tsx's DB_UNREADABLE_CODE.
 //
-// `db_encryption_locked` is ALSO deliberately not in this list (P1-1, Sol round 4): it means a
-// `persistent`/`passphrase` boot found no usable key and REFUSED to start the server at all — never a
-// "degraded but booted" case like the others here, so it must arrive as a real 'error' too. index.tsx
-// shows its own dedicated fatal block (boot-time passphrase-unlock / retry), keyed on this exact code.
-// (`db_encryption_no_key` — the PRE-P1-1-round-4 code for "encrypted mode, no key" — used to live here
-// too, back when that case silently downgraded to a plaintext boot instead of staying locked; it is no
-// longer emitted by this file at all, but `index.tsx`'s defensive fallback set still recognizes it in
-// case an older bundled build is ever paired with a newer one.)
+// `db_encryption_locked` is ALSO deliberately not in this list: it means a boot found no usable key (or
+// could not determine the mode) and REFUSED to start the server at all — never a "degraded but booted"
+// case, so it must arrive as a real 'error' too. index.tsx shows its own dedicated fatal block (boot-time
+// passphrase-unlock / retry), keyed on this exact code.
 //
-// `db_encryption_driver_missing` (pre-release review 2026-09-25) is likewise a real 'error': the SQLCipher
-// driver failed to load under an encrypted selection, and the launcher now LOCKS instead of booting
-// plaintext (it used to be the `db_encryption_unavailable` notice here, with a silent plaintext boot).
-const DB_ENCRYPTION_NOTICE_CODES = ['db_encryption_open_failed', 'db_encryption_recovered_fresh'];
+// `db_encryption_driver_missing` is likewise a real 'error': the SQLCipher driver failed to load under an
+// encrypted selection, and the launcher LOCKS instead of booting plaintext.
+const DB_ENCRYPTION_NOTICE_CODES = ['db_encryption_recovered_fresh'];
 
 // embedded-main.ts (bundled into loam-server.js below) does the real startup work asynchronously —
 // require('./loam-server.js') returns long before a config-load or server.listen() failure would
-// reject, so this file's own try/catch around require() can't see it (docs/15 A8). It instead calls
+// reject, so this file's own try/catch around require() can't see it. It instead calls
 // this hook, installed on `global` BEFORE requiring the bundle (same pattern as
 // global.__loamOnDeviceChat below), so a failure still reaches the host screen as a real error
 // instead of just the generic readiness-poll timeout. Also used directly, below, by this file's own
@@ -109,8 +99,8 @@ global.__loamReportBootError = function (message, code) {
   notify(isNotice ? 'notice' : 'error', { message: message, code: code });
 };
 
-// P1-2 (Sol round 3): the server's kill switch calls this (`globalThis.__loamRequestWipeRestart`, see
-// executeKillSwitch in apps/server/src/app.ts) when a `persistent`/`passphrase`-encrypted node is wiped
+// The server's kill switch calls this (`globalThis.__loamRequestWipeRestart`, see
+// executeKillSwitchBody in apps/server/src/kill-switch.ts) when a `persistent`/`passphrase`-encrypted node is wiped
 // — its key is FIXED (Keystore-held) and the server process has no way to mint a new one in-process, so
 // it deletes the now-orphaned ciphertext and asks THIS process (over the bridge, same reasoning as every
 // other RN-owned action here) to clear the Keystore key material and restart the embedded runtime. The
@@ -125,7 +115,7 @@ global.__loamRequestWipeRestart = function () {
   }
 };
 
-// P1-1 (Sol round 5): the server's `openInitialStore` (apps/server/src/app.ts) calls this
+// The server's `openInitialStore` (apps/server/src/store-lifecycle.ts) calls this
 // (`globalThis.__loamReportDbKeyMigrated`) after successfully migrating a passphrase-mode DB to the
 // current key derivation — either by opening it directly under the current key (already migrated, or a
 // fresh install that never needed the legacy one) or by rekeying it in place from the legacy key. Forward
@@ -134,8 +124,7 @@ global.__loamRequestWipeRestart = function () {
 // global.__loam* hook here — installed BEFORE requiring the server bundle. Never carries any key material.
 global.__loamReportDbKeyMigrated = function (requestId) {
   try {
-    // Carry the id of the key-handoff attempt whose DB open the server just confirmed (Sol Fable-round-2
-    // P1-B), so RN promotes the EXACT candidate that attempt used — not a different, overlapping attempt's
+    // Carry the id of the key-handoff attempt whose DB open the server just confirmed, so RN promotes the EXACT candidate that attempt used — not a different, overlapping attempt's
     // unverified guess. The server passes the IMMUTABLE per-boot id it captured at buildApp time (from
     // `LOAM_DB_KEY_REQUEST_ID`), NEVER a mutable launcher global. Missing/undefined (a non-passphrase boot)
     // makes the RN side a no-op.
@@ -146,8 +135,8 @@ global.__loamReportDbKeyMigrated = function (requestId) {
   }
 };
 
-// Interface NAME prefixes that belong to a VPN/tunnel/virtual adapter rather than the real hotspot/LAN
-// (P2-3): an address on one of these is never reachable by a nearby device scanning the join QR, so
+// Interface NAME prefixes that belong to a VPN/tunnel/virtual adapter rather than the real hotspot/LAN:
+// an address on one of these is never reachable by a nearby device scanning the join QR, so
 // picking one would silently break joining. Mirrors the exclusions in apps/server/src/net.ts's
 // `resolveLanIPv4` (`tun`/`utun`/`tailscale`/`wg`/`ppp`), plus a few more that only show up on Android
 // (`rmnet` — the cellular radio interfaces; `dummy`/`docker`/`veth` — container/virtual networking some
@@ -164,7 +153,7 @@ function isTunnelInterfaceName(name) {
 
 /**
  * The host's non-internal IPv4 addresses with their interface names, excluding VPN/tunnel/virtual
- * interfaces (P2-3). The native Share QR (`joinUrl` in apps/app/src/lib/join-url.ts) uses the flat
+ * interfaces. The native Share QR (`joinUrl` in apps/app/src/lib/join-url.ts) uses the flat
  * address list for the shared-WiFi / Pi case, so filtering happens here rather than trusting the picker
  * to know which addresses are real. When the LocalOnlyHotspot is running, the QR targets the hotspot's
  * OWN address — Android assigns it at random per start (there is no fixed gateway; 192.168.49.1 is
@@ -253,7 +242,7 @@ function postHostInfo() {
 // hotspot AP address is picked up whenever the hotspot comes up, without the host screen polling.
 rnBridge.channel.on('loam-hostinfo-request', postHostInfo);
 
-// P2 (Sol round 4): true once 'ready' has actually been announced to the host screen — makes
+// True once 'ready' has actually been announced to the host screen — makes
 // `announceReady` idempotent so it's safe to call from BOTH the direct server-side signal
 // (`__loamReportBootReady`, fired the instant `server.listen()` succeeds — see embedded-main.ts) and
 // this file's own `/api/health` poll, whichever gets there first, without double-posting 'ready' or
@@ -275,17 +264,16 @@ function announceReady() {
   setInterval(postHostInfo, 5000);
 }
 
-// P2 (Sol round 4): the DIRECT signal — embedded-main.ts calls this the instant `server.listen()`
+// The DIRECT signal — embedded-main.ts calls this the instant `server.listen()`
 // succeeds, independent of (and not racing) this file's own poll below. Installed on `global` BEFORE
 // requiring the server bundle, same pattern as `__loamReportBootError`/`__loamRequestWipeRestart`.
-// Without this, `waitForServer`/`retry`'s poll giving up after ~5 minutes (see below) meant a LATER
-// successful boot — e.g. the in-process retry after a "Preserve old database & start fresh"
-// confirmation, possibly minutes after the original poll gave up — never told the host screen it was
-// ready: `startFreshBusy` stayed stuck true and the WebView never mounted, even though the server was
-// actually healthy.
+// The poll (`probeServer`/`retry`) gives up after ~5 minutes, so without this a LATER successful boot —
+// e.g. the in-process retry after a "Preserve old database & start fresh" confirmation, possibly minutes
+// after the original poll gave up — would never tell the host screen it was ready, and the WebView would
+// never mount even though the server was healthy.
 global.__loamReportBootReady = announceReady;
 
-// P2 (Sol round 4): a "singleton" generation counter for the readiness poll below — `startReadinessProbe`
+// A "singleton" generation counter for the readiness poll below — `startReadinessProbe`
 // bumps it and starts a FRESH polling chain every time it's called (once per boot attempt: the initial
 // boot, and again after every in-process retry — start-fresh recovery or a db-unlock retry), while any
 // OLDER chain still ticking away in the background self-cancels on its next tick instead of continuing
@@ -293,7 +281,7 @@ global.__loamReportBootReady = announceReady;
 // hasn't given up yet would leave two overlapping polling loops running concurrently.
 let readinessPollGeneration = 0;
 
-/** Start a brand-new readiness-poll chain (P2), superseding any still-running older one. */
+/** Start a brand-new readiness-poll chain, superseding any still-running older one. */
 function startReadinessProbe() {
   readinessPollGeneration += 1;
   probeServer(readinessPollGeneration, 0);
@@ -303,7 +291,7 @@ function startReadinessProbe() {
  * Poll the embedded server until it answers, then tell the host screen it can load the WebView.
  * The server listens asynchronously after require(), so we can't await it here — polling also
  * confirms the HTTP surface is actually serving before the WebView navigates to it. `generation` ties
- * this chain to the `startReadinessProbe` call that started it (P2's singleton guard, see above) — a
+ * this chain to the `startReadinessProbe` call that started it (the singleton guard, see above) — a
  * newer call bumps `readinessPollGeneration`, and this chain quietly stops the moment it notices.
  */
 function probeServer(generation, attempt) {
@@ -341,12 +329,11 @@ function retry(generation, attempt) {
     return;
   }
   if (attempt > 600) {
-    // RF3: an explicit code (rather than none at all) so index.tsx can tell THIS specific give-up apart
-    // from other generic errors — it's the one codeless-in-the-past case that used to silently clobber
-    // an active "Preserve old database & start fresh" recovery state (db_encryption_unreadable) whenever
-    // this timeout fired mid-retry. (P2: this give-up no longer matters for readiness itself — the direct
-    // `__loamReportBootReady` signal above doesn't depend on this poll at all — but it's still useful
-    // liveness diagnostics, and a fresh `startReadinessProbe()` call on the next retry supersedes it.)
+    // An explicit code so index.tsx can tell THIS specific give-up apart from other generic errors and
+    // keep an active "Preserve old database & start fresh" recovery state (db_encryption_unreadable) from
+    // being clobbered when this timeout fires mid-retry. (This give-up doesn't matter for readiness itself —
+    // the direct `__loamReportBootReady` signal above doesn't depend on this poll at all — but it's still
+    // useful liveness diagnostics, and a fresh `startReadinessProbe()` call on the next retry supersedes it.)
     notify('error', { message: 'Server did not become ready in time.', code: 'boot_timeout' });
     return;
   }
@@ -450,7 +437,7 @@ function meshRequest(method, path, body, callback) {
       path: path,
       method: method,
       timeout: 5000,
-      // The bridge routes require the per-boot host token as well as a loopback peer (review 2026-09-04).
+      // The bridge routes require the per-boot host token as well as a loopback peer.
       headers: payload
         ? { 'content-type': 'application/json', 'content-length': payload.length, 'x-loam-host-token': hostToken }
         : { 'x-loam-host-token': hostToken },
@@ -659,8 +646,8 @@ function isValidSetPayload(payload) {
   return true;
 }
 
-/** Write `next` to config.json DURABLY, returning `'durable' | 'failed' | 'indeterminate'` (Sol Fable-round
- * P1-4) — the three-outcome contract lives in the injected-`fs`, unit-tested `config-write.js` helper. A
+/** Write `next` to config.json DURABLY, returning `'durable' | 'failed' | 'indeterminate'` —
+ * the three-outcome contract lives in the injected-`fs`, unit-tested `config-write.js` helper. A
  * bare atomic temp+rename only orders metadata; without the contents/dir fsyncs a power loss can still leave
  * a half-written config.json that strands the operator with a host that refuses to boot. */
 function writeConfigFile(next) {
@@ -669,9 +656,11 @@ function writeConfigFile(next) {
 
 rnBridge.channel.on('loam-model-set-active', (payload) => {
   const requestId = payload && payload.requestId;
-  const reply = (ok, error) => {
+  // `errorCode` names a known failure for the host app's catalog (src/lib/host-errors.ts); `error` is the English
+  // detail, shown only when there is no code (an unexpected exception).
+  const reply = (ok, error, errorCode) => {
     try {
-      rnBridge.channel.post('loam-model-set-active-result', { requestId: requestId, ok: ok, error: error });
+      rnBridge.channel.post('loam-model-set-active-result', { requestId: requestId, ok: ok, error: error, errorCode: errorCode });
     } catch (err) {
       // RN side isn't listening (screen unmounted mid-request) — nothing more to do.
     }
@@ -685,7 +674,7 @@ rnBridge.channel.on('loam-model-set-active', (payload) => {
       onDevice = Object.assign({}, current.llm && current.llm.onDevice, { enabled: false });
     } else if (payload && payload.action === 'set') {
       if (!isValidSetPayload(payload)) {
-        reply(false, 'Invalid model configuration (path/model/contextSize out of range).');
+        reply(false, 'Invalid model configuration (path/model/contextSize out of range).', 'invalid_model_config');
         return;
       }
       onDevice = Object.assign({}, current.llm && current.llm.onDevice, {
@@ -699,7 +688,7 @@ rnBridge.channel.on('loam-model-set-active', (payload) => {
         onDevice.contextSize = payload.contextSize;
       }
     } else {
-      reply(false, 'Unknown action.');
+      reply(false, 'Unknown action.', 'unknown_request');
       return;
     }
 
@@ -709,8 +698,8 @@ rnBridge.channel.on('loam-model-set-active', (payload) => {
       reply(true);
     } else if (outcome === 'failed') {
       // Definite failure BEFORE the rename — config.json is untouched. Report it so the model-manager
-      // conditionally rolls its local change back rather than believing it committed (Sol Fable-round P1-4).
-      reply(false, 'Could not durably save the model configuration; the previous configuration is unchanged.');
+      // conditionally rolls its local change back rather than believing it committed.
+      reply(false, 'Could not durably save the model configuration; the previous configuration is unchanged.', 'model_config_save_failed');
     } else {
       // 'indeterminate': the new config is visible but its survival across power loss is unconfirmed. Do
       // NOT claim durable success (the model-manager would treat it as committed) and do NOT report a plain
@@ -724,7 +713,7 @@ rnBridge.channel.on('loam-model-set-active', (payload) => {
   }
 });
 
-// ---- On-device DB-encryption key handoff (PR B — docs/01, docs/21) --------------------------------
+// ---- On-device DB-encryption key handoff (docs/01, docs/21) ---------------------------------------
 // The embedded server encrypts its SQLite DB at rest when handed a key via LOAM_DB_KEY (see
 // apps/server/src/embedded.ts / db.ts). On the Android host the key/mode choice lives in RN, backed by
 // the device Keystore via expo-secure-store (apps/app/src/lib/db-encryption.ts) — this process has no
@@ -736,12 +725,12 @@ rnBridge.channel.on('loam-model-set-active', (payload) => {
 // `'off'` is the safe default ONLY when RN's reply genuinely says so — but a timeout, a malformed/
 // unrecognized payload, a thrown post(), or RN's own reported read failure (`{mode:'error'}`, from a
 // SecureStore/Keystore glitch — see db-encryption.ts's `DB_ENCRYPTION_MODE_READ_ERROR`) must NOT be
-// treated the same way any more (P1-3, Sol round 5): those tell us nothing about the operator's actual
-// choice, and silently falling through to plaintext would downgrade an encrypted node on a merely
-// transient hiccup. Those cases resolve to the `'locked-error'` sentinel mode instead — the caller
-// (`resolveDbEncryptionAndBoot` below) reports `db_encryption_locked` and refuses to start the server
-// AT ALL, exactly like the existing "persistent/passphrase with no usable key" case, rather than the old
-// silent plaintext fallback. Genuine `{mode:'off'}` (RN successfully read an unset/off selection) is
+// treated the same way: those tell us nothing about the operator's actual choice, and silently falling
+// through to plaintext would downgrade an encrypted node on a merely transient hiccup. Those cases resolve
+// to the `'locked-error'` sentinel mode instead. The caller (`resolveDbEncryptionAndBoot` below, via
+// boot-config.js) then boots plaintext only when the last-known mode hint says `off` or the node is
+// genuinely fresh (no hint, no DB); otherwise it reports `db_encryption_locked` and refuses to start the
+// server AT ALL, exactly like the "persistent/passphrase with no usable key" case. Genuine `{mode:'off'}` (RN successfully read an unset/off selection) is
 // still a normal, silent boot — crisis messaging still always works for the actual default case.
 const DB_KEY_TIMEOUT_MS = 5000;
 const DB_ENCRYPTION_MODES = ['off', 'ephemeral', 'persistent', 'passphrase'];
@@ -755,16 +744,16 @@ const DB_MODE_READ_ERROR = 'error';
 
 /** Ask the RN host for the DB-encryption mode/key, waiting up to `timeoutMs`. Never rejects — any
  * FAILURE (timeout, malformed/unrecognized payload, a post() throw, or RN's own reported read error)
- * resolves to `{ mode: 'locked-error' }` (P1-3, Sol round 5) so the caller locks rather than silently
- * falls back to plaintext. Only a genuinely successful `{mode:'off'}` reply resolves to `'off'`. */
+ * resolves to `{ mode: 'locked-error' }`, which the caller gates on the last-known mode hint rather than
+ * silently falling back to plaintext. Only a genuinely successful `{mode:'off'}` reply resolves to `'off'`. */
 var dbKeyRequestCounter = 0;
 function requestDbKey(timeoutMs) {
-  // Correlate each request with its response (Sol Fable-round P1-1): a request that TIMED OUT removes its
+  // Correlate each request with its response: a request that TIMED OUT removes its
   // listener, but RN may still answer it late; without a correlation id that late answer would be caught by
   // the NEXT request's freshly-registered listener and satisfy it with stale mode/key state (e.g. a
   // pre-passphrase "locked" answer landing on the post-passphrase unlock retry). RN always echoes the id
-  // now (same bundle ships both sides), so the match is STRICT: a response whose id is missing or differs is
-  // ignored. Accepting an untagged response would reopen the exact stale-response bug this closes.
+  // (same bundle ships both sides), so the match is STRICT: a response whose id is missing or differs is
+  // ignored. Accepting an untagged response would let a stale answer through.
   var requestId = 'dbkey-' + (++dbKeyRequestCounter);
   return new Promise(function (resolve) {
     var settled = false;
@@ -802,7 +791,7 @@ function requestDbKey(timeoutMs) {
       var key = payload && typeof payload.key === 'string' && payload.key.length > 0 ? payload.key : undefined;
       var legacyKey =
         payload && typeof payload.legacyKey === 'string' && payload.legacyKey.length > 0 ? payload.legacyKey : undefined;
-      // Return THIS request's id (Sol Fable-round-2 P1-B): the boot that follows threads it into the embedded
+      // Return THIS request's id: the boot that follows threads it into the embedded
       // server as an IMMUTABLE per-boot value, so the migration ack the server later emits carries the id of
       // the attempt that actually opened the DB — never a mutable launcher global a later attempt overwrote.
       // A new network from the setup screens carries its starting configuration; the data folder is emptied
@@ -831,28 +820,27 @@ function requestDbKey(timeoutMs) {
   });
 }
 
-// RF-c (adversarial review, round 5): a plaintext "last-known DB-encryption mode" hint. Records ONLY the
+// A plaintext "last-known DB-encryption mode" hint. Records ONLY the
 // mode NAME (never key/passphrase material — those never touch disk here at all) whenever a mode is
 // SUCCESSFULLY resolved from the RN handoff. Its one job is to make a LATER boot's `requestDbKey` FAILURE
 // (`locked-error` — a 5s timeout before the RN screen has even mounted, a transient Keystore hiccup, a
 // malformed reply) recoverable in the RIGHT direction: `off`/absent means this node has no secret to
 // protect, so a transient failure must NOT block boot — crisis-messaging availability wins, boot
 // plaintext. `persistent`/`passphrase`/`ephemeral` means the node genuinely has (had) a secret-based mode,
-// so a transient failure must LOCK rather than silently downgrade to plaintext (the P1-3 confidentiality
-// guarantee). It is NOT key material and NOT secret — it's the same mode string already sent in the clear
+// so a transient failure must LOCK rather than silently downgrade to plaintext. It is NOT key material and NOT secret — it's the same mode string already sent in the clear
 // over the bridge and threaded through LOAM_DB_ENCRYPTION_MODE.
 var DB_MODE_HINT_PATH = path.join(dataDir, '.loam-db-mode-hint');
 
 /** Persist the last-known mode NAME. Refuses to write anything that isn't a known mode string, so no
  *  key-shaped value can ever land here even by a caller mistake. Returns true only on a genuine write
- *  success (P1-b, Sol round 6): the `loam-db-set-mode-hint` handler below reports that back so the RN
- *  picker can warn when a transactional hint write failed. Existing callers ignore the return.
+ *  success: the `loam-db-set-mode-hint` handler below reports that back so the RN picker can warn when a
+ *  transactional hint write failed. The boot-time caller ignores the return.
  *
- *  P1-1 (Sol round 7): the write is ATOMIC — write to a temp file then rename over the target — so an
+ *  The write is ATOMIC — write to a temp file then rename over the target — so an
  *  interrupted/partial write can never leave a TRUNCATED hint on disk (which `readDbModeHint` would treat
  *  as a `status:'error'` and LOCK on). rename(2) is atomic on the same filesystem.
  *
- *  Durability (CodeRabbit): atomic is not power-loss durable. RN commits an encrypted SecureStore mode only
+ *  Durability: atomic is not power-loss durable. RN commits an encrypted SecureStore mode only
  *  AFTER this returns `true`; a crash before the bytes + directory entry reach stable storage could restore
  *  the old `off`/absent hint and permit a later PLAINTEXT boot under a now-encrypted node. So fsync the
  *  staged file, rename it, then fsync `dataDir` — and only report success once all three have completed. */
@@ -891,7 +879,7 @@ function writeDbModeHint(mode) {
 }
 
 /**
- * Read the last-known mode NAME as a TRI-STATE result (P1-1, Sol round 7) — MIRROR of
+ * Read the last-known mode NAME as a TRI-STATE result — MIRROR of
  * `DbModeHintResult` / the reader contract in apps/app/src/lib/db-encryption.ts (this CJS file can't
  * import the TS module, so keep the two in sync by hand):
  *   - `{ status: 'present', mode }` → the file held a recognized mode NAME.
@@ -920,9 +908,6 @@ function readDbModeHint() {
   return { status: 'present', mode: trimmed };
 }
 
-// P1-b (Sol round 6): whether an on-disk DB file exists — the fail-closed input to the locked-error
-// plaintext decision below. `existsSync` throwing (unexpected) errs on the SAFE side: assume a DB may be
-// present, so a locked-error with an absent hint LOCKS rather than downgrades.
 /**
  * A new network from the setup screens (new-network.js `applyNewNetwork`): empty the data folder, durably
  * write the chosen configuration, record the operation, and acknowledge it so RN stops resending it. RN
@@ -945,6 +930,9 @@ function startNewNetwork(operation) {
   return true;
 }
 
+// Whether an on-disk DB file exists — the fail-closed input to the locked-error plaintext decision
+// (boot-config.js). `existsSync` throwing (unexpected) errs on the SAFE side: assume a DB may be
+// present, so a locked-error with an absent hint LOCKS rather than downgrades.
 function dbFileExists() {
   try {
     return fs.existsSync(path.join(dataDir, 'loam.db'));
@@ -953,9 +941,9 @@ function dbFileExists() {
   }
 }
 
-// P1-b (Sol round 6): write the mode-NAME hint TRANSACTIONALLY with a mode SELECTION, on request from the
+// Write the mode-NAME hint TRANSACTIONALLY with a mode SELECTION, on request from the
 // RN picker (db-encryption.ts's `setDbModeHint`), rather than only when a mode is successfully RESOLVED
-// at boot. Without this, an off→encrypted selection left the stale `off` hint (or, on a fresh encrypted
+// at boot. Otherwise an off→encrypted selection would leave the stale `off` hint (or, on a fresh encrypted
 // upgrade, NO hint) until the next successful encrypted boot — so a `requestDbKey` timeout in between
 // would trust the stale/absent hint and boot plaintext. Only the mode NAME is ever written here; the
 // payload never carries (and this file never persists) key/passphrase material.
@@ -964,30 +952,35 @@ rnBridge.channel.on('loam-db-set-mode-hint', function (payload) {
   var mode = payload && payload.mode;
   var ok = false;
   var error;
+  var errorCode;
   try {
     if (DB_ENCRYPTION_MODES.indexOf(mode) === -1) {
       error = 'Unknown or missing mode.';
+      errorCode = 'unknown_request';
     } else if (writeDbModeHint(mode)) {
       ok = true;
     } else {
       error = 'Could not persist the mode hint.';
+      errorCode = 'mode_hint_save_failed';
     }
   } catch (err) {
     error = String((err && err.message) || err);
   }
   try {
-    rnBridge.channel.post('loam-db-set-mode-hint-result', { requestId: requestId, ok: ok, error: error });
+    rnBridge.channel.post('loam-db-set-mode-hint-result', { requestId: requestId, ok: ok, error: error, errorCode: errorCode });
   } catch (postErr) {
     // RN side isn't listening — nothing more to do.
   }
 });
 
-// A marker file recording that the LAST boot ran in ephemeral mode (G4). `deleteStaleEphemeralDb`
+// A marker file recording that the LAST boot ran in ephemeral mode. `deleteStaleEphemeralDb`
 // below always deletes the DB when mode is 'ephemeral' — that's ephemeral's whole design, wipe-on-
 // restart — but the marker lets it tell that EXPECTED case apart from an operator having just switched
 // INTO ephemeral from a mode with real data (persistent/passphrase/off), where the same deletion is
-// actually a silent, unrecoverable data loss the RN picker's confirmation dialog (G4) is meant to have
-// already warned about. Purely informational — best-effort, and never blocks or changes boot behavior.
+// actually a silent, unrecoverable data loss the RN picker's confirmation dialog is meant to have
+// already warned about. Here it only decides a warning (best-effort, never blocks boot). The server reads
+// the same marker (`prepareEphemeralDataDir` in apps/server/src/store-lifecycle.ts), which is why the
+// launcher writes it before booting an ephemeral server and clears it under every other mode.
 var EPHEMERAL_MARKER_PATH = path.join(dataDir, '.loam-db-ephemeral');
 
 function hasEphemeralMarker() {
@@ -1015,18 +1008,19 @@ function clearEphemeralMarker() {
   }
 }
 
-// ---- "Preserve old database & start fresh" operator confirmation (design#1 / AF8, P1-2) ------------
+// ---- "Preserve old database & start fresh" operator confirmation ------------------------------------
 // When boot fails with `db_encryption_unreadable` (an existing encrypted DB the current key can't
 // open), the RN error screen offers an explicit "Preserve old database & start fresh" action rather
 // than the server silently doing that itself. This marker is the confirmation: the RN UI asks THIS
 // process (over the bridge — same reason as the DB-key handoff above, this process owns `dataDir`) to
-// write it, then tells the operator to restart the app; the server consumes-and-deletes it on the next
-// boot as proof a human actually chose this, not an automatic behaviour.
+// write it; the server consumes-and-deletes it on its next boot attempt (the in-process retry the
+// `loam-db-start-fresh` listener below drives, or the next app restart when the server is already
+// running) as proof a human actually chose this, not an automatic behaviour.
 var START_FRESH_MARKER_PATH = path.join(dataDir, '.loam-db-start-fresh');
 
 // fsync a directory so a create/rename/unlink INSIDE it is durable across power-loss (the directory entry,
 // not just a file's bytes, must be flushed). Returns whether the fsync succeeded. Mirrors the server's
-// `fsyncDir` (apps/server/src/app.ts). Some filesystems reject directory fsync; the wipe/marker callers here
+// `fsyncDir` (apps/server/src/store-lifecycle.ts). Some filesystems reject directory fsync; the wipe/marker callers here
 // choose correctness over availability on those platforms and fail closed on false.
 function fsyncDir(dir) {
   try {
@@ -1042,12 +1036,11 @@ function fsyncDir(dir) {
   }
 }
 
-// RF2: true while a reboot THIS listener triggered is still running. `bootEmbeddedServer` itself is
-// now re-entrant-safe (embedded-main.ts ignores/joins a concurrent call rather than racing a second
-// `listen()`), but debouncing here too means a double-tap of the button doesn't even re-write the
-// marker or post a second `loam-db-start-fresh-result` — belt-and-suspenders against the exact bug a
-// re-entrant in-process reboot caused: two overlapping boots racing `EADDRINUSE` into `process.exit(1)`
-// and killing the recovered server.
+// True while a reboot THIS listener triggered is still running. `bootEmbeddedServer` itself is
+// re-entrant-safe (embedded-main.ts joins a concurrent call rather than racing a second `listen()`), but
+// debouncing here too means a double-tap of the button doesn't even re-write the marker or post a second
+// `loam-db-start-fresh-result` — belt-and-suspenders against two overlapping boots racing `EADDRINUSE`
+// into `process.exit(1)` and killing the recovered server.
 var startFreshRebootInFlight = false;
 
 // A "Link a node" code for the share screen (server sync-links.ts, `POST /api/host/link-code`): the host
@@ -1066,7 +1059,7 @@ rnBridge.channel.on('loam-link-code', function (payload) {
       if (!err && status === 200 && json && typeof json.code === 'string' && typeof json.expiresAt === 'number') {
         reply({ ok: true, code: json.code, expiresAt: json.expiresAt });
       } else {
-        reply({ ok: false, error: err ? err.message : 'The host answered ' + status });
+        reply(err ? { ok: false, error: err.message } : { ok: false, error: 'The host answered ' + status, errorCode: 'host_status', status: status });
       }
     });
   } catch (err) {
@@ -1091,7 +1084,7 @@ rnBridge.channel.on('loam-emergency-reset', function (payload) {
   }
   var reset = global.__loamEmergencyReset;
   if (typeof reset !== 'function') {
-    reply({ ok: false, error: 'The host is not running yet, so there is nothing to reset.' });
+    reply({ ok: false, error: 'The host is not running yet, so there is nothing to reset.', errorCode: 'host_not_running' });
     return;
   }
   Promise.resolve()
@@ -1117,6 +1110,7 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
         requestId: requestId,
         ok: false,
         error: 'A start-fresh recovery is already in progress.',
+        errorCode: 'start_fresh_in_progress',
       });
     } catch (postErr) {
       // RN side isn't listening — nothing more to do.
@@ -1124,20 +1118,20 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
     return;
   }
 
-  // P1-6 (Sol round 8): record the operator's INTENT in the marker. 'delete' = a deliberate destructive
+  // Record the operator's INTENT in the marker. 'delete' = a deliberate destructive
   // mode change (Settings "Delete & start fresh") → the server DELETES + proves the old DB gone; anything
   // else = accidental-lockout recovery → the server renames the old ciphertext aside. Default 'preserve'
   // (never escalate to destruction on a missing/odd intent).
   var intent = payload && payload.intent === 'delete' ? 'delete' : 'preserve';
 
-  // Sol P1: install the marker DURABLY (fd + fsync + atomic rename + parent-dir fsync) and only ack
+  // Install the marker DURABLY (fd + fsync + atomic rename + parent-dir fsync) and only ack
   // ok:true AFTER it is on stable storage. When this is requested from the ALREADY-running Settings
   // screen the in-process reboot below is a no-op (the server is already up), so the marker must survive
   // until the NEXT real app restart; a non-durable write that a power-loss then discarded would report a
   // false "scheduled" success and force the operator to repeat the destructive confirmation.
   //
   // `installStartFreshMarker` is a TOTAL three-outcome function that also prepares the directory itself and
-  // proves marker absence on every failure path (Sol P2, round-11): a durable install, a PROVABLY-absent
+  // proves marker absence on every failure path: a durable install, a PROVABLY-absent
   // write (safe to call unscheduled), or an INDETERMINATE commit (a post-rename fsync failure could leave a
   // live marker that a later restart consumes destructively). We do NOT wrap it in a catch that manufactures
   // 'not-installed' — that would let a directory-prep failure claim "nothing was written" without proof.
@@ -1165,11 +1159,13 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
         ? 'The reset could NOT be confirmed and MAY still take effect on the next app restart: do NOT ' +
           'assume it was cancelled. Restart the app to let it complete, or check the database state before retrying.'
         : 'The reset was not scheduled: nothing was written to disk. It is safe to try again.';
+    var errorCode = outcome === 'indeterminate' ? 'start_fresh_indeterminate' : 'start_fresh_not_scheduled';
     try {
       rnBridge.channel.post('loam-db-start-fresh-result', {
         requestId: requestId,
         ok: false,
         error: error,
+        errorCode: errorCode,
       });
     } catch (postErr) {
       // RN side isn't listening — nothing more to do.
@@ -1184,15 +1180,13 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
     // will see the recovered server's outcome via the next `loam-status` regardless.
   }
 
-  // P1-1 (Sol round 3): re-attempt boot right here, in the SAME still-alive process. The marker is now
-  // on disk, so this time `openInitialStore` (apps/server/src/app.ts) will see it, consume it, and
-  // recover instead of throwing again. This only works because embedded-main.ts no longer
-  // `process.exit()`s on a `db_encryption_unreadable` failure — the runtime (and this very listener)
-  // stays alive specifically so it can receive this event and drive the retry; before that fix, the
-  // process backing this listener was already dead by the time the operator could ever tap the button.
-  // `global.__loamBootEmbeddedServer` is the hook loam-server.js (embedded-main.ts's bundle entry)
+  // Re-attempt boot right here, in the SAME still-alive process. The marker is now on disk, so this time
+  // `openInitialStore` (apps/server/src/store-lifecycle.ts) will see it, consume it, and recover instead of
+  // throwing again. This only works because embedded-main.ts does not `process.exit()` on a
+  // `db_encryption_unreadable` failure — the runtime (and this very listener) stays alive specifically so
+  // it can receive this event and drive the retry.
   // Re-run the WHOLE key-resolution-and-boot pipeline, exactly like the `loam-db-unlock` retry below —
-  // never the bare boot hook (round-2 review). The failed attempt's `LOAM_DB_KEY` is still installed in
+  // never the bare boot hook. The failed attempt's `LOAM_DB_KEY` is still installed in
   // `process.env`, and in passphrase mode it was derived from an entry that has since been CONSUMED and is
   // stored nowhere: booting straight into the start-fresh marker would create the fresh database under a
   // key nobody can reproduce (a mistyped passphrase the operator never sees again). Going through
@@ -1204,7 +1198,7 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
   bootWithWipeResume().then(
     function () {
       startFreshRebootInFlight = false;
-      // P2 (Sol round 4): start a FRESH readiness-probe chain for this retry — the original poll
+      // Start a FRESH readiness-probe chain for this retry — the original poll
       // (from the very first boot attempt) may already have given up (~5 minutes) long before the
       // operator got around to confirming "Preserve old database & start fresh", and it never
       // restarts itself. Without this, a successful recovery here would never tell the host screen
@@ -1219,7 +1213,7 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
   );
 });
 
-// ---- `db_encryption_locked` unlock retry (P1-1, Sol round 4) -----------------------------------------
+// ---- `db_encryption_locked` unlock retry ---------------------------------------------------------------
 // Mirrors the "Preserve old database & start fresh" listener above, but for the OTHER recoverable boot
 // state: `persistent`/`passphrase` mode found no usable key and `resolveDbEncryptionAndBoot` returned
 // without ever requiring the server bundle at all (see its 'locked' outcome) — so there is no running
@@ -1228,11 +1222,11 @@ rnBridge.channel.on('loam-db-start-fresh', function (payload) {
 // passphrase mode, having just called `setPassphraseCandidate`; for persistent mode, as a plain manual
 // retry (e.g. after a transient Keystore hiccup).
 //
-// P1-2 (Sol round 5): this MUST go through `bootWithWipeResume()`, never call
-// `resolveDbEncryptionAndBoot()` directly — a direct call here bypassed the wipe-pending marker check
-// entirely, so a Retry/Unlock tap could resolve a key (and boot) while an earlier wipe's Keystore
-// key-clear was still unconfirmed, opening the fresh post-wipe database under the very secret the wipe
-// was meant to destroy. `bootWithWipeResume` re-checks the marker on every call (see its doc comment) and
+// This MUST go through `bootWithWipeResume()`, never call `resolveDbEncryptionAndBoot()` directly — a
+// direct call would bypass the wipe-phase check entirely, so a Retry/Unlock tap could resolve a key (and
+// boot) while an earlier wipe's Keystore key-clear was still unconfirmed, opening the fresh post-wipe
+// database under the very secret the wipe was meant to destroy. `bootWithWipeResume` re-checks the phase
+// file on every call (see its doc comment) and
 // is the single choke point every boot/unlock entry point in this file routes through.
 var dbUnlockRetryInFlight = false;
 
@@ -1245,6 +1239,7 @@ rnBridge.channel.on('loam-db-unlock', function (payload) {
         requestId: requestId,
         ok: false,
         error: 'An unlock retry is already in progress.',
+        errorCode: 'unlock_in_progress',
       });
     } catch (postErr) {
       // RN side isn't listening — nothing more to do.
@@ -1273,10 +1268,11 @@ rnBridge.channel.on('loam-db-unlock', function (payload) {
   );
 });
 
-// ---- Wipe-restart handoff: durable PHASE resume (P1-1, Sol round 8) ----------------------------------
-// Replaces the old single `.loam-wipe-pending` marker, which conflated "deletion still pending" with "safe
-// to clear the key". SHARED CONTRACT with the server (`executeKillSwitchBody` in apps/server/src/app.ts —
-// both sides updated together): a durable `.loam-wipe-phase` file whose contents are one of two values:
+// ---- Wipe-restart handoff: durable PHASE resume ---------------------------------------------------------
+// A durable phase (rather than a bare "wipe pending" marker) keeps "deletion still pending" apart from "safe
+// to clear the key". SHARED CONTRACT with the server (`executeKillSwitchBody` in
+// apps/server/src/kill-switch.ts and the wipe journal in store-lifecycle.ts — update both sides together): a
+// durable `.loam-wipe-phase` file whose phase is one of two values:
 //   - `delete-pending`  → a fixed-key wipe STARTED but its artifacts are NOT yet PROVEN gone. The launcher
 //                         must NOT clear the device key. It DEFERS to the server's boot-time retry: boot the
 //                         server under the OLD key (`resolveDbEncryptionAndBoot`), and the server re-runs
@@ -1287,24 +1283,25 @@ rnBridge.channel.on('loam-db-unlock', function (payload) {
 //                         dance, then DELETE the phase file.
 // Route on the PHASE, never on mere presence.
 var WIPE_PHASE_MARKER_PATH = path.join(dataDir, '.loam-wipe-phase');
-// The PRE-round-8 single marker (P1-1, Sol round-8). A round-7 fail-closed wipe could leave THIS on disk
-// alongside a deletion survivor while 503-locked; if the device upgraded before reopening, the launcher must
-// still recognise it as an unfinished wipe rather than forgetting it. Both names are cleared together only
-// once the whole wipe protocol completes.
+// The legacy single marker an older build wrote. A fail-closed wipe under that build could leave THIS on
+// disk alongside a deletion survivor while 503-locked; if the device upgraded before reopening, the launcher
+// must still recognise it as an unfinished wipe rather than forgetting it. Both names are cleared together
+// only once the whole wipe protocol completes.
 var LEGACY_WIPE_PENDING_MARKER_PATH = path.join(dataDir, '.loam-wipe-pending');
 
 // Read the durable wipe phase. Confirmed ENOENT → undefined (no wipe pending). A recognized value → that
 // phase. ANY other state (unreadable, or malformed/truncated/unrecognized contents) → 'delete-pending':
 // an ambiguous-but-present phase file means a wipe WAS in progress, so err toward the server's deletion
-// retry rather than forgetting the wipe / clearing the key prematurely. MIRRORS `readWipePhase` in app.ts.
+// retry rather than forgetting the wipe / clearing the key prematurely. MIRRORS `readWipeJournal` in
+// apps/server/src/store-lifecycle.ts.
 function readWipePhase() {
   var raw;
   try {
     raw = fs.readFileSync(WIPE_PHASE_MARKER_PATH, 'utf8');
   } catch (err) {
     if (err && err.code === 'ENOENT') {
-      // No NEW phase file — but a PRE-round-8 `.loam-wipe-pending` marker may still record an unfinished
-      // wipe (P1-1). If present (or unreadable), treat it as 'delete-pending' so the launcher DEFERS to the
+      // No phase file — but a legacy `.loam-wipe-pending` marker may still record an unfinished
+      // wipe. If present (or unreadable), treat it as 'delete-pending' so the launcher DEFERS to the
       // server's deletion retry (NEVER 'key-clear-ready' — the old marker cannot prove deletion completed,
       // so it must be re-run first). The server migrates it forward to `.loam-wipe-phase`.
       try {
@@ -1319,15 +1316,15 @@ function readWipePhase() {
     }
     return 'delete-pending';
   }
-  // New JSON journal format (round-10+): `{ phase, config? }`. The launcher only needs the PHASE string
-  // (it ignores the config snapshot — that is the server's to restore). MIRRORS `readWipeJournal` in app.ts.
+  // JSON journal format: `{ phase, config? }`. The launcher only needs the PHASE string (it ignores the
+  // config snapshot — that is the server's to restore).
   try {
     var parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object') {
       return parsed.phase === 'key-clear-ready' ? 'key-clear-ready' : 'delete-pending';
     }
   } catch (parseErr) {
-    // Not JSON — fall through to the legacy pre-round-10 plain-string format below.
+    // Not JSON — fall through to the legacy plain-string format below.
   }
   var trimmed = String(raw).trim();
   if (trimmed === 'key-clear-ready') {
@@ -1337,14 +1334,14 @@ function readWipePhase() {
   return 'delete-pending';
 }
 
-// P1-c (Sol round 6/8): delete the wipe-phase file AND VERIFY it's actually gone, returning real
-// success/failure. The old version swallowed unlink failures, so `proceed()` (below) would boot and mint
-// a BRAND-NEW device secret while the phase file silently lingered — and the NEXT boot's key-clear-ready
-// resume would then re-clear THAT fresh secret, leaving the new database unreadable. A verified return lets
-// `proceed()` refuse to mint a new secret unless the phase file is provably gone. ENOENT (already absent)
+// Delete the wipe-phase file AND VERIFY it's actually gone, returning real success/failure. If unlink
+// failures were swallowed, `proceed()` (below) would boot and mint a BRAND-NEW device secret while the phase
+// file silently lingered — and the NEXT boot's key-clear-ready resume would then re-clear THAT fresh secret,
+// leaving the new database unreadable. A verified return lets `proceed()` refuse to mint a new secret unless
+// the phase file is provably gone. ENOENT (already absent)
 // counts as success; any other unlink error, or the file still being present/unverifiable afterward, fails.
 function clearWipePhase() {
-  // Remove BOTH the new phase file AND any migrated-from legacy `.loam-wipe-pending` marker (P1-1): a
+  // Remove BOTH the phase file AND any migrated-from legacy `.loam-wipe-pending` marker: a
   // lingering legacy name would make the NEXT boot re-recognise a pending wipe and re-wipe the fresh DB in a
   // loop. Both must be proven gone (lstat, ENOENT-only) for a clean completion.
   var paths = [WIPE_PHASE_MARKER_PATH, LEGACY_WIPE_PENDING_MARKER_PATH];
@@ -1360,7 +1357,7 @@ function clearWipePhase() {
     // Verify absence with lstatSync, not existsSync: existsSync returns false for MANY stat errors (EACCES,
     // EIO, ...), conflating "confirmed gone" with "could-not-determine" — so a permission/IO fault on the
     // marker path would be misreported as a clean removal. Only ENOENT is proof of absence. Mirrors the
-    // server's `provenAbsence` (apps/server/src/app.ts).
+    // server's `provenAbsence` (apps/server/src/store-lifecycle.ts).
     try {
       fs.lstatSync(p);
       return false; // still present after a "successful" unlink (e.g. reappeared) — not a clean removal
@@ -1371,24 +1368,24 @@ function clearWipePhase() {
     }
   }
   // fsync the parent DIRECTORY so the unlinks are durable BEFORE `proceed()` mints a new device secret /
-  // opens a fresh DB (Sol round-8 P1-5.3): otherwise a power-loss after the unlink but before it reaches
+  // opens a fresh DB: otherwise a power-loss after the unlink but before it reaches
   // stable storage can RESURRECT the phase file as 'key-clear-ready', and the next boot would clear the
   // freshly minted key and strand the new database. A parent-dir fsync failure → NOT-cleared (fail closed).
   return fsyncDir(dataDir);
 }
 
-// P1-2(b)/P1-1: the ONLY standalone place the phase file is ever deleted — never speculatively. `loam-wipe-
+// The ONLY standalone place the phase file is ever deleted — never speculatively. `loam-wipe-
 // complete` means RN VERIFIED the device key is gone, which only ever follows a `key-clear-ready` handoff
 // (the live kill switch's, or a resume's) — so at this point the phase file has served its purpose and is
 // safe to delete. This covers the LIVE path (a kill-switch wipe while the server is already running); the
-// resume path's `proceed()` does its own verified clear-and-decide (P1-c). A failure here is not fatal on
+// resume path's `proceed()` does its own verified clear-and-decide. A failure here is not fatal on
 // the live path: the phase file simply persists, and the NEXT boot's key-clear-ready resume re-drives the
 // clear and retries the delete.
 rnBridge.channel.on('loam-wipe-complete', function () {
   clearWipePhase();
 });
 
-// NOTE (Sol round-4 finding #1): the wipe-restart re-post is intentionally NOT fired here as a bare,
+// NOTE: the wipe-restart re-post is intentionally NOT fired here as a bare,
 // unsequenced signal. On a resumed-wipe boot the device secret MUST be cleared BEFORE any DB key is
 // resolved for this boot — otherwise resolveDbKey races the clear on the same SecureStore item and can
 // encrypt the fresh DB under the very secret we're destroying (or brick it). The re-post + the
@@ -1397,8 +1394,8 @@ var WIPE_RESUME_TIMEOUT_MS = 20000;
 
 /** Best-effort delete of a previous encrypted DB's files. Only called for 'ephemeral' mode, where a
  * fresh random key is generated every launch, so a DB encrypted under a PREVIOUS launch's key can never
- * be opened again — leaving the stale files behind would just make openStore fail on a confusing
- * "file is not a database" error instead of starting clean. ENOENT (nothing to delete on a fresh
+ * be opened again — leaving the stale files behind would only stop the server's boot instead of starting
+ * clean. ENOENT (nothing to delete on a fresh
  * install, or when the DB was never encrypted) and any other error are both swallowed: failing to
  * delete a stale file must never block boot. Logs (never blocks on) the "this deletion wasn't expected"
  * case per the marker comment above, then marks THIS boot as ephemeral for the next one. */
@@ -1417,9 +1414,9 @@ function deleteStaleEphemeralDb() {
     }
   });
   // Uploaded media lives OUTSIDE the database as plaintext files (avatars/, attachments/) — with the DB
-  // gone every one of them is an orphan, and "nothing survives a reboot" must hold for them too (review
-  // 2026-09-04: avatars in particular were never reaped, so they outlived every ephemeral restart). The
-  // server's boot sweeps are the backstop; this is the direct guarantee.
+  // gone every one of them is an orphan, and "nothing survives a reboot" must hold for them too. The
+  // server's boot sweeps (and its own `prepareEphemeralDataDir`) are the backstop; this is the direct
+  // guarantee.
   ['avatars', 'attachments'].forEach(function (name) {
     try {
       fs.rmSync(path.join(dataDir, name), { recursive: true, force: true });
@@ -1430,22 +1427,14 @@ function deleteStaleEphemeralDb() {
   writeEphemeralMarker();
 }
 
-// P2 (Sol round 4): the mesh-courier poll must only ever be armed ONCE per process — `resolveDbEncryptionAndBoot`
-// can now run more than once (a `db_encryption_locked` unlock retry, see `loam-db-unlock` below), and a
+// The mesh-courier poll must only ever be armed ONCE per process — `resolveDbEncryptionAndBoot`
+// can run more than once (a `db_encryption_locked` unlock retry, see `loam-db-unlock` below), and a
 // second `setInterval(refreshMesh, ...)` would stack a redundant concurrent poll rather than replacing
 // the first.
 let meshPollArmed = false;
 
-/**
- * Resolve process.env.LOAM_DB_KEY from the RN key handoff, then require + start the embedded server —
- * OR, for `persistent`/`passphrase` with no usable key, stay LOCKED and do neither (P1-1, Sol round 4:
- * these two modes must never fall back to a plaintext boot). Returns a promise resolving once this
- * attempt is fully settled (server required + readiness probe started, OR left locked) so callers —
- * the initial boot at the bottom of this file, and the `loam-db-unlock` retry listener below — can tell
- * when it's safe to retry again. Never rejects.
- */
 /** Reset EVERY per-attempt boot env var (so nothing from a prior attempt leaks in), then set only the ones
- * this attempt selected (Sol Fable-round-3 P1) — the shared `applyBootEnvTo` in boot-config.js is the single
+ * this attempt selected — the shared `applyBootEnvTo` in boot-config.js is the single
  * production implementation (unit-tested), applied here to the real `process.env`. */
 function applyBootEnv(values) {
   applyBootEnvTo(process.env, values);
@@ -1469,7 +1458,7 @@ function probeEncryptedDriver() {
     // missing .node, a wrong-ABI/arch prebuild, a bad OpenSSL/libc link, a resolution failure...). Log it
     // loudly to logcat so `adb logcat | grep LOAM-DB` surfaces the real cause. (better-sqlite3-multiple-
     // ciphers is the SELF-BUILT vendored ABI-108 arm64 prebuild — the plain driver is digidem's
-    // device-proven prebuild, also vendored, so this one is the untested-on-device path.)
+    // device-proven prebuild, also vendored, so this one is the less-proven on-device path.)
     console.warn(
       'LOAM-DB: SQLCipher driver (better-sqlite3-multiple-ciphers) failed to load; encrypted modes will ' +
         'stay LOCKED (no plaintext fallback). Error: ' +
@@ -1480,10 +1469,17 @@ function probeEncryptedDriver() {
   }
 }
 
+/**
+ * Resolve process.env.LOAM_DB_KEY from the RN key handoff, then require + start the embedded server —
+ * OR, when the attempt locks (e.g. `persistent`/`passphrase` with no usable key, which must never fall
+ * back to a plaintext boot), do neither. Returns a promise resolving once this attempt is fully settled
+ * (the embedded server's boot settled, OR left locked) so callers — always via `bootWithWipeResume()` —
+ * can tell when it's safe to retry again. Never rejects.
+ */
 function resolveDbEncryptionAndBoot() {
   return requestDbKey(DB_KEY_TIMEOUT_MS)
     .then(function (result) {
-      // Every attempt is a FRESH boot configuration (Sol Fable-round-3 P1): decide the env purely, DELETE
+      // Every attempt is a FRESH boot configuration: decide the env purely, DELETE
       // every per-attempt boot var, then apply ONLY this attempt's — so a stale LOAM_DB_KEY / migrate-from /
       // request-id from an earlier (e.g. encrypted) attempt can never leak into an off/locked/downgrade retry
       // in the SAME process (db.ts gives encryptionKey precedence over the plaintext driver, so a leaked key
@@ -1540,7 +1536,7 @@ function resolveDbEncryptionAndBoot() {
       return cfg.outcome;
     })
     .catch(function (err) {
-      // FAIL CLOSED (Sol Fable-round-3 P1): an unexpected error must NOT proceed under whatever key a prior
+      // FAIL CLOSED: an unexpected error must NOT proceed under whatever key a prior
       // attempt happened to leave installed. Clear EVERY boot var and lock; the operator retries.
       applyBootEnv({});
       console.error('Unexpected error resolving DB encryption for boot', err);
@@ -1552,17 +1548,15 @@ function resolveDbEncryptionAndBoot() {
     })
     .then(function (outcome) {
       if (outcome === 'locked') {
-        // Stay locked (P1-1): do NOT require the server bundle — no plaintext fallback for
-        // persistent/passphrase — and do NOT start the readiness probe, since there is no server to
+        // Stay locked: do NOT require the server bundle (no plaintext fallback) and do NOT start the readiness probe, since there is no server to
         // probe. `global.__loamReportBootError` above already told the host screen; the
         // `loam-db-unlock` listener re-invokes this whole function once the operator retries.
         return;
       }
       try {
         require('./loam-server.js');
-        // P2 (Sol round 4): a FRESH readiness-probe chain for every attempt that gets this far —
-        // including a retry after a `db_encryption_locked` unlock, mirroring the same fix applied to
-        // the `loam-db-start-fresh` retry below. Superseded automatically if this isn't the latest call
+        // A FRESH readiness-probe chain for every attempt that gets this far — including a retry after a
+        // `db_encryption_locked` unlock, like the `loam-db-start-fresh` retry above. Superseded automatically if this isn't the latest call
         // (see `startReadinessProbe`'s doc comment).
         startReadinessProbe();
         // Start the mesh courier poll once the server is required. refreshMesh no-ops (404) until an
@@ -1573,12 +1567,12 @@ function resolveDbEncryptionAndBoot() {
           setInterval(refreshMesh, MESH_POLL_MS);
           setTimeout(refreshMesh, 5000);
         }
-        // JOIN the embedded server's REAL boot promise (Sol Fable-round-2 P1-B) so this — and therefore
+        // JOIN the embedded server's REAL boot promise so this — and therefore
         // `bootInFlight`/`dbUnlockRetryInFlight` — stays in flight until the DB open/listen has actually
         // SETTLED, not merely until the synchronous `require` returns. Without this the single-flight guard
         // clears while `buildApp`/`openInitialStore` are still async, so a duplicate/later unlock could
-        // accept another attempt and overwrite the boot's `LOAM_DB_KEY_REQUEST_ID` before R1's open finishes.
-        // `__loamBootEmbeddedServer` is re-entrant-safe (embedded-main.ts RF2): the module-scope boot fired
+        // accept another attempt and overwrite the boot's `LOAM_DB_KEY_REQUEST_ID` before the first open
+        // finishes. `__loamBootEmbeddedServer` is re-entrant-safe (see embedded-main.ts): the module-scope boot fired
         // on first require, so this returns that same in-flight promise (and drives a fresh boot on a cached
         // retry). It never rejects (its own boot errors are reported + swallowed inside).
         var bootHook = global.__loamBootEmbeddedServer;
@@ -1594,7 +1588,7 @@ function resolveDbEncryptionAndBoot() {
 
 notify('starting');
 
-// P1-1 (Sol round 8): route on the durable wipe PHASE, not mere marker presence.
+// Route on the durable wipe PHASE, not mere marker presence.
 //   - phase `undefined`      → no wipe pending → resolve a key + boot normally.
 //   - phase `delete-pending` → an earlier fixed-key wipe never PROVED its artifacts gone. DEFER to the
 //                              server's boot-time retry: resolve a key + boot the server, which re-runs artifact
@@ -1620,9 +1614,9 @@ notify('starting');
 // own resume wait is still pending) joins the SAME wait rather than registering a second overlapping
 // `loam-wipe-complete` listener/timer.
 var wipeResumeWait;
-// RF-d (adversarial review, round 5): a single-flight guard for the NO-resume fast path below. The
-// resume path is already a singleton via `wipeResumeWait`, but the direct `return
-// resolveDbEncryptionAndBoot()` had no guard — two concurrent callers (the initial boot at the bottom of
+// A single-flight guard for the NO-resume fast path below. The resume path is already a singleton via
+// `wipeResumeWait`; without this guard on the direct `resolveDbEncryptionAndBoot()` call, two concurrent
+// callers (the initial boot at the bottom of
 // this file and a `loam-db-unlock` retry firing in the same tick) could each start an overlapping boot
 // of the embedded server. Cleared once the in-flight boot settles (`resolveDbEncryptionAndBoot` never
 // rejects), so a genuine SEQUENTIAL retry after a settled attempt still runs.
@@ -1658,7 +1652,7 @@ function bootWithWipeResume() {
       proceeded = true;
       clearTimeout(timer);
       rnBridge.channel.removeListener('loam-wipe-complete', proceed);
-      // P1-c (Sol round 6/8): RN only posts `loam-wipe-complete` after `clearStoredDbKeys` VERIFIED the
+      // RN only posts `loam-wipe-complete` after `clearStoredDbKeys` VERIFIED the
       // device secret is gone — but we must ALSO confirm OUR OWN wipe-phase file is actually deleted before
       // booting. If the delete failed, booting now would mint a fresh device secret while the phase file
       // lingers, and the NEXT boot's key-clear-ready resume would clear THAT fresh secret and brick the new

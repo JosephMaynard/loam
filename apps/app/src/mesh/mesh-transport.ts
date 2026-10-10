@@ -83,9 +83,9 @@ export class MeshTransport {
     if (missing.length === 0) {
       return true;
     }
-    // Request EXACTLY what native reports missing — native owns the correct API/capability split (P1). The
-    // RN side must not hardcode its own set, or it re-introduces the API 31/32 bug (requesting the
-    // API-33-only NEARBY_WIFI_DEVICES and omitting the ACCESS_FINE_LOCATION Aware needs there).
+    // Request EXACTLY what native reports missing — native owns the correct API/capability split. The
+    // RN side must not hardcode its own set, or on API 31/32 it would request the API-33-only
+    // NEARBY_WIFI_DEVICES and omit the ACCESS_FINE_LOCATION Aware needs there.
     await PermissionsAndroid.requestMultiple(missing as Permission[]);
     missing = await getMissingMeshPermissions();
     return missing.length === 0;
@@ -116,7 +116,7 @@ export class MeshTransport {
     this.startInFlight = attempt;
     // Clear the field only if it STILL points at this attempt: a stop() (which nulls it) + a newer start()
     // may have replaced it while this one was pending, and this attempt must not erase the newer one (which
-    // would let a third caller start concurrently and double-register) (P1). Use `then(clear, clear)` (not a
+    // would let a third caller start concurrently and double-register). Use `then(clear, clear)` (not a
     // detached `finally`): the derived promise is FULFILLED in both branches, so a rejected `doStart` can't
     // surface as an unhandled rejection on this side channel. The caller still gets `attempt` to handle.
     const clear = (): void => {
@@ -138,7 +138,7 @@ export class MeshTransport {
     const gen = this.generation;
     const granted = await this.ensurePermissions();
     // A stop() (or another start()) happened while the permission dialog was up — abandon this startup
-    // rather than register listeners + start the radios after teardown (P1-4).
+    // rather than register listeners + start the radios after teardown.
     if (gen !== this.generation) {
       return false;
     }
@@ -192,7 +192,7 @@ export class MeshTransport {
   /** Stop the radios and drop event subscriptions. Idempotent. */
   stop(): void {
     // Bump the generation so any in-flight `doStart()` (awaiting permissions) abandons instead of
-    // resuming into a started state after this teardown (P1-4).
+    // resuming into a started state after this teardown.
     this.generation += 1;
     this.startInFlight = null;
     for (const unsubscribe of this.unsubscribers) {

@@ -1,6 +1,6 @@
 'use strict';
 
-// Durable, three-outcome write of the launcher's config.json (Sol Fable-round P1-4) — split out of main.js
+// Durable, three-outcome write of the launcher's config.json — split out of main.js
 // into its own dependency-free CJS module (injected `fs`, no `require('rn-bridge')`, no top-level side
 // effects) SPECIFICALLY so the filesystem-durability outcomes can be unit-tested with fault injection (see
 // apps/app/src/lib/config-write.test.ts). main.js pulls in `rn-bridge` and runs boot side effects the instant
@@ -46,7 +46,7 @@ function fsyncDirWith(fs, dir) {
 function durableWriteConfig(fs, dataDir, configPath, contents) {
   var tmpPath = configPath + '.tmp-' + process.pid + '-' + Date.now();
   // The ENTIRE pre-publication flow (dir prep → staging write → CONTENTS fsync → rename) is a single
-  // definite-failure boundary (CodeRabbit): a throw from ANY step means we have NOT durably published, so we
+  // definite-failure boundary: a throw from ANY step means we have NOT durably published, so we
   // best-effort unlink the temp and report 'failed' — never rename over a good config with an unflushed one,
   // and never leave a `.tmp-*` sidecar behind. The existing config.json is untouched on every failure here
   // (the rename is the only step that could replace it, and a failed rename leaves the original in place).

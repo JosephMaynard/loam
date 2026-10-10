@@ -11,8 +11,10 @@ import { defaultLoamConfig } from "./config.js";
 import type { AppOptions } from "./types.js";
 
 /**
- * Follow-ups to the 2026-09-25 pre-release review. Each security test was mutation-checked: with its fix
- * reverted, it fails.
+ * Boot paths that meet state an older build (or a failed open) left behind, with the session-id minter and
+ * the keyed store open fault-injected: a colliding minted id, an older wipe journal, a keyed open that fails
+ * or writes plaintext, a leftover mesh identity row, a persisted config row that needs repair. Each
+ * security test was mutation-checked: with its fix reverted, it fails.
  */
 
 // Candidate ids the session-id minter must try first (each is still checked against the caller's
@@ -284,5 +286,21 @@ describe("a persisted config row repaired at load is written back once", () => {
     await second.close();
     const third = await boot(dataDir);
     expect(third.store.getConfigValue("config")).toBe(valid);
+  });
+});
+
+describe("flat-JSON files from before the SQLite store are ignored", () => {
+  it("boots a fresh node over a malformed users.json, leaving the file alone", async () => {
+    const dataDir = tempDataDir();
+    // The pre-SQLite store's file names. The importer that read them (and threw on a row the schema refused,
+    // failing the boot) is gone: every released LOAM has kept its data in SQLite.
+    writeFileSync(join(dataDir, "users.json"), JSON.stringify([{ id: "user.old", displayName: 7 }]));
+    writeFileSync(join(dataDir, "messages.json"), "not json");
+
+    const app = await boot(dataDir);
+    expect((await app.server.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
+    expect(app.store.loadUsers().some((user) => user.id === "user.old")).toBe(false);
+    expect(readFileSync(join(dataDir, "messages.json"), "utf8")).toBe("not json");
+    expect(existsSync(join(dataDir, "users.json.bak"))).toBe(false);
   });
 });

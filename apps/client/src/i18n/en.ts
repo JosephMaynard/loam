@@ -144,6 +144,7 @@ export const en = {
   "people.pendingLoadError": "Unable to load pending joins.",
   "people.pendingLoading": "Loading pending joins…",
   "people.pendingEmpty": "Nobody is waiting to join.",
+  "people.pendingSince": "Asked to join {when}",
   "people.approve": "Approve",
   "people.deny": "Deny",
 
@@ -573,6 +574,7 @@ export const en = {
   "error.thread_has_replies": "This thread has replies from other people. Only an admin can delete it",
   "error.too_many_attempts": "Too many attempts",
   "error.too_many_claim_attempts": "Too many claim attempts; try again later",
+  "error.rate_limited": "Too many requests; wait a moment and try again",
   "error.message_create_failed": "Unable to create message",
   "error.websocket_unauthenticated": "Unauthenticated websocket",
   "error.unknown_attachment": "Unknown attachment",
@@ -623,7 +625,7 @@ export const en = {
   "moderation.reports.escalate": "Escalate",
   "moderation.reports.loadError": "Could not load reports",
 
-  // Channel pinning (P13) + per-channel retention (P12)
+  // Channel pinning + per-channel retention
   "admin.pin": "Pin",
   "admin.unpin": "Unpin",
   "admin.metaPinned": "Pinned",

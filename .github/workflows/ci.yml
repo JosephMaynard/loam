@@ -9,10 +9,11 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same branch or PR cancels the run it supersedes.
+# A newer push to a PR cancels the run it supersedes. Pushes to master never cancel or queue behind each
+# other: each gets its own group (the run id), so every commit on master keeps its own result.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -43,6 +44,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Known advisories in production dependencies at high or critical severity fail the build. The few
+      # with no fixed release that reach LOAM only through build tooling are listed, each with its reason,
+      # under `auditConfig.ignoreGhsas` in pnpm-workspace.yaml.
+      - name: Audit dependencies
+        run: pnpm audit --prod --audit-level=high
+
       - name: Build
         run: pnpm run build
 
@@ -57,6 +64,11 @@ jobs:
       # → `pnpm -r --if-present test`.
       - name: Android host typecheck
         run: pnpm --filter app typecheck
+
+      # The server build excludes its test files (and src/test-support/), and Vitest strips types without
+      # checking them, so typecheck the server's tests on their own.
+      - name: Server test typecheck
+        run: pnpm --filter @loam/server typecheck:test
 
       # The workspace suites never run the PUBLISHED CLI. Pack cli/, install the tarball as a user would
       # (catches files missing from `files` and an optional SQLCipher driver that won't install), and

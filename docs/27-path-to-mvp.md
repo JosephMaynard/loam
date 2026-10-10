@@ -32,11 +32,11 @@ chat app into a platform" phase — none of them block the anonymous/ephemeral c
 
 - **AT-Proto-inspired portable identity + signed repos (`docs/23`, M4)** — the flagship post-MVP epic.
   Opt-in, and the *opposite* of the anonymous/ephemeral default, so it is never on the MVP critical path.
-  Sol round-2 review runs *in parallel* with MVP build (§4) so Phase 0 can start the moment the MVP lands.
-  Identity **Option A (portable pseudonym + encrypted backup)** is the owner's lean; confirm with Sol.
+  The round-2 external review runs *in parallel* with MVP build (§4) so Phase 0 can start the moment the MVP lands.
+  Identity **Option A (portable pseudonym + encrypted backup)** is the owner's lean; confirm it in that review.
 - **E2EE for DMs/private channels (`docs/08` Layer 2, S2)** — the `hardened` protest-model upgrade. Note
   the honest caveat (`docs/23`): E2EE protects against an honest-but-curious host, not a *malicious* host
-  serving the PWA JS — only the signed APK does. Worth a Sol/product call before committing.
+  serving the PWA JS; only the signed APK does. Worth a review and product call before committing.
 - **RAG over local content (P1)**, **offline map renderer (P8)**, **mesh Phase 3+ radios (M1–M3)**,
   optional authentication (S3), backup/export (P16). Each its own epic/PR, each with an open decision or a
   hardware/infra dependency.
@@ -49,7 +49,7 @@ design (owner wants few big PRs), split into commit-groups. Built in this order:
 
 > **Delivered in [#109](https://github.com/MagicZebraLtd/loam/pull/109):** groups A (report loop), B (C1),
 > the pin/per-channel-TTL/@mentions subset of C, E (S5), and F (i18n en-fallback + D2). **Deferred to
-> follow-ups** (each with rationale in §5): group D (OpenRouter cloud-LLM — pending the Sol consent review),
+> follow-ups** (each with rationale in §5): group D (OpenRouter cloud-LLM, pending the external consent review),
 > typing indicators / join-request / non-image file attachments (rest of C), S7 (rest of E), and the full
 > 15-locale translation batch. So the list below is the *plan*; the PR shipped the safe, self-contained
 > subset.
@@ -105,7 +105,7 @@ whatever breaks; I build the fixes, the owner runs the checks.
 
 **→ MVP = PR 1 + PR 2 green. Ship to testers.**
 
-## 4. Sol review track (parallel, non-blocking)
+## 4. External review track (parallel, non-blocking)
 
 Runs alongside the build; does not gate the MVP:
 

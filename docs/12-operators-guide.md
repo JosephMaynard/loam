@@ -41,7 +41,8 @@ Install the APK and open LOAM. Setup asks four things:
 3. **Name.** What people see when they join (blank means "LOAM").
 4. **How people connect:**
    - **Hotspot:** the phone makes its own Wi-Fi. Works with no router and no internet. Android asks for
-     Nearby devices and location permission to start it (LOAM never reads your location).
+     the Nearby devices permission to start it (location on Android 12 and older; LOAM never reads
+     your location).
    - **Wi-Fi:** everyone on the Wi-Fi the phone is already on. No hotspot, no extra permission. Guest,
      hotel and campus Wi-Fi often stop devices reaching each other; if nobody can connect, use Hotspot.
    - **Join another LOAM network:** this phone becomes a second node of a network that's already
@@ -101,6 +102,32 @@ from the config file or **Admin → Bootstrap**:
 
 (The Android app and `loamnet` use their own `hostDevice` strategy, whatever is configured: admin comes
 from the host's own screen.)
+
+### Behind an HTTPS reverse proxy: not supported
+
+LOAM is meant to be reached at a plain `http://` address on the local network, and every join link and QR
+it prints is `http://` on purpose (docs/08 explains why, and what protects the traffic instead). Putting a
+node behind a proxy that terminates TLS for a domain name (nginx, Caddy, a tunnel service) isn't a
+supported setup:
+
+- The server only answers a `Host` that is an IP address, `localhost`, a `.local` name or its own join
+  host. Any other name gets `421 host_not_allowed` unless `LOAM_JOIN_HOST` is set to it, and the proxy
+  must pass the browser's `Host` header through unchanged.
+- The live connection (`/ws`) is refused with a 403. The server checks that the page's `Origin` matches
+  the `Host` the request came in on, port included. Behind the proxy the page's Origin is
+  `https://chat.example.org`, port 443, while the server, which never sees the TLS, reads the bare
+  `Host: chat.example.org` as port 80. Pages load, but nothing updates live.
+- LOAM ignores `X-Forwarded-For` and `X-Forwarded-Proto` (no `trustProxy`, so a forged header can't dodge
+  the per-address limits). Every visitor looks like the proxy's address, so they all share one rate-limit
+  budget, including the default of 60 new identities per 10 minutes, and the session cookie isn't
+  marked `Secure`.
+
+If you accept those limits, one workaround gets the live connection working: start the server with
+`CLIENT_PORT=443` and `LOAM_JOIN_HOST=<the domain>`, and have the proxy forward WebSocket upgrades and
+the original `Host`. `CLIENT_PORT` is the port LOAM advertises, and the `/ws` check also accepts an Origin
+on that port. The catch is that LOAM then advertises `http://<the domain>:443` everywhere (the join link,
+the QR, and the address it gives when linking networks), and that address doesn't open. Share the
+`https://` address yourself, and don't use that node's QR to join or link.
 
 ## 3. Letting people in
 

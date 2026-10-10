@@ -1,5 +1,4 @@
-// LoamConfig defaults, layered merge, and legacy-profile reconciliation. Extracted from app.ts
-// (2026-09-04 split).
+// LoamConfig defaults, layered merge, and legacy-profile reconciliation.
 import { BotIdSchema, LLM_MODEL_MAX_LENGTH, LoamConfigSchema, securityProfilePreset, type LoamConfig, type LoamConfigUpdate } from "@loam/schema";
 
 import { hashSecret, isHashedSecret } from "./secrets.js";

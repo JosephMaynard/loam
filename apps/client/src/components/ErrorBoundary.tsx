@@ -8,10 +8,9 @@ interface ErrorBoundaryState {
 }
 
 /**
- * Top-level render-error boundary (pre-release review 2026-09-25). Without one, any exception thrown
- * while rendering (a malformed route used to be enough) unmounted the whole tree and left a blank white
- * page with no way back but a manual reload. This shows a recoverable error screen instead: "Go to
- * channels" resets the route to the channel list and remounts the app; "Reload" is the heavier fallback.
+ * Top-level render-error boundary. Without one, any exception thrown while rendering would unmount the
+ * whole tree and leave a blank white page with no way back but a manual reload. This shows a recoverable
+ * error screen instead: "Go to channels" resets the route to the channel list and remounts the app; "Reload" is the heavier fallback.
  * It sits OUTSIDE the router so a remount re-reads the (reset) location.
  */
 export class ErrorBoundary extends Component<{ children: ComponentChildren }, ErrorBoundaryState> {

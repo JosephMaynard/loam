@@ -22,7 +22,7 @@ import {
   resetTransportStateForTests,
   retainImageUrl,
   TransportNeedsQrError,
-  UnsealedTunnelResponseError,
+  UnsealedResponseError,
 } from "./transport";
 import { useEncryptedImage } from "./use-encrypted-image";
 
@@ -125,8 +125,8 @@ describe("a pinned (tunnel) client never accepts an unsealed reply (finding #2)"
 
     await ensureSession("required", host.publicKey);
     const failure = await encryptedFetch("GET", "/api/mesh/identity").catch((error: unknown) => error);
-    expect(failure).toBeInstanceOf(UnsealedTunnelResponseError);
-    expect((failure as UnsealedTunnelResponseError).status).toBe(200);
+    expect(failure).toBeInstanceOf(UnsealedResponseError);
+    expect((failure as UnsealedResponseError).status).toBe(200);
   });
 
   it("maps an unsealed 503 (node restarting) to an error, not a Response", async () => {
@@ -145,7 +145,7 @@ describe("a pinned (tunnel) client never accepts an unsealed reply (finding #2)"
     vi.stubGlobal("fetch", node);
 
     await ensureSession("required", host.publicKey);
-    await expect(encryptedFetch("POST", "/api/messages", { body: "hi" })).rejects.toBeInstanceOf(UnsealedTunnelResponseError);
+    await expect(encryptedFetch("POST", "/api/messages", { body: "hi" })).rejects.toBeInstanceOf(UnsealedResponseError);
     expect(node.mock.calls.filter(([url]) => url === "/api/transport/tunnel")).toHaveLength(1);
   });
 

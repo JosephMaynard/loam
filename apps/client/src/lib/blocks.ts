@@ -4,7 +4,7 @@
  *
  * The copy is also cached in IndexedDB (the `sync` store, tagged with the identity it belongs to), so a cold
  * or offline boot hides blocked authors' cached posts from the first render instead of showing them — and
- * counting them unread — until the fetch lands (pre-release review 2026-09-25). A wipe deletes the database
+ * counting them unread — until the fetch lands. A wipe deletes the database
  * and an identity change clears every store, so the cache never outlives the identity it belongs to.
  */
 import { UserBlockListSchema, type Message } from "@loam/schema";

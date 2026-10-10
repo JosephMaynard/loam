@@ -182,7 +182,7 @@ client → server   AAD "loam.ws.proof.v1"        { type:"proof",     connection
 - **Unsealed tunnel replies are never used** (pre-release review 2026-09-25). On a live tunnel session the
   client acts on exactly one unsealed reply: a `401` to a `GET`/`HEAD`, which triggers one re-handshake +
   retry (an unsafe method is never retried — the outer status is unauthenticated and the request may already
-  have run). Every other unsealed reply (403, 409, 429, 503, …) surfaces as an `UnsealedTunnelResponseError`,
+  have run). Every other unsealed reply (403, 409, 429, 503, …) surfaces as an `UnsealedResponseError`,
   never as a `Response` — otherwise an on-path attacker could forge content such as a `GET /api/mesh/identity`
   card (mesh contact key substitution), messages or images.
 
@@ -277,11 +277,11 @@ session under handshake-flood pressure (availability nuisance — the persisted 
 identity); a banned/revoked user can still re-mint a *fresh anonymous* identity (the existing ephemeral
 model — clearing a cookie already does this today; no access to the old identity's private state).
 
-*Pending external implementation review (Sol) before merge; this is the implementation spec.*
+*Pending external implementation review before merge; this is the implementation spec.*
 
 ## 16. Device-wipe lifecycle hardening (external review, folded in)
 
-External review (Sol) then focused on the **device-wipe lifecycle** — the surface that decommissions a
+The external review then focused on the **device-wipe lifecycle**, the surface that decommissions a
 device's local + server credentials — which proved deceptively deep across the reload / multi-tab /
 blackholed-network dimensions. The findings below were fixed:
 

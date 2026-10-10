@@ -1,5 +1,4 @@
-// Anonymous identity + session-token primitives and cookie helpers. Extracted from app.ts
-// (2026-09-04 split).
+// Anonymous identity + session-token primitives and cookie helpers.
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import { generateDisplayName } from "@loam/display-name";

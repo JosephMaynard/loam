@@ -1,5 +1,5 @@
-// Admin: claim, config read/patch, kill switch, and the unauthenticated panic token. Extracted verbatim
-// from app.ts (2026-09-04 split) over the shared AppContext.
+// Admin: claim, config read/patch, kill switch, and the unauthenticated panic token, registered over the
+// shared AppContext.
 import { AdminClaimRequestSchema, KillSwitchRequestSchema, type LoamConfig, type LoamConfigUpdate, LoamConfigUpdateSchema, PanicRequestSchema, UserSchema } from "@loam/schema";
 import { readFileSync } from "node:fs";
 
@@ -68,8 +68,9 @@ export function registerAdminRoutes(ctx: AppContext): void {
     "/api/admin/claim",
     // `allowList: () => false` so internal tunnel re-dispatches count too: route configs otherwise inherit
     // the global limiter's tunnel exemption, which would lift this cap for any client using the tunnel
-    // (the same reason `semanticRateLimit` exists — see transport-server.ts).
-    { config: { rateLimit: { max: 10, timeWindow: "1 minute", allowList: () => false } } },
+    // (the same reason `semanticRateLimit` exists — see transport-server.ts). Counted per address, so an
+    // IPv6 neighbour can't spend the admin's budget.
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute", allowList: () => false, perAddress: true } } },
     async (request, reply) => {
     const body = AdminClaimRequestSchema.safeParse(request.body);
 
@@ -83,7 +84,7 @@ export function registerAdminRoutes(ctx: AppContext): void {
       // Spend a one-time code from the host's screen anyway, so a link opened in a browser that was already
       // admin isn't left usable by someone else for the rest of its 10 minutes.
       ctx.adminClaimCodes.consume(body.data.secret);
-      return currentUser;
+      return ctx.rolesVisibleUser(currentUser);
     }
 
     const strategy = ctx.effectiveAdminBootstrap();
@@ -91,7 +92,7 @@ export function registerAdminRoutes(ctx: AppContext): void {
 
     // `hostDevice` is claimable only when a launcher actually minted a token this boot — a desktop node
     // merely CONFIGURED with the strategy has nothing to claim against, so it answers like `none` and never
-    // touches the attempt limiter (round-2 review).
+    // touches the attempt limiter.
     if (
       (strategy !== "setupCode" && strategy !== "passphrase" && strategy !== "hostDevice") ||
       (strategy === "hostDevice" && !hostToken)
@@ -102,18 +103,20 @@ export function registerAdminRoutes(ctx: AppContext): void {
     // Persist first, then mirror onto the live record and broadcast (the house mutator order), and clear
     // `pending`: under `access.joinPolicy: "approval"` the claimer's session was created pending, and an
     // admin still marked pending is locked out of every participation-gated route — including the
-    // approval queue — so a fresh approval-policy node would have no one able to let anyone in.
+    // approval queue — so a fresh approval-policy node would have no one able to let anyone in. The reply is
+    // the claimer's own record as every self-facing route shows it (`rolesVisibleUser`: roles, never
+    // `shadowBanned`), not the stored row.
     const promote = () => {
       const next = UserSchema.parse({ ...currentUser, isAdmin: true, pending: false });
       ctx.store.upsertUser(next);
       Object.assign(currentUser, next);
       ctx.broadcast({ type: "userUpserted", user: currentUser });
-      return currentUser;
+      return ctx.rolesVisibleUser(currentUser);
     };
 
-    // `hostDevice` (review 2026-09-04): the secret is the launcher's per-boot host token, which only the
+    // `hostDevice`: the secret is the launcher's per-boot host token, which only the
     // host's own WebView receives — never a config value, never advertised, never persisted. A CORRECT
-    // token is honoured BEFORE the per-IP attempt limiter (round-2 review): the host's own claim arrives from
+    // token is honoured BEFORE the per-IP attempt limiter: the host's own claim arrives from
     // loopback, a bucket every co-located Android app can also hit, and a 256-bit random token cannot be
     // brute-forced, so exempting a match costs nothing — while a wrong guess still counts against the bucket.
     if (strategy === "hostDevice" && hostToken && timingSafeEqualStrings(body.data.secret, hostToken)) {
@@ -127,7 +130,8 @@ export function registerAdminRoutes(ctx: AppContext): void {
       return promote();
     }
 
-    // Key on the caller's IP: a session-id key could be reset by simply omitting the cookie.
+    // Key on the caller's address: a session-id key could be reset by simply omitting the cookie. Per address
+    // with a wider per-/64 bound (`attemptRateLimited`), so neither a LAN neighbour nor cycling addresses wins.
     if (ctx.attemptRateLimited(ctx.claimAttempts, request.ip)) {
       return reply.code(429).send(errorBody("Too many claim attempts; try again later"));
     }
@@ -179,7 +183,7 @@ export function registerAdminRoutes(ctx: AppContext): void {
       return reply.code(400).send(errorBody('Confirmation required: send { "confirm": "wipe" }'));
     }
 
-    // P1-1 (Sol round 8): reflect the wipe RESULT — never report success on an INCOMPLETE wipe (deletion
+    // Reflect the wipe RESULT — never report success on an INCOMPLETE wipe (deletion
     // incomplete/unverifiable → the node is 503-locked and the wipe is retried on the next boot).
     const result = await ctx.executeKillSwitch();
     if (!result.complete) {
@@ -198,8 +202,9 @@ export function registerAdminRoutes(ctx: AppContext): void {
         rateLimit: {
           max: 10,
           timeWindow: "1 minute",
-          // Count internal tunnel re-dispatches too (see the claim route above).
+          // Count internal tunnel re-dispatches too, per address (see the claim route above).
           allowList: () => false,
+          perAddress: true,
           // Answer 404 (not the default 429) when the route limit trips, so a rate-limited prober
           // sees the same "not found" as every other failure path here — no 429 to reveal the route.
           errorResponseBuilder: () => {
@@ -232,7 +237,7 @@ export function registerAdminRoutes(ctx: AppContext): void {
       return reply.code(404).send(errorBody("Not found"));
     }
 
-    // P1-1 (Sol round 8): the token holder proved it, so an incomplete wipe is reported honestly (503),
+    // The token holder proved it, so an incomplete wipe is reported honestly (503),
     // not as a false `{ ok: true }`. Only genuine probing (bad/absent token, above) stays a uniform 404.
     const result = await ctx.executeKillSwitch();
     if (!result.complete) {
@@ -335,7 +340,7 @@ export function commitAdminConfig(ctx: AppContext, next: LoamConfig): "ok" | "fa
       ctx.sync.peerSyncStatus.delete(url);
     }
   }
-  // Same cleanup for queued missing-attachment retries (F2, docs/15 A6): a removed peer's work items
+  // Same cleanup for queued missing-attachment retries: a removed peer's work items
   // would otherwise sit in the table until `sync.retryMissingAttachments`' own defensive check happened to
   // run — drop them immediately so a peer the operator just removed is never contacted again.
   for (const record of ctx.store.loadMissingAttachments()) {
@@ -359,7 +364,7 @@ export function commitAdminConfig(ctx: AppContext, next: LoamConfig): "ok" | "fa
     // This host device pins the effective strategy to `hostDevice` (its launcher's per-boot token — see
     // `effectiveAdminBootstrap`). The PATCH is persisted as the operator's intent (it applies the moment
     // this data dir runs without a host token), but minting/advertising a setup code or passphrase claim
-    // here would announce a claim path that can never succeed on this device (round-2 review).
+    // here would announce a claim path that can never succeed on this device.
     ctx.server.log.warn(
       `admin.bootstrap "${next.admin.bootstrap}" saved, but this host device enforces "hostDevice": the setting takes effect only where no host token is minted`,
     );

@@ -7,8 +7,8 @@ export function sortUsers(users: Iterable<User>): User[] {
 
 /**
  * Apply the server's FULL user list (`GET /api/users` returns every user this caller may see) to the
- * cached roster. Additive merging alone kept users the server no longer returns — banned, pending, or
- * gone after a node reset — in memory and IndexedDB forever (pre-release review 2026-09-25). A cached user
+ * cached roster. Additive merging alone would keep users the server no longer returns — banned, pending,
+ * or gone after a node reset — in memory and IndexedDB forever. A cached user
  * missing from the list is dropped only if it was already held when the request started (`preFetchIds`):
  * one who arrived by a live `userUpserted` while the request was in flight isn't a removal.
  *

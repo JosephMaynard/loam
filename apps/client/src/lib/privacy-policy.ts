@@ -5,16 +5,14 @@
  * rendered as elements (never as HTML); `**bold**` and `` `code` `` are the only inline markup.
  */
 
+import { CONTACT_EMAIL, ISSUE_TRACKER, WEBSITE } from "./contact";
+
+export { CONTACT_EMAIL, ISSUE_TRACKER, WEBSITE };
+
 export type PolicyBlock = { kind: "p"; text: string } | { kind: "list"; items: string[] };
 export type PolicySection = { heading: string; blocks: PolicyBlock[] };
 
 export const PRIVACY_POLICY_UPDATED = "7 October 2026";
-
-/** Where people report problems: LOAM has no telemetry, so these are the only way we hear of one. */
-export const ISSUE_TRACKER = "github.com/MagicZebraLtd/loam/issues";
-/** LOAM's website, where people report problems (its "Report a problem" section) and find ways to support it. */
-export const WEBSITE = "loamnet.com";
-export const CONTACT_EMAIL = "opensource@magiczebra.co.uk";
 
 export const PRIVACY_POLICY: PolicySection[] = [
   {
